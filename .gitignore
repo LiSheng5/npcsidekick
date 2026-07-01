@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+api_key.txt
+.env
+agent/memory/store/
+.claude/sessions/
+.claude/usage-data/
+.claude/shell-snapshots/
