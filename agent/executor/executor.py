@@ -178,7 +178,13 @@ class Executor:
         """让 LLM 决定如何执行这一步。"""
 
         # 构建执行上下文
+        # Reasonix 风格: "stable environment summary" — 对话历史始终在目标之后
         context_parts = [f"## 用户原始目标\n{plan.goal}"]
+
+        # 注入对话历史 (从 Planner 传递，包含最近的消息)
+        conversation_history = plan.context.get("conversation_history", "")
+        if conversation_history:
+            context_parts.append(f"## 对话历史 (上下文)\n{conversation_history}")
 
         if ctx.previous_results:
             context_parts.append("## 之前步骤的结果")
@@ -191,13 +197,17 @@ class Executor:
         context_str = "\n".join(context_parts)
 
         # 如果步骤明确推荐了工具且不需要 LLM 参与决策
-        if step.tool and step.tool_input and not self._needs_llm_decision(step):
-            call = ToolCall(
-                tool=step.tool,
-                input=step.tool_input,
-                reason=step.description,
-            )
-            return self.router.dispatch(call)
+        if step.tool and not self._needs_llm_decision(step):
+            tool_schema = self.registry.get_schema(step.tool)
+            required_params = tool_schema.parameters.get("required", []) if tool_schema else []
+            # 如果提供了工具输入，或者该工具没有必需参数 → 直接分发
+            if step.tool_input or not required_params:
+                call = ToolCall(
+                    tool=step.tool,
+                    input=step.tool_input or {},
+                    reason=step.description,
+                )
+                return self.router.dispatch(call)
 
         # 构建消息
         system_prompt = EXECUTOR_SYSTEM_PROMPT.format(

@@ -20,13 +20,17 @@ AgentOrchestrator — 主编排器，连接所有 4 层。
       → if STOP: break
       → Memory.log_execution()
     → synthesize answer → return to User
+
+流式版本 run_stream() 在相同流程上增加 AsyncGenerator[StreamEvent]，
+实时产出进度事件供 display.py 渲染。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, AsyncGenerator, Dict, List, Optional, Callable
 
 from agent.planner.planner import Planner
 from agent.planner.task_plan import TaskPlan, Step, StepStatus
@@ -37,8 +41,11 @@ from agent.tools.router import ToolRouter
 from agent.tools.registry import ToolRegistry, get_registry
 from agent.tools.adapters.openai_adapter import OpenAIAdapter
 from agent.tools.schema import ToolCall, ToolResult, ToolResultStatus
+from agent.tools.skill import Skill
 from agent.memory.memory_manager import MemoryManager
 from agent.llm.client import LLMClient
+from agent.llm.types import StreamEvent, StreamEventType
+from agent.logging_config import log as _log
 import config
 
 
@@ -111,23 +118,20 @@ class AgentOrchestrator:
         self.memory.add_message("user", user_input)
 
         # ── Phase 1: PLAN ──────────────────────────────
-        print(f"\n{'='*60}")
-        print(f"🧠 PLANNER: 分析任务...")
-        print(f"{'='*60}")
+        log = _log.bind(phase="plan")
+        log.info("planning_started", task=user_input[:80])
 
         plan = self.planner.plan(user_input)
         self.current_plan = plan
-        print(f"📋 目标: {plan.goal}")
-        print(f"📋 步骤: {len(plan.steps)} 步")
+        log.info("plan_generated", goal=plan.goal, steps_count=len(plan.steps),
+                 estimated_tools=plan.estimated_tools)
         for s in plan.steps:
-            deps = f" (依赖: {s.depends_on})" if s.depends_on else ""
-            tool = f" [{s.tool}]" if s.tool else ""
-            print(f"  Step {s.step_id}: {s.description[:80]}{tool}{deps}")
+            log.debug("step_detail", step_id=s.step_id, description=s.description[:80],
+                      tool=s.tool, depends_on=s.depends_on)
 
         # ── Phase 2: EXECUTE ───────────────────────────
-        print(f"\n{'='*60}")
-        print(f"⚡ EXECUTOR: 逐步执行...")
-        print(f"{'='*60}")
+        log = _log.bind(phase="execute")
+        log.info("execution_started", total_steps=len(plan.steps))
 
         previous_results: Dict[int, Any] = {}
         max_iterations = config.MAX_PLAN_STEPS * 2  # 安全上限
@@ -142,7 +146,7 @@ class AgentOrchestrator:
                 # 可能所有步骤都失败了
                 failed = plan.get_failed_steps()
                 if failed:
-                    print(f"⚠️  无就绪步骤，但有 {len(failed)} 个失败步骤，尝试 replan...")
+                    log.warning("no_ready_steps", failed_count=len(failed))
                     decision = self.reflector.reflect_plan(plan, failed)
                 else:
                     break  # 全部完成
@@ -152,7 +156,8 @@ class AgentOrchestrator:
                 if self.on_step_start:
                     self.on_step_start(step)
 
-                print(f"\n▶ Step {step.step_id}: {step.description[:80]}")
+                log.info("step_start", step_id=step.step_id,
+                         description=step.description[:80], retry_count=step.retry_count)
                 plan.current_step = step.step_id
 
                 # 执行步骤 (包含重试循环)
@@ -165,10 +170,12 @@ class AgentOrchestrator:
                 if updated_step.is_success:
                     previous_results[updated_step.step_id] = updated_step.result
                     plan.total_steps_completed += 1
-                    print(f"  ✅ Step {step.step_id} 成功 ({updated_step.duration_ms:.0f}ms)")
+                    log.info("step_success", step_id=step.step_id,
+                             duration_ms=round(updated_step.duration_ms or 0))
                 else:
                     plan.total_steps_failed += 1
-                    print(f"  ❌ Step {step.step_id} 失败: {updated_step.error}")
+                    log.error("step_failed", step_id=step.step_id,
+                              error=updated_step.error, retry_count=updated_step.retry_count)
 
                 # ── REFLECT ─────────────────────────────
                 decision = self.reflector.reflect(updated_step, result, plan)
@@ -184,7 +191,8 @@ class AgentOrchestrator:
                     continue
 
                 elif decision == ReflectionDecision.REPLAN:
-                    print(f"  🔄 触发 replan...")
+                    log.warning("replan_triggered", step_id=step.step_id,
+                                error=updated_step.error)
                     plan = self.planner.replan(plan, updated_step, updated_step.error or "未知错误")
                     self.current_plan = plan
                     break  # 退出 ready 循环，重新获取就绪步骤
@@ -202,76 +210,189 @@ class AgentOrchestrator:
         answer = self._synthesize(plan, None)
         duration = time.time() - start_time
 
-        # 记录到记忆
-        self.memory.add_message("assistant", answer)
-        self.memory.log_execution({
-            "task_id": plan.task_id,
-            "goal": plan.goal,
-            "steps_total": len(plan.steps),
-            "steps_completed": plan.total_steps_completed,
-            "steps_failed": plan.total_steps_failed,
-            "duration_sec": duration,
-            "final_answer": answer[:200],
-            "plan_json": plan.to_json() if plan.total_steps_failed > 0 else None,
-        })
-        self.memory.save()
-
-        # 执行历史
-        self._execution_history.append({
-            "input": user_input,
-            "plan": plan.to_dict(),
-            "answer": answer,
-            "duration_sec": duration,
-            "timestamp": datetime.now().isoformat(),
-        })
-
-        print(f"\n{'='*60}")
-        print(f"✅ 完成 ({duration:.1f}s) — {plan.total_steps_completed}/{len(plan.steps)} 步成功")
-        print(f"{'='*60}")
+        self._finalize_execution(user_input, plan, answer, duration)
         return answer
 
     def run_chat(self, user_input: str) -> str:
         """
-        Chat 模式 — 对于简单对话不启动完整计划循环。
+        Chat 模式 — 统一走 Agent Loop，由 Planner 在看到完整上下文 (工具列表 + 记忆)
+        后自行判断任务复杂度：简单问题生成 1 步、复杂问题分解多步。
+
+        只对纯闲聊问候保留快速通道，跳过 Plan→Execute→Reflect 循环。
         """
-        # 快速检测: 是否是简单问候/闲聊
-        simple_patterns = ["你好", "hi", "hello", "嘿", "嗨", "在吗", "谢谢", "bye", "再见", "exit"]
-        if any(user_input.lower().strip().lstrip('﻿') == p for p in simple_patterns):
+        simple_greetings = {
+            "你好", "hi", "hello", "嘿", "嗨", "在吗",
+            "谢谢", "thanks", "thank you",
+            "bye", "再见", "exit", "退出", "goodbye",
+        }
+        stripped = user_input.lower().strip().lstrip('﻿')
+        if stripped in simple_greetings:
             self.memory.add_message("user", user_input)
             answer = "你好！有什么我可以帮你的吗？"
             self.memory.add_message("assistant", answer)
             self.memory.save()
             return answer
 
-        # 检测是否明确需要工具
-        needs_tools = any(kw in user_input.lower() for kw in [
-            "计算", "文件", "代码", "搜索", "bug", "debug", "修复",
-            "查找", "读取", "写入", "运行", "执行", "查询",
-            "calculate", "file", "code", "search", "fix", "read", "write", "run",
-        ])
+        return self.run(user_input)
 
-        if needs_tools:
-            return self.run(user_input)
+    # ── Streaming ──────────────────────────────────────
 
-        # 简单问题: 直接用 LLM 回答
+    async def run_stream(
+        self,
+        user_input: str,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """
+        流式运行 Agent 循环 — 实时产出进度事件。
+
+        使用方式:
+          async for event in orch.run_stream("帮我查一下时间"):
+              display.render(event)  # 实时更新 Rich 界面
+
+        流程与 run() 相同 (Plan → Execute → Reflect → Synthesize)，
+        但在关键节点 yield StreamEvent 供 display.py 消费。
+        """
+        if not self.llm:
+            raise RuntimeError("Agent 未初始化。请先调用 initialize()。")
+
+        start_time = time.time()
+
+        # 注入 Skill dispatchers (确保 Skills 可以调 Router)
+        self._inject_skill_dispatchers()
+
+        # 记录用户输入
         self.memory.add_message("user", user_input)
-        memory_context = self.memory.retrieve_for_planning(user_input)
-        messages = [
-            {"role": "system", "content": "你是 Claude Agent 助手。根据记忆中的上下文回答用户问题。保持简洁、有帮助。"},
-            {"role": "system", "content": f"## 关于用户的记忆\n{memory_context}" if "暂无" not in memory_context else ""},
-        ]
-        messages.extend(self.memory.recent_messages(10))
-        messages.append({"role": "user", "content": user_input})
 
-        try:
-            response = self.llm.chat(messages)
-            answer = response.content or "抱歉，我没有理解你的请求。"
-        except Exception as e:
-            answer = f"处理请求时出现错误: {e}"
+        # ── Phase 1: PLAN ──────────────────────────────
+        yield StreamEvent.thinking("正在分析任务...")
 
-        self.memory.add_message("assistant", answer)
-        self.memory.save()
-        return answer
+        log = _log.bind(phase="plan")
+        log.info("planning_started", task=user_input[:80])
+
+        plan = self.planner.plan(user_input)
+        self.current_plan = plan
+
+        log.info("plan_generated", goal=plan.goal, steps_count=len(plan.steps))
+        yield StreamEvent.plan_ready(
+            goal=plan.goal,
+            steps_count=len(plan.steps),
+            estimated_tools=plan.estimated_tools,
+        )
+
+        # ── Phase 2: EXECUTE ───────────────────────────
+        log = _log.bind(phase="execute")
+        log.info("execution_started", total_steps=len(plan.steps))
+
+        previous_results: Dict[int, Any] = {}
+        max_iterations = config.MAX_PLAN_STEPS * 2
+        iteration = 0
+
+        while not plan.is_complete() and iteration < max_iterations:
+            iteration += 1
+
+            ready = plan.get_ready_steps()
+            if not ready:
+                failed = plan.get_failed_steps()
+                if failed:
+                    log.warning("no_ready_steps", failed_count=len(failed))
+                    yield StreamEvent.reflection(
+                        decision="replan",
+                        reason=f"{len(failed)} 个步骤失败，需要重新规划",
+                    )
+                    decision = self.reflector.reflect_plan(plan, failed)
+                else:
+                    break
+
+            for step in ready:
+                yield StreamEvent.step_start(
+                    step_id=step.step_id,
+                    description=step.description,
+                    tool=step.tool,
+                )
+
+                if self.on_step_start:
+                    self.on_step_start(step)
+
+                log.info("step_start", step_id=step.step_id,
+                         description=step.description[:80])
+                plan.current_step = step.step_id
+
+                # 执行步骤
+                updated_step, result = self._execute_single_step(step, plan, previous_results)
+
+                yield StreamEvent.tool_result(
+                    tool_name=result.tool,
+                    ok=result.ok,
+                    step_id=step.step_id,
+                )
+
+                if self.on_step_complete:
+                    self.on_step_complete(updated_step, result)
+
+                if updated_step.is_success:
+                    previous_results[updated_step.step_id] = updated_step.result
+                    plan.total_steps_completed += 1
+                    log.info("step_success", step_id=step.step_id)
+                else:
+                    plan.total_steps_failed += 1
+                    log.error("step_failed", step_id=step.step_id,
+                              error=updated_step.error)
+
+                yield StreamEvent.step_done(
+                    step_id=step.step_id,
+                    success=updated_step.is_success,
+                )
+
+                # ── REFLECT ─────────────────────────────
+                decision = self.reflector.reflect(updated_step, result, plan)
+                yield StreamEvent.reflection(
+                    decision=decision.value,
+                    reason=f"步骤 {step.step_id} 状态: {updated_step.status.value}",
+                )
+
+                if decision == ReflectionDecision.CONTINUE:
+                    continue
+
+                elif decision == ReflectionDecision.RETRY:
+                    step.status = StepStatus.PENDING
+                    continue
+
+                elif decision == ReflectionDecision.REPLAN:
+                    log.warning("replan_triggered", step_id=step.step_id)
+                    plan = self.planner.replan(plan, updated_step, updated_step.error or "未知错误")
+                    self.current_plan = plan
+                    yield StreamEvent.plan_ready(
+                        goal=plan.goal,
+                        steps_count=len(plan.steps),
+                    )
+                    break
+
+                elif decision == ReflectionDecision.ASK_USER:
+                    yield StreamEvent.error(
+                        message=f"需要更多信息: {step.description} 失败 — {updated_step.error}",
+                    )
+                    answer = self._synthesize(
+                        plan,
+                        f"我需要更多信息才能继续。{step.description} 失败了: {updated_step.error}",
+                    )
+                    duration = time.time() - start_time
+                    self._finalize_execution(user_input, plan, answer, duration)
+                    yield StreamEvent.done(answer=answer, duration_sec=duration)
+                    return
+
+                elif decision == ReflectionDecision.STOP:
+                    break
+
+        # ── Phase 3: SYNTHESIZE ────────────────────────
+        yield StreamEvent(type=StreamEventType.SYNTHESIS, message="正在生成最终答案...")
+
+        # 尝试流式合成
+        answer = await self._synthesize_stream(plan)
+        duration = time.time() - start_time
+
+        # 记录到记忆
+        self._finalize_execution(user_input, plan, answer, duration)
+
+        yield StreamEvent.done(answer=answer, duration_sec=duration)
 
     # ── 查询 ──────────────────────────────────────────
 
@@ -331,15 +452,23 @@ class AgentOrchestrator:
 
         results_combined = "\n".join(results_text)
 
-        # 如果只有 1 步且成功，直接返回结果
+        # 如果只有 1 步且成功，智能提取结果
         if len(plan.steps) == 1 and plan.steps[0].is_success:
             result = plan.steps[0].result
             if isinstance(result, dict):
-                # 直接提取有意义的内容
-                for key in ["response", "content", "data", "result"]:
+                # 优先提取自然语言字段
+                for key in ["response", "content", "answer", "summary"]:
                     if key in result:
                         return str(result[key])
-                return json.dumps(result, ensure_ascii=False)[:500]
+                # 常见工具结果 → 自然语言
+                if "time" in result:
+                    return f'当前时间: {result["time"]}'
+                if "result" in result:
+                    return str(result["result"])
+                if "data" in result:
+                    return str(result["data"])
+                # 其他情况让 LLM 格式化为自然语言
+                return self._synthesize_single_result(plan.steps[0])
             return str(result)[:1000]
 
         # 多步骤: 让 LLM 合成
@@ -352,6 +481,119 @@ class AgentOrchestrator:
             return response.content or "任务执行完成。请查看上述步骤结果。"
         except Exception:
             return f"任务执行完成。以下是步骤结果:\n\n{results_combined}"
+
+    def _synthesize_single_result(self, step: Step) -> str:
+        """用 LLM 将单个步骤结果转为自然语言。"""
+        try:
+            result_json = json.dumps(step.result, ensure_ascii=False)[:600]
+            messages = [
+                {"role": "system", "content": "将工具执行结果转换为简洁的自然语言回答。一句话说完，不要加引号或解释。"},
+                {"role": "user", "content": f"步骤: {step.description}\n结果: {result_json}"},
+            ]
+            response = self.llm.chat(messages, max_tokens=120)
+            return response.content or str(step.result)[:200]
+        except Exception:
+            return str(step.result)[:200]
+
+    async def _synthesize_stream(self, plan: TaskPlan) -> str:
+        """
+        流式合成最终答案。
+
+        使用 LLM stream() 生成答案，同时 yield text_delta 事件。
+        注意: 此方法需要在 run_stream() 循环中被 await，
+        但由于架构限制 (generator 内不能同时 yield 和 await 子生成器)，
+        这里先做非流式合成，完整答案一次性返回。
+
+        未来: 可以用 asyncio.Queue 解耦 producer/consumer。
+        """
+        # 收集所有成功步骤的结果
+        results_text = []
+        for s in plan.steps:
+            if s.is_success and s.result:
+                result_str = json.dumps(s.result, ensure_ascii=False)[:500]
+                results_text.append(f"Step {s.step_id} ({s.description[:60]}): {result_str}")
+            elif s.status == StepStatus.FAILED:
+                results_text.append(f"Step {s.step_id} ({s.description[:60]}): ❌ 失败 — {s.error}")
+
+        if not results_text:
+            return "任务已完成，但没有产生具体结果。"
+
+        # 单步成功 → 智能提取
+        if len(plan.steps) == 1 and plan.steps[0].is_success:
+            result = plan.steps[0].result
+            if isinstance(result, dict):
+                for key in ["response", "content", "answer", "summary"]:
+                    if key in result:
+                        return str(result[key])
+                if "time" in result:
+                    return f'当前时间: {result["time"]}'
+                if "result" in result:
+                    return str(result["result"])
+                if "data" in result:
+                    return str(result["data"])
+                return self._synthesize_single_result(plan.steps[0])
+            return str(result)[:1000]
+
+        # 多步骤: LLM 合成
+        results_combined = "\n".join(results_text)
+        try:
+            messages = [
+                {"role": "system", "content": "你是一个结果总结助手。请根据以下步骤执行结果，生成一个简洁、有帮助的最终答案。用自然语言回答。"},
+                {"role": "user", "content": f"原始目标: {plan.goal}\n\n执行结果:\n{results_combined}\n\n请给出最终答案。"},
+            ]
+            # 使用 run_in_executor 在线程池中运行同步 chat()
+            response = await asyncio.to_thread(self.llm.chat, messages)
+            return response.content or "任务执行完成。请查看上述步骤结果。"
+        except Exception:
+            return f"任务执行完成。以下是步骤结果:\n\n{results_combined}"
+
+    def _finalize_execution(
+        self,
+        user_input: str,
+        plan: TaskPlan,
+        answer: str,
+        duration: float,
+    ) -> None:
+        """记录执行结果到记忆和历史 (run() 和 run_stream() 共用)。"""
+        self.memory.add_message("assistant", answer)
+
+        compressed = self.memory.maybe_compress(self.llm)
+        if compressed > 0:
+            _log.info("context_compressed", messages_compressed=compressed)
+
+        self.memory.log_execution({
+            "task_id": plan.task_id,
+            "goal": plan.goal,
+            "steps_total": len(plan.steps),
+            "steps_completed": plan.total_steps_completed,
+            "steps_failed": plan.total_steps_failed,
+            "duration_sec": duration,
+            "final_answer": answer[:200],
+            "plan_json": plan.to_json() if plan.total_steps_failed > 0 else None,
+        })
+        self.memory.save()
+
+        self._execution_history.append({
+            "input": user_input,
+            "plan": plan.to_dict(),
+            "answer": answer,
+            "duration_sec": duration,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        _log.info("execution_complete", duration_sec=round(duration, 1),
+                 steps_completed=plan.total_steps_completed,
+                 steps_failed=plan.total_steps_failed,
+                 steps_total=len(plan.steps))
+
+    def _inject_skill_dispatchers(self) -> None:
+        """将 ToolRouter.dispatch 注入所有已注册的 Skill。"""
+        if not self.router:
+            return
+        for tool in self.registry:
+            if isinstance(tool, Skill):
+                tool.set_dispatcher(self.router.dispatch)
+                _log.debug("skill_dispatcher_injected", skill_name=tool.name)
 
     def _register_builtin_tools(self) -> None:
         """注册所有内置工具到 ToolRegistry。"""
@@ -373,4 +615,4 @@ class AgentOrchestrator:
             # Memory
             SaveNoteTool(), ListNotesTool(), RememberFactTool(), SearchMemoryTool(), SummarizeContextTool(),
         ])
-        print(f"✅ 已注册 {len(self.registry)} 个工具")
+        log.info("tools_registered", count=len(self.registry))
