@@ -99,6 +99,13 @@
       "steps_completed": 3,
       "duration_sec": 1.5,
       "logged_at": "2026-07-01T16:07:34.119058"
+    },
+    {
+      "task_id": "task_001",
+      "goal": "测试任务",
+      "steps_completed": 3,
+      "duration_sec": 1.5,
+      "logged_at": "2026-07-01T21:54:03.554233"
     }
   ],
   "learnings": []

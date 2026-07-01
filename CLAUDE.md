@@ -137,11 +137,10 @@ AgentDisplay (Rich Live) consumes events → 3-panel Layout (header/body/footer)
 | `agent/providers/openai_provider.py` | OpenAI/DeepSeek provider — single class, different base_urls |
 | `agent/providers/factory.py` | `create_provider()` — auto-detect provider by model name |
 | `agent/display.py` | Rich Live display: consumes `StreamEvent` stream, renders real-time UI |
-| `agent/events.py` | Typed event dataclasses (Lifecycle/Planning/Execution/Reflection/Memory/Error/Streaming) — defined but not yet wired to event.Sink |
 | `agent/logging_config.py` | structlog config: console (Rich) / JSON (production) / test modes |
 | `agent/settings.py` | `AgentSettings` injectable dataclass — all config in one place |
 | `config.py` | Thin backward-compat wrapper exposing `AgentSettings` fields as module-level constants |
-| `demo_v3.py` | Working v3 demo: showcases ToolCall format, ToolRouter dispatch, multi-tool coordination |
+| `demo_v3.py` | Primary demo script: showcases AgentOrchestrator, ToolRouter dispatch, multi-tool coordination |
 | `main.py` | CLI entry point: argparse (`--stream`, `--model`, positional query), Rich Prompt REPL |
 
 ### 16 Builtin Tools (15 atomic + 1 Skill)
@@ -348,14 +347,12 @@ All 148 tests are unit tests with mocked LLM, memory, and tools. No integration 
 **Current: v3.0** — 148 tests all passing. Phase 1 (tests + structlog + settings), Phase 2 (streaming + Rich CLI + Skill), and Phase 3 (multi-provider abstraction) are complete.
 
 Key files by phase:
-- **Phase 1**: `agent/settings.py`, `agent/logging_config.py`, `agent/events.py`, `config.py`, `pyproject.toml` — 79 tests
+- **Phase 1**: `agent/settings.py`, `agent/logging_config.py`, `config.py`, `pyproject.toml` — 79 tests
 - **Phase 2**: `agent/llm/types.py`, `agent/tools/skill.py`, `agent/display.py`, `main.py` (argparse + Rich Prompt) — +48 tests
 - **Phase 3**: `agent/providers/` (base + openai_provider + factory), LLMClient refactored as thin wrapper — +21 tests
 
 ### Known Issues
 - `ARCHITECTURE.md`, `QUICKSTART.md`, and `PROJECT_DELIVERY.md` describe v2.0 architecture (AgentState, ToolPipeline, `ai.py` monolithic module) — they are outdated
-- `demo_agent.py` imports a nonexistent `ai` module — broken, do not use. Use `demo_v3.py` instead
-- `agent/events.py` dataclasses are defined but never instantiated — the event.Sink pattern is defined but not wired. Active code uses `StreamEvent` from `agent/llm/types.py` instead
 - `memory_tools.py` bypasses `LongTermMemory` class by reading/writing JSON files directly. Notes saved via tools are invisible to semantic search (VectorStore)
 - `WebSearchTool` uses DuckDuckGo Instant Answer API (limited); no real search engine integration
 - Streaming synthesis is non-streaming (see Streaming Synthesis Limitation above)

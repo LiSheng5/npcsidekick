@@ -2,21 +2,22 @@
 
 ## Last Session
 - **Date**: 2026-07-01
-- **Last Action**: Committed Phase 1-3 code (bf20f69), updated CLAUDE.md with session recovery & TDD workflows, created /status skill, added MCP web-fetch
-- **Completed**: Phase 1 (tests+structlog+settings), Phase 2 (streaming+Rich CLI+Skill), Phase 3 (multi-provider), CLAUDE.md improvements
+- **Phase 4 Complete**: Deleted agent/events.py (dead code), demo_agent.py (broken v2.0), cleaned __pycache__ from git, updated ARCHITECTURE/QUICKSTART/PROJECT_DELIVERY to v3.0
+- **Previous**: Committed Phase 1-3 code, updated CLAUDE.md, created /status skill, added MCP web-fetch
 
-## Current Blockers
-- None critical
+## Current
+- **Version**: v3.0
+- **Tests**: 148 passing
+- **Git**: Clean after Phase 4 commit
 
-## Known Issues (from CLAUDE.md)
-- ARCHITECTURE.md / QUICKSTART.md / PROJECT_DELIVERY.md describe v2.0 — outdated
-- demo_agent.py is broken — use demo_v3.py
-- agent/events.py defined but not wired
-- memory_tools.py bypasses LongTermMemory
-- Streaming synthesis not truly streaming (asyncio.Queue needed)
-- No integration/E2E tests
+## Known Issues (remaining after Phase 4)
+- memory_tools.py bypasses LongTermMemory (Phase 5.1)
+- Silent dependency degradation (Phase 5.2)
+- Provider factory ignores provider_name (Phase 5.3)
+- Test coverage gaps for 8+ modules (Phase 5.4)
+- Chinese-only prompts in reflector/compressor (Phase 5.5)
+- Streaming synthesis not truly streaming (Phase 6.1)
+- No integration/E2E tests (Phase 6.2)
 
-## Next Steps
-1. Recreate .gitignore with proper entries
-2. Run pytest to confirm 148 tests pass
-3. Clean up outdated v2.0 docs
+## Next Phase
+Phase 5: Quality fixes — memory_tools refactor, structlog, provider factory, test coverage, i18n
