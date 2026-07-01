@@ -1,42 +1,76 @@
 """
-LLM Client — 统一的 LLM 调用接口。
+LLM Client — 统一的 LLM 调用接口 (薄封装)。
+
+LLMClient 本身不直接调用 API — 它委托给 ProviderProtocol 实现。
+这样做的好处:
+  - 切换 Provider (OpenAI → DeepSeek) 不需要改 LLMClient
+  - 测试可注入 Mock Provider，不需要 patch OpenAI 库
+  - 添加新 Provider 只需实现 ProviderProtocol
 
 支持:
   - OpenAI 兼容 API (DeepSeek / OpenAI / 任何兼容服务)
   - 工具调用 (function calling)
   - 流式和非流式
+  - 流式输出 (async generator)
   - 结构化输出 (JSON mode)
 """
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional
-from openai import OpenAI
+from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
 
+from agent.llm.types import StreamChunk
 import config
+
+if TYPE_CHECKING:
+    from agent.providers.base import ProviderProtocol
 
 
 class LLMClient:
     """
-    统一的 LLM 客户端。
+    统一的 LLM 客户端 — ProviderProtocol 的薄封装。
 
     使用方式:
+      # 生产 — 自动选择 Provider
       client = LLMClient()
       response = client.chat(messages, tools=[...])
-      if response.has_tool_calls:
-          ...
+
+      # 测试 — 注入 Mock Provider
+      mock_provider = MagicMock(spec=ProviderProtocol)
+      client = LLMClient(provider=mock_provider)
+
+      # 流式
+      async for chunk in client.stream(messages):
+          print(chunk.content, end="")
     """
 
-    def __init__(self):
-        api_key = config.API_KEY
-        if not api_key:
-            raise RuntimeError(
-                "请设置 API_KEY (在 config.py) 或环境变量 DEEPSEEK_API_KEY / OPENAI_API_KEY"
+    def __init__(self, provider: Optional["ProviderProtocol"] = None):
+        """
+        Args:
+          provider: 可选的 Provider 实例 (用于测试注入)。
+                    如果不提供，则通过工厂自动创建。
+        """
+        if provider is not None:
+            self._provider = provider
+        else:
+            from agent.providers.factory import create_provider
+
+            api_key = config.API_KEY
+            if not api_key:
+                raise RuntimeError(
+                    "请设置 API_KEY (在 config.py) 或环境变量 DEEPSEEK_API_KEY / OPENAI_API_KEY"
+                )
+            self._provider = create_provider(
+                api_key=api_key,
+                model_name=config.MODEL_NAME,
+                base_url=config.BASE_URL,
+                temperature=config.TEMPERATURE,
+                max_tokens=config.MAX_TOKENS,
             )
-        self._client = OpenAI(api_key=api_key, base_url=config.BASE_URL)
-        self.model = config.MODEL_NAME
-        self.temperature = config.TEMPERATURE
-        self.max_tokens = config.MAX_TOKENS
+
+        # 从 provider 同步属性 (向后兼容)
+        self.model = self._provider.model_name
+        self.temperature = getattr(self._provider, '_temperature', config.TEMPERATURE)
+        self.max_tokens = getattr(self._provider, '_max_tokens', config.MAX_TOKENS)
 
     def chat(
         self,
@@ -45,7 +79,7 @@ class LLMClient:
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        response_format: Optional[dict] = None,  # {"type": "json_object"} for JSON mode
+        response_format: Optional[dict] = None,
     ) -> "LLMResponse":
         """
         发送对话请求，返回 LLMResponse。
@@ -53,32 +87,18 @@ class LLMClient:
         Args:
           messages: OpenAI 格式的消息列表
           tools: OpenAI tools 数组 (可选)
-          tool_choice: "auto" | "none" | "required" | {"type": "function", "function": {"name": "..."}}
+          tool_choice: "auto" | "none" | "required"
           temperature: 覆盖默认温度
           max_tokens: 覆盖默认 max_tokens
           response_format: {"type": "json_object"} 强制 JSON 输出
         """
-        kwargs = dict(
-            model=self.model,
+        return self._provider.chat(
             messages=messages,
-            temperature=temperature or self.temperature,
-            max_tokens=max_tokens or self.max_tokens,
-        )
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
-        if response_format:
-            kwargs["response_format"] = response_format
-
-        completion = self._client.chat.completions.create(**kwargs)
-        choice = completion.choices[0]
-
-        return LLMResponse(
-            content=choice.message.content or "",
-            tool_calls=list(choice.message.tool_calls) if choice.message.tool_calls else [],
-            finish_reason=choice.finish_reason,
-            model=completion.model,
-            usage=completion.usage,
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
         )
 
     def chat_with_structured_output(
@@ -91,6 +111,47 @@ class LLMClient:
         用于 Planner 生成结构化 TaskPlan。
         """
         return self.chat(messages, tools=tools, tool_choice="auto")
+
+    # ── Streaming ────────────────────────────────────────
+
+    async def stream(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[dict]] = None,
+        tool_choice: str = "auto",
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> AsyncGenerator[StreamChunk, None]:
+        """
+        流式 LLM 调用 — 返回 AsyncGenerator[StreamChunk]。
+
+        使用方式:
+          async for chunk in client.stream(messages):
+              if chunk.has_content:
+                  print(chunk.content, end="", flush=True)
+              if chunk.has_tool_call:
+                  ...
+
+        Args:
+          messages: OpenAI 格式的消息列表
+          tools: OpenAI tools 数组 (可选)
+          tool_choice: "auto" | "none" | "required"
+          temperature: 覆盖默认温度
+          max_tokens: 覆盖默认 max_tokens
+        """
+        async for chunk in self._provider.stream(
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            yield chunk
+
+    @property
+    def provider(self) -> "ProviderProtocol":
+        """获取底层 Provider (调试用)。"""
+        return self._provider
 
 
 class LLMResponse:

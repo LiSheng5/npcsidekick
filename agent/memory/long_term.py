@@ -7,18 +7,21 @@
   - 学到的规律 (learnings): 从交互中总结的模式
 
 检索:
-  - 关键词搜索 (子串匹配)
-  - 时间范围检索
+  - 语义搜索 (向量相似度)
+  - 关键词搜索 (子串匹配, 作为回退)
   - 标签/类别检索
 """
 from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Iterator
+from typing import Any, Dict, List, Optional, Iterator, TYPE_CHECKING
 from pathlib import Path
 
 import config
+
+if TYPE_CHECKING:
+    from agent.memory.vector_store import VectorStore
 
 
 class LongTermMemory:
@@ -32,11 +35,13 @@ class LongTermMemory:
       ltm.add_learning("用户在周末更活跃")
     """
 
-    def __init__(self, file_path: Optional[Path] = None):
+    def __init__(self, file_path: Optional[Path] = None,
+                 vector_store: Optional["VectorStore"] = None):
         self.file_path = file_path or config.LONG_TERM_FILE
         self.facts: List[Dict[str, Any]] = []
         self.execution_log: List[Dict[str, Any]] = []
         self.learnings: List[Dict[str, Any]] = []
+        self._vector_store = vector_store
         self._load()
 
     # ── Facts ─────────────────────────────────────────
@@ -53,6 +58,13 @@ class LongTermMemory:
         self.facts.append(fact)
         self._trim_facts()
         self._save()
+        # 写入向量索引
+        if self._vector_store:
+            self._vector_store.add(
+                f"fact_{fact['id']}",
+                content,
+                {"source": "fact", "category": category, "id": fact["id"]},
+            )
         return fact["id"]
 
     def get_fact(self, fact_id: str) -> Optional[Dict]:
@@ -82,6 +94,9 @@ class LongTermMemory:
         self.facts = [f for f in self.facts if f["id"] != fact_id]
         if len(self.facts) < before:
             self._save()
+            # 从向量索引中删除
+            if self._vector_store:
+                self._vector_store.delete(f"fact_{fact_id}")
             return True
         return False
 
@@ -116,6 +131,13 @@ class LongTermMemory:
         if len(self.learnings) > 100:
             self.learnings = self.learnings[-100:]
         self._save()
+        # 写入向量索引
+        if self._vector_store:
+            self._vector_store.add(
+                f"learn_{learning['id']}",
+                content,
+                {"source": "learning", "id": learning["id"]},
+            )
         return learning["id"]
 
     def search_learnings(self, query: str) -> List[Dict]:
@@ -175,7 +197,40 @@ class LongTermMemory:
 
     def _trim_facts(self) -> None:
         if len(self.facts) > config.MAX_LONG_TERM_ITEMS:
+            removed = self.facts[:len(self.facts) - config.MAX_LONG_TERM_ITEMS]
             self.facts = self.facts[-config.MAX_LONG_TERM_ITEMS:]
+            # 从向量索引中删除被裁剪的事实
+            if self._vector_store:
+                for f in removed:
+                    self._vector_store.delete(f"fact_{f['id']}")
+
+    # ── 向量索引 ──────────────────────────────────────
+
+    def rebuild_index(self) -> None:
+        """从已有 JSON 数据重建完整的向量索引（首次迁移时调用）。"""
+        if not self._vector_store:
+            return
+        self._vector_store.delete_by_prefix("fact_")
+        self._vector_store.delete_by_prefix("learn_")
+        items = []
+        for f in self.facts:
+            content = f.get("content", "")
+            if content.strip():
+                items.append((
+                    f"fact_{f['id']}",
+                    content,
+                    {"source": "fact", "category": f.get("category", ""), "id": f["id"]},
+                ))
+        for l in self.learnings:
+            content = l.get("content", "")
+            if content.strip():
+                items.append((
+                    f"learn_{l['id']}",
+                    content,
+                    {"source": "learning", "id": l["id"]},
+                ))
+        if items:
+            self._vector_store.add_batch(items)
 
     def __len__(self) -> int:
         return len(self.facts) + len(self.learnings)

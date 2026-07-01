@@ -61,7 +61,7 @@ PLANNER_SYSTEM_PROMPT = """你是任务规划专家。你的职责是将用户�
 - 每一步必须可验证 (success_criteria 不能模糊)
 - 依赖关系必须正确 (depends_on 引用的 step_id 必须存在)
 - 从 context 中查阅已有信息, 避免重复工作
-- 如果用户只是闲聊/打招呼, 返回 0 步计划
+- 纯问候/道别 (你好/hi/谢谢/再见/bye) 返回 0 步计划。简短的事实性问题 (几点/今天几号/计算XX/搜索XX) 仍需规划 1 步并推荐对应工具
 """
 
 
@@ -160,8 +160,11 @@ class Planner:
                 "steps": [{"step_id": 1, "description": "直接处理用户请求", "success_criteria": "用户获得满意的回复"}],
             }
 
-        # 5. 构建 TaskPlan
-        return self._build_task_plan(plan_data, context_str)
+        # 5. 获取对话历史 (Reasonix 风格: 注入到 plan.context 供 Executor 使用)
+        conversation_history = self.memory.get_history_for_context(max_messages=20, max_chars=4000)
+
+        # 6. 构建 TaskPlan
+        return self._build_task_plan(plan_data, context_str, conversation_history)
 
     def replan(self, original_plan: TaskPlan, failed_step: Step, error: str) -> TaskPlan:
         """
@@ -269,7 +272,8 @@ class Planner:
         # 完全失败 — 返回空计划
         return {"goal": "unknown", "steps": []}
 
-    def _build_task_plan(self, plan_data: dict, context_str: str) -> TaskPlan:
+    def _build_task_plan(self, plan_data: dict, context_str: str,
+                          conversation_history: str = "") -> TaskPlan:
         """从解析的 JSON 构建 TaskPlan 对象。"""
         steps = []
         for s in plan_data.get("steps", []):
@@ -297,7 +301,10 @@ class Planner:
             task_id=f"task_{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(steps)}steps",
             goal=plan_data.get("goal", ""),
             steps=steps,
-            context={"retrieved_context": context_str},
+            context={
+                "retrieved_context": context_str,
+                "conversation_history": conversation_history,  # Reasonix: 注入给 Executor
+            },
             estimated_tools=list(set(s.tool for s in steps if s.tool)),
             created_at=datetime.now().isoformat(),
         )

@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from pathlib import Path
 
 import config
+
+if TYPE_CHECKING:
+    from agent.memory.vector_store import VectorStore
 
 
 class ShortTermMemory:
@@ -30,10 +33,12 @@ class ShortTermMemory:
       recent = stm.recent(10)  # 最后 10 条消息
     """
 
-    def __init__(self, file_path: Optional[Path] = None):
+    def __init__(self, file_path: Optional[Path] = None,
+                 vector_store: Optional["VectorStore"] = None):
         self.file_path = file_path or config.SHORT_TERM_FILE
         self.history: List[Dict[str, str]] = []
         self.working_context: Dict[str, Any] = {}  # 当前任务的中间状态
+        self._vector_store = vector_store
         self._load()
 
     # ── 读写 ──────────────────────────────────────────
@@ -46,6 +51,9 @@ class ShortTermMemory:
             "timestamp": datetime.now().isoformat(),
         })
         self._trim()
+        # 写入向量索引
+        idx = len(self.history) - 1
+        self._add_to_vector(idx, role, content)
 
     def add_batch(self, messages: List[Dict[str, str]]) -> None:
         """批量添加消息。"""
@@ -57,6 +65,17 @@ class ShortTermMemory:
                 "timestamp": now,
             })
         self._trim()
+        # 批量写入向量索引
+        if self._vector_store:
+            items = []
+            for i in range(max(0, len(self.history) - len(messages)), len(self.history)):
+                msg = self.history[i]
+                items.append((
+                    f"msg_{i}",
+                    msg["content"],
+                    {"source": "message", "role": msg["role"], "index": str(i)},
+                ))
+            self._vector_store.add_batch(items)
 
     def recent(self, n: int = 20) -> List[Dict[str, str]]:
         """获取最后 n 条消息。"""
@@ -67,6 +86,19 @@ class ShortTermMemory:
         self.history.clear()
         self.working_context.clear()
         self._save()
+        if self._vector_store:
+            self._vector_store.delete_by_prefix("msg_")
+
+    def trim_oldest(self, count: int) -> List[Dict[str, str]]:
+        """移除最旧的 count 条消息，返回被移除的消息列表。
+        同时从向量索引中删除。"""
+        count = min(count, len(self.history))
+        removed = self.history[:count]
+        self.history = self.history[count:]
+        self._save()
+        # 重建消息的向量索引 (因为索引变了)
+        self._rebuild_message_vectors()
+        return removed
 
     # ── 工作上下文 ────────────────────────────────────
 
@@ -131,7 +163,66 @@ class ShortTermMemory:
     def _trim(self) -> None:
         """保持历史不超过 MAX_HISTORY_ITEMS。"""
         if len(self.history) > config.MAX_HISTORY_ITEMS:
+            removed_count = len(self.history) - config.MAX_HISTORY_ITEMS
             self.history = self.history[-config.MAX_HISTORY_ITEMS:]
+            self._save()
+            # 向量索引重建 (索引已变)
+            if self._vector_store:
+                self._rebuild_message_vectors()
+
+    # ── Token / 压缩 ──────────────────────────────────
+
+    @property
+    def estimated_tokens(self) -> int:
+        """估算当前历史消息的总 token 数。"""
+        try:
+            from agent.memory.token_counter import count_message_tokens
+            return count_message_tokens(self.history)
+        except ImportError:
+            return len(str(self.history)) // 3  # 粗略估计: ~3 字符/token
+
+    @property
+    def needs_compression(self) -> bool:
+        """检查是否需要压缩。"""
+        return (
+            len(self.history) >= config.COMPRESSION_MIN_MESSAGES
+            and self.estimated_tokens > config.COMPRESSION_TOKEN_THRESHOLD
+        )
+
+    # ── 向量索引 ──────────────────────────────────────
+
+    def rebuild_index(self) -> None:
+        """从已有 JSON 数据重建完整的向量索引（首次迁移时调用）。"""
+        if not self._vector_store:
+            return
+        self._rebuild_message_vectors()
+
+    def _rebuild_message_vectors(self) -> None:
+        """重建所有消息的向量索引。"""
+        if not self._vector_store:
+            return
+        self._vector_store.delete_by_prefix("msg_")
+        items = []
+        for i, msg in enumerate(self.history):
+            content = msg.get("content", "")
+            if content.strip():
+                items.append((
+                    f"msg_{i}",
+                    content,
+                    {"source": "message", "role": msg.get("role", ""), "index": str(i)},
+                ))
+        if items:
+            self._vector_store.add_batch(items)
+
+    def _add_to_vector(self, index: int, role: str, content: str) -> None:
+        """添加单条消息到向量存储。"""
+        if not self._vector_store or not content.strip():
+            return
+        self._vector_store.add(
+            f"msg_{index}",
+            content,
+            {"source": "message", "role": role, "index": str(index)},
+        )
 
     def __len__(self) -> int:
         return len(self.history)
