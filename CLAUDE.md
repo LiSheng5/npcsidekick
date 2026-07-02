@@ -43,9 +43,9 @@ Execute all steps autonomously, only pausing if a command fails critically. Use 
 
 ## Project Overview
 
-Dagent is a 4-layer AI agent framework: **Planner → Executor → Tool Router → Memory**, with a pluggable **Provider** layer (5th layer) for LLM access (OpenAI/DeepSeek/compatible APIs). It's a Python-native architecture inspired by Reasonix (Go) patterns but ported idiomatically — port concepts, not code.
+Dagent is a 4-layer AI agent framework: **Planner → Executor → Tool Router → Memory**, with a pluggable **Provider** layer (5th layer) for LLM access (OpenAI/DeepSeek/compatible APIs).
 
-Phase 1–3 are complete: 148 tests, structured logging, injectable settings, streaming + Rich CLI, Skill concept, and multi-provider abstraction.
+Phase 1–3 are complete: 272 tests, structured logging, injectable settings, streaming + Rich CLI, Skill concept, and multi-provider abstraction.
 
 Current version: **v3.0** (per `pyproject.toml` and orchestrator docstring).
 
@@ -143,7 +143,7 @@ AgentDisplay (Rich Live) consumes events → 3-panel Layout (header/body/footer)
 | `demo_v3.py` | Primary demo script: showcases AgentOrchestrator, ToolRouter dispatch, multi-tool coordination |
 | `main.py` | CLI entry point: argparse (`--stream`, `--model`, positional query), Rich Prompt REPL |
 
-### 16 Builtin Tools (15 atomic + 1 Skill)
+### 14 Builtin Tools + 1 Skill
 
 | Category | Tools |
 |----------|-------|
@@ -336,15 +336,12 @@ Reflection (`reflector.py`) and compression (`compressor.py`) prompts are hardco
 
 ### Test Architecture
 
-All 148 tests are unit tests with mocked LLM, memory, and tools. No integration or E2E tests exist. Tests use `pytest-asyncio` with `asyncio_mode = "auto"` — any `async def test_*` is auto-wrapped. Do NOT manually call `asyncio.run()` in test bodies.
+All 272 tests are unit tests with mocked LLM, memory, and tools. No integration or E2E tests exist. Tests use `pytest-asyncio` with `asyncio_mode = "auto"` — any `async def test_*` is auto-wrapped. Do NOT manually call `asyncio.run()` in test bodies.
 
-### Streaming Synthesis Limitation
-
-`run_stream()` yields streaming events for Phase 1 (planning) and Phase 2 (execution), but Phase 3 (final answer synthesis) is a non-streaming call wrapped in `asyncio.to_thread()`. True token-by-token streaming of the final answer requires an `asyncio.Queue` refactor (noted in `_synthesize_stream()` docstring).
 
 ## Project State
 
-**Current: v3.0** — 148 tests all passing. Phase 1 (tests + structlog + settings), Phase 2 (streaming + Rich CLI + Skill), and Phase 3 (multi-provider abstraction) are complete.
+**Current: v3.1** — 272 tests all passing. Phase 1 (tests + structlog + settings), Phase 2 (streaming + Rich CLI + Skill), and Phase 3 (multi-provider abstraction) are complete.
 
 Key files by phase:
 - **Phase 1**: `agent/settings.py`, `agent/logging_config.py`, `config.py`, `pyproject.toml` — 79 tests
@@ -356,4 +353,4 @@ Key files by phase:
 - `memory_tools.py` bypasses `LongTermMemory` class by reading/writing JSON files directly. Notes saved via tools are invisible to semantic search (VectorStore)
 - `WebSearchTool` uses DuckDuckGo Instant Answer API (limited); no real search engine integration
 - Streaming synthesis is non-streaming (see Streaming Synthesis Limitation above)
-- No integration/E2E tests — all 148 tests mock LLM, memory, and tools
+- No integration/E2E tests — all 272 tests mock LLM, memory, and tools
