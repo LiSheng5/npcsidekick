@@ -160,11 +160,11 @@ class LongTermMemory:
         """生成长时记忆的可读摘要。"""
         parts = []
         if self.facts:
-            parts.append(f"🧠 事实 ({len(self.facts)} 条):")
+            parts.append(f"事实 ({len(self.facts)} 条):")
             for f in self.facts[-5:]:
                 parts.append(f"  - {f['content'][:100]}")
         if self.learnings:
-            parts.append(f"📚 学到的规律 ({len(self.learnings)} 条):")
+            parts.append(f"学到的规律 ({len(self.learnings)} 条):")
             for l in self.learnings[-3:]:
                 parts.append(f"  - {l['content'][:100]}")
         return "\n".join(parts) if parts else "暂无长期记忆。"

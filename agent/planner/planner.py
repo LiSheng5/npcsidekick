@@ -160,7 +160,7 @@ class Planner:
                 "steps": [{"step_id": 1, "description": "直接处理用户请求", "success_criteria": "用户获得满意的回复"}],
             }
 
-        # 5. 获取对话历史 (Reasonix 风格: 注入到 plan.context 供 Executor 使用)
+        # 5. 获取对话历史, 注入到 plan.context 供 Executor 使用
         conversation_history = self.memory.get_history_for_context(max_messages=20, max_chars=4000)
 
         # 6. 构建 TaskPlan
@@ -303,7 +303,7 @@ class Planner:
             steps=steps,
             context={
                 "retrieved_context": context_str,
-                "conversation_history": conversation_history,  # Reasonix: 注入给 Executor
+                "conversation_history": conversation_history,
             },
             estimated_tools=list(set(s.tool for s in steps if s.tool)),
             created_at=datetime.now().isoformat(),

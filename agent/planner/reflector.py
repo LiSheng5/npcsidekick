@@ -1,19 +1,7 @@
 """
 Reflector — LLM 驱动的自我反思与自校正。
 
-Reasonix 启发式设计:
-  - 配置驱动的反思提示词 (REFLECTOR_SYSTEM_PROMPT 可从 config 覆盖)
-  - 分层评估: 快速规则 → LLM 深度分析 (类似 Reasonix 的 cache-aware 分层上下文)
-  - 结构化输出: LLM 通过 function calling 返回确定性决策
-  - 优雅降级: LLM 不可用时回退到规则判断
-
-在执行每个步骤后进行反思:
-  1. 步骤是否成功?
-  2. 结果是否满足成功标准?
-  3. 是否需要调整后续步骤?
-  4. 是否应该放弃当前策略?
-
-Reflector 输出给 Orchestrator: CONTINUE / RETRY / REPLAN / STOP / ASK_USER
+在执行每个步骤后进行反思，输出决策：CONTINUE / RETRY / REPLAN / STOP / ASK_USER
 """
 from __future__ import annotations
 
@@ -37,7 +25,6 @@ class ReflectionDecision(str, Enum):
 
 
 # ── LLM Reflection Prompt ──────────────────────────────
-# 可通过 config.py 覆盖 (Reasonix 风格: 配置驱动)
 
 REFLECTOR_SYSTEM_PROMPT = """你是任务执行的反思评估专家。你的职责是评估一个 AI Agent 步骤的执行结果，并决定下一步行动。
 
@@ -134,27 +121,13 @@ REFLECTION_PLAN_TOOL = {
 
 
 class Reflector:
-    """
-    LLM 驱动的步骤反射器 — 评估每一步的执行结果并给出决策。
-
-    决策流程 (Reasonix 分层风格):
-      1. 快速规则检查 (确定性 — 零延迟)
-      2. 成功 + 无成功标准 → CONTINUE (快速路径, 不调用 LLM)
-      3. 成功 + 有成功标准 → LLM 深度评估
-      4. 错误/超时/其他 → LLM 评估是否可重试
-
-    使用方式:
-      reflector = Reflector(llm_client)
-      decision = reflector.reflect(step, result, plan)
-      if decision == ReflectionDecision.RETRY:
-          ...
-    """
+    """LLM 驱动的步骤反射器 — 评估每步执行结果并给出决策。"""
 
     def __init__(self, llm: Optional[LLMClient] = None):
         self.llm = llm
         self.enabled = config.REFLECTION_ENABLED
 
-        # 允许通过 config 覆盖提示词 (Reasonix 风格: 配置驱动)
+        # 允许通过 config 覆盖提示词
         self.system_prompt = getattr(config, 'REFLECTOR_SYSTEM_PROMPT', None) or REFLECTOR_SYSTEM_PROMPT
         self.plan_prompt = getattr(config, 'REFLECTOR_PLAN_PROMPT', None) or REFLECTOR_PLAN_PROMPT
 
@@ -170,11 +143,7 @@ class Reflector:
         plan: TaskPlan,
     ) -> ReflectionDecision:
         """
-        反思当前步骤的执行结果。
-
-        决策流程:
-          1. 快速规则检查 (确定性)
-          2. LLM 深度分析 (如果启用且规则不够)
+        反思当前步骤的执行结果。快速规则检查优先，复杂情况调用 LLM。
         """
         if not self.enabled:
             return self._fallback_rules(step, result, plan)
@@ -254,16 +223,7 @@ class Reflector:
         result: ToolResult,
         plan: TaskPlan,
     ) -> ReflectionDecision:
-        """
-        调用 LLM 对步骤结果进行深度评估。
-
-        发送给 LLM 的上下文 (Reasonix 风格 — 精简但完整):
-          - 用户目标
-          - 步骤描述 + 成功标准
-          - 执行结果 (截断)
-          - 重试次数 / 最大重试
-          - 计划进度
-        """
+        """调用 LLM 对步骤结果进行深度评估。"""
         # 构建精简上下文
         is_last = step.step_id == self._last_step_id(plan)
 
@@ -318,7 +278,7 @@ class Reflector:
         completed_info = []
         for s in plan.steps:
             if s.is_success:
-                completed_info.append(f"- Step {s.step_id}: {s.description[:80]} ✅")
+                completed_info.append(f"- Step {s.step_id}: {s.description[:80]}")
 
         context = f"""## 用户目标
 {plan.goal}
@@ -467,10 +427,7 @@ class Reflector:
     # ── Helpers ─────────────────────────────────────────
 
     def _check_criteria(self, step: Step, result: ToolResult) -> bool:
-        """
-        确定性成功标准检查 (启发式)。
-        当 LLM 不可用时的回退方案。比之前更全面但仍然有限。
-        """
+        """启发式成功标准检查 (LLM 不可用时的回退方案)。"""
         criteria = step.success_criteria.lower()
 
         # 检查数据非空

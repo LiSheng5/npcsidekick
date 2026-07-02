@@ -8,7 +8,7 @@ tiktoken>=0.5
 # Vector Memory
 chromadb>=0.5
 
-# Structured Logging (Reasonix event.Sink pattern)
+# Structured Logging
 structlog>=24.0
 
 # Terminal UI

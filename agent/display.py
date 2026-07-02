@@ -28,15 +28,7 @@ from agent.llm.types import StreamEvent, StreamEventType
 
 
 class AgentDisplay:
-    """
-    Rich Live 显示 — 流式 Agent 输出的终端 UI。
-
-    功能:
-      - 计划面板 (目标 + 步骤概览)
-      - 步骤进度 (当前执行到哪一步)
-      - 实时输出 (LLM 生成的文本)
-      - 状态栏 (耗时、步骤计数)
-    """
+    """Rich Live 终端 UI — 流式 Agent 输出。"""
 
     def __init__(self, theme: str = "dark"):
         self.console = Console()
@@ -82,12 +74,7 @@ class AgentDisplay:
     # ── Public API ───────────────────────────────────────
 
     def render(self, event: StreamEvent) -> None:
-        """
-        处理一个 StreamEvent 并更新显示。
-
-        Args:
-          event: 来自 Orchestrator.run_stream() 的事件
-        """
+        """处理 StreamEvent 并更新显示。"""
         handler = getattr(self, f"_on_{event.type.value}", None)
         if handler:
             handler(event)
@@ -158,7 +145,6 @@ class AgentDisplay:
     # ── Layout ───────────────────────────────────────────
 
     def _build_layout(self) -> None:
-        """构建 Rich Layout 结构。"""
         self._layout.split(
             Layout(self._make_header(), name="header", size=3),
             Layout(self._make_body(), name="body"),
@@ -166,10 +152,9 @@ class AgentDisplay:
         )
 
     def _make_header(self) -> Panel:
-        """顶部状态栏。"""
         elapsed = time.time() - self._start_time
         status_line = (
-            f"[bold white]Dagent v3.0[/bold white]  |  "
+            f"[bold white]奇天 v1.0[/bold white]  |  "
             f"{self._phase}  |  "
             f"耗时: {elapsed:.1f}s  |  "
             f"步骤: {self._steps_done}/{self._steps_total}"
@@ -186,7 +171,6 @@ class AgentDisplay:
         )
 
     def _make_body(self) -> Layout:
-        """主体内容区域。"""
         body = Layout()
         body.split_row(
             Layout(self._make_step_panel(), name="left", ratio=2),
@@ -195,7 +179,6 @@ class AgentDisplay:
         return body
 
     def _make_step_panel(self) -> Panel:
-        """左侧: 计划 + 当前步骤。"""
         content = ""
 
         if self._goal:
@@ -225,7 +208,6 @@ class AgentDisplay:
         )
 
     def _make_output_panel(self) -> Panel:
-        """右侧: 实时输出。"""
         if self._output_text:
             # 截断过长的输出
             display_text = self._output_text
@@ -245,6 +227,5 @@ class AgentDisplay:
         )
 
     def _make_footer(self) -> Panel:
-        """底部: 键盘提示。"""
         hints = "[dim]Ctrl+C 中断 | 流式模式[/dim]"
         return Panel(Text(hints), style="dim", box=box.MINIMAL)

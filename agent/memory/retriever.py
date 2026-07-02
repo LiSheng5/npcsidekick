@@ -1,14 +1,10 @@
 """
 记忆检索器 — 语义搜索 + 关键词回退，供 Planner 和 Executor 使用。
 
-Reasonix 启发: "stable environment summary" 模式
-  - 始终将最近对话历史作为稳定上下文头部注入
-  - 语义搜索结果作为补充，而非替代
-
 检索策略:
   1. 优先: 向量语义搜索 (ChromaDB)
-  2. 回退: 关键词子串匹配 (当向量搜索不可用或结果不足时)
-  3. 始终: 最近 N 条对话历史 (不受语义相关性过滤)
+  2. 回退: 关键词子串匹配
+  3. 始终: 最近 N 条对话历史
 """
 from __future__ import annotations
 
@@ -36,17 +32,7 @@ class MemoryRetriever:
         self.vs = vector_store
 
     def retrieve(self, query: str, max_items: int = 10) -> Dict[str, Any]:
-        """
-        根据查询检索所有相关记忆（语义搜索优先，关键词回退）。
-
-        返回:
-          {
-            "query": "...",
-            "short_term": [...],
-            "long_term": {"facts": [...], "learnings": [...], "executions": [...]},
-            "summary": "..."
-          }
-        """
+        """根据查询检索相关记忆 (语义搜索优先，关键词回退)。"""
         st_results = []
         lt_facts = []
         lt_learnings = []
@@ -102,18 +88,11 @@ class MemoryRetriever:
         }
 
     def retrieve_for_planning(self, user_input: str) -> str:
-        """
-        为 Planner 检索上下文，返回格式化的字符串。
-
-        Reasonix 模式: "stable environment summary"
-          - 头部: 最近对话历史 (始终注入，不受语义过滤)
-          - 中部: 语义检索到的相关长期事实/学习
-          - 这确保 Planner 既了解"在聊什么"，也了解"相关知识"
-        """
+        """为 Planner 检索上下文，返回格式化字符串。"""
         result = self.retrieve(user_input)
         parts = []
 
-        # ── 首要: 最近对话历史 (Reasonix "stable environment summary") ─
+        # 首要: 最近对话历史
         conversation_history = self._format_conversation_history(max_messages=20)
         if conversation_history:
             parts.append("## 对话历史 (最近)")
@@ -138,16 +117,11 @@ class MemoryRetriever:
 
         return "\n\n".join(parts) if parts else "暂无相关上下文。"
 
-    # ── 对话历史格式化 (Reasonix 风格) ────────────────
+    # ── 对话历史格式化 ──────────────────────────────────
 
     def get_conversation_history(self, max_messages: int = 20,
                                   max_chars: int = 4000) -> str:
-        """
-        获取格式化的对话历史，供 Planner 和 Executor 注入 LLM 上下文。
-
-        Reasonix 风格: 精简但完整的对话视图。
-        每条消息截断到合适长度，保持整体上下文紧凑。
-        """
+        """获取格式化的对话历史，供 Planner 和 Executor 使用。"""
         return self._format_conversation_history(max_messages, max_chars)
 
     def _format_conversation_history(self, max_messages: int = 20,

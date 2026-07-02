@@ -1,10 +1,5 @@
 """
-上下文压缩器 — 当对话历史过长时，用 LLM 将旧消息压缩为要点。
-
-参考 MemGPT/Letta 的 progressive summarization 模式:
-  - 保留最近 60% 的完整消息
-  - 最旧的 40% 压缩为要点存入长时记忆
-  - 同时从短时记忆和向量索引中移除
+上下文压缩器 — 对话历史过长时，将旧消息压缩为要点存入长时记忆。
 """
 from __future__ import annotations
 

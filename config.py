@@ -1,9 +1,8 @@
 """
 全局配置 — Dagent 项目的共享设置入口。
 
-Reasonix 模式: 此文件是 AgentSettings 的薄封装。
-  旧代码: import config; config.MAX_RETRIES  (仍然可用)
-  新代码: from agent.settings import AgentSettings; settings = AgentSettings()
+此文件是 AgentSettings 的薄封装：
+  import config; config.MAX_RETRIES
 
 测试可创建独立的 AgentSettings 实例，无需修改全局状态。
 """

@@ -328,3 +328,30 @@ class TestFactory:
         )
         assert provider._temperature == 0.7
         assert provider._max_tokens == 8000
+
+    def test_create_provider_explicit_openai(self):
+        """显式 provider_name='openai' → OpenAI URL，即使模型名是未知的。"""
+        provider = create_provider(
+            api_key="sk-test",
+            model_name="unknown-model",
+            provider_name="openai",
+        )
+        assert provider.base_url == "https://api.openai.com/v1"
+
+    def test_create_provider_explicit_deepseek(self):
+        """显式 provider_name='deepseek' → DeepSeek URL。"""
+        provider = create_provider(
+            api_key="sk-test",
+            model_name="unknown-model",
+            provider_name="deepseek",
+        )
+        assert provider.base_url == "https://api.deepseek.com"
+
+    def test_create_provider_explicit_overrides_model_detection(self):
+        """显式 provider_name 覆盖模型名自动检测。"""
+        provider = create_provider(
+            api_key="sk-test",
+            model_name="deepseek-chat",  # auto-detect would give deepseek
+            provider_name="openai",       # but explicit overrides
+        )
+        assert provider.base_url == "https://api.openai.com/v1"

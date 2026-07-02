@@ -316,10 +316,9 @@ class TestRunStreamBasic:
 
 
 class TestRunStreamSynthesis:
-    """_synthesize_stream 测试。"""
+    """_synthesize 测试。"""
 
-    @pytest.mark.asyncio
-    async def test_synthesize_single_step_response_field(self, setup_stream_orch):
+    def test_synthesize_single_step_response_field(self, setup_stream_orch):
         """单步成功 → 提取 response 字段。"""
         orch = setup_stream_orch
 
@@ -328,12 +327,11 @@ class TestRunStreamSynthesis:
                     result={"response": "搜索完成，找到 3 个结果"})
         plan = TaskPlan(task_id="t1", goal="搜索", steps=[step], context={})
 
-        answer = await orch._synthesize_stream(plan)
+        answer = orch._synthesize(plan)
         assert "搜索完成" in answer
 
-    @pytest.mark.asyncio
-    async def test_synthesize_multi_step(self, setup_stream_orch):
-        """多步骤 → LLM 合成 (通过 asyncio.to_thread 调用同步 chat)。"""
+    def test_synthesize_multi_step(self, setup_stream_orch):
+        """多步骤 → LLM 合成。"""
         orch = setup_stream_orch
         orch.llm.chat.return_value = MagicMock(content="合成结果: 3 项")
 
@@ -344,7 +342,7 @@ class TestRunStreamSynthesis:
                      result={"response": "分析完成"})
         plan = TaskPlan(task_id="t1", goal="分析", steps=[step1, step2], context={})
 
-        answer = await orch._synthesize_stream(plan)
+        answer = orch._synthesize(plan)
         assert "合成结果" in answer
 
 
