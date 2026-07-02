@@ -1,11 +1,7 @@
 """
-统一工具调用格式 (Unified Tool Call Schema)
+统一工具调用格式。
 
-所有工具调用必须经过此格式 — 这是架构的核心约束。
-格式对齐 OpenAI Codex 的 tool-first 风格：
-  { tool, input, reason }
-
-同时支持适配到 OpenAI function-calling、MCP、以及未来协议。
+所有工具调用经过此格式，对齐 OpenAI function-calling 及未来协议。
 """
 from __future__ import annotations
 
@@ -15,9 +11,7 @@ from typing import Any, Dict, List, Optional, Callable
 from enum import Enum
 
 
-# ═══════════════════════════════════════════════════════
 # Core Data Types
-# ═══════════════════════════════════════════════════════
 
 class ToolResultStatus(str, Enum):
     SUCCESS = "success"
@@ -28,25 +22,15 @@ class ToolResultStatus(str, Enum):
 
 @dataclass
 class ToolCall:
-    """
-    统一工具调用格式 — 系统中唯一的工具调用表示。
+    """统一工具调用格式。"""
 
-    示例:
-      ToolCall(
-          tool="read_file",
-          input={"path": "/foo/bar.py", "lines": "1-50"},
-          reason="需要读取目标文件来理解当前实现"
-      )
-    """
-    tool: str                              # 工具名称
-    input: Dict[str, Any] = field(default_factory=dict)  # 工具参数
-    reason: str = ""                       # 为什么调用此工具 (推理链)
-    call_id: str = ""                      # 唯一调用 ID (由 Router 分配)
-
-    # 元数据
-    priority: int = 0                      # 优先级 (越大越优先)
-    depends_on: List[str] = field(default_factory=list)  # 依赖的 call_id 列表
-    timeout_ms: int = 60_000               # 超时 (毫秒)
+    tool: str
+    input: Dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+    call_id: str = ""
+    priority: int = 0
+    depends_on: List[str] = field(default_factory=list)
+    timeout_ms: int = 60_000
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -81,16 +65,8 @@ class ToolCall:
 
 @dataclass
 class ToolResult:
-    """
-    统一工具结果格式。
+    """统一工具结果格式。"""
 
-    示例:
-      ToolResult(
-          call_id="tc_001",
-          status=ToolResultStatus.SUCCESS,
-          data={"content": "import os\\n...", "lines": 50},
-      )
-    """
     call_id: str
     tool: str
     status: ToolResultStatus
@@ -113,32 +89,20 @@ class ToolResult:
         }
 
 
-# ═══════════════════════════════════════════════════════
-# Tool Definition (声明式)
-# ═══════════════════════════════════════════════════════
-
 @dataclass
 class ToolSchema:
-    """
-    工具的声明式定义 — 包括参数 schema、描述、标签。
-    这是工具注册表中每个工具的身份证。
-    """
+    """工具声明式定义。"""
+
     name: str
     description: str
     parameters: Dict[str, Any] = field(default_factory=dict)
-
-    # 分类 & 发现
-    category: str = "general"              # general / file / code / web / system / memory
+    category: str = "general"
     tags: List[str] = field(default_factory=list)
-
-    # 安全
-    requires_approval: bool = False        # 是否需要人类批准
-    allowed_intents: List[str] = field(default_factory=list)  # 空 = 所有意图允许
-
-    # 执行特征
-    is_idempotent: bool = True             # 幂等 (可安全重试)
-    is_readonly: bool = True               # 只读 (无副作用)
-    estimated_duration_ms: int = 1000       # 预估耗时
+    requires_approval: bool = False
+    allowed_intents: List[str] = field(default_factory=list)
+    is_idempotent: bool = True
+    is_readonly: bool = True
+    estimated_duration_ms: int = 1000
 
     def to_openai_function(self) -> dict:
         """转换为 OpenAI function-calling 格式。"""
@@ -159,38 +123,18 @@ class ToolSchema:
         return asdict(self)
 
 
-# ═══════════════════════════════════════════════════════
-# Tool Protocol (工具必须实现的接口)
-# ═══════════════════════════════════════════════════════
-
 class ToolProtocol:
-    """
-    所有工具必须实现的协议。
-
-    工具开发者只需:
-      1. 继承此类
-      2. 实现 schema 属性 (返回 ToolSchema)
-      3. 实现 execute 方法
-      4. (可选) 实现 validate 方法
-    """
+    """所有工具必须实现的协议。"""
 
     @property
     def schema(self) -> ToolSchema:
-        raise NotImplementedError("子类必须实现 schema 属性")
+        raise NotImplementedError
 
     def validate(self, call: ToolCall) -> tuple[bool, str]:
-        """
-        前置验证。返回 (通过?, 原因)。
-        默认: 总是通过。
-        """
         return True, "ok"
 
     def execute(self, call: ToolCall) -> ToolResult:
-        """
-        执行工具。调用前已通过 validate。
-        返回 ToolResult。
-        """
-        raise NotImplementedError("子类必须实现 execute 方法")
+        raise NotImplementedError
 
     @property
     def name(self) -> str:

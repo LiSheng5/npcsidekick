@@ -1,18 +1,11 @@
 """
 AgentSettings — 可注入的配置数据类。
 
-Reasonix 模式: 配置不是全局变量, 而是可注入的 Settings 对象。
-这使测试可以注入不同配置, 无需修改环境变量或 monkey-patch。
-
-config.py 保留为薄封装 — 创建默认 Settings 实例并导出属性。
-新代码应接受 Settings 对象, 旧代码通过 config 属性访问不受影响。
-
 使用:
-  # 生产
   from agent.settings import AgentSettings
   settings = AgentSettings()
 
-  # 测试
+  # 测试可注入不同配置
   settings = AgentSettings(max_retries=1, reflection_enabled=False)
   planner = Planner(llm, memory, settings=settings)
 """
@@ -37,7 +30,10 @@ def _default_memory_dir() -> Path:
 
 def _load_api_key() -> str:
     """按优先级加载 API Key: 环境变量 > api_key.txt 文件"""
-    key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+    key = (os.getenv("DEEPSEEK_API_KEY")
+           or os.getenv("OPENAI_API_KEY")
+           or os.getenv("ZHIPU_API_KEY")
+           or "")
     if key:
         return key
     key_file = _default_base_dir() / "api_key.txt"

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-Claude 级 Agent v3.0 — 主入口点
-
-架构: Planner → Executor → Tool Router → Memory (4 层)
+奇天 v1.0 — 主入口点
 
 运行:
   python main.py                  # 交互模式
@@ -26,6 +24,7 @@ import io
 import json
 import os
 import sys
+import time
 
 # Fix Windows GBK encoding for emoji
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -34,6 +33,8 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.panel import Panel
 from rich.text import Text
+from rich.live import Live
+from rich.align import Align
 
 from agent.orchestrator import AgentOrchestrator
 from agent.display import AgentDisplay
@@ -43,19 +44,73 @@ console = Console()
 
 
 # ══════════════════════════════════════════════════════════════
+# 紫色太阳 Logo 启动动画
+# ══════════════════════════════════════════════════════════════
+
+# 4 帧光芒旋转 — 外围 "刺" 绕紫色圆球旋转
+_SUN_FRAMES = [
+    # 十字方向
+    """   ╲   ╱
+     ╲ │ ╱
+    ───◉───
+     ╱ │ ╲
+      ╱   ╲""",
+    # 对角方向 (右上→左下)
+    """    │
+      ╲   ╱
+     ╲  ◉  ╱
+      ╱   ╲
+        │""",
+    # 对角方向 (左上→右下)
+    """    │
+      ╱   ╲
+     ╱  ◉  ╲
+      ╲   ╱
+        │""",
+    # 十字方向 (交替)
+    """   ╱   ╲
+     ╱ │ ╲
+    ───◉───
+     ╲ │ ╱
+      ╲   ╱""",
+]
+
+
+def play_intro_animation():
+    """播放紫色太阳 Logo 动画 — 1.5 秒，外围光芒旋转。"""
+    frames = []
+    for art in _SUN_FRAMES:
+        frames.append(Align.center(Text(art, style="bold #9b59b6")))
+
+    try:
+        with Live(frames[0], console=console, refresh_per_second=12, transient=True) as live:
+            # 旋转约 1.5 秒 (4 帧 × 3 圈)
+            for _ in range(3):
+                for frame in frames:
+                    time.sleep(0.12)
+                    live.update(frame)
+    except Exception:
+        pass  # 动画失败不影响功能
+
+
+# ══════════════════════════════════════════════════════════════
 # Banner & Help
 # ══════════════════════════════════════════════════════════════
 
 
 def print_banner():
+    """打印 Banner — 先播 Logo 动画，再显示标题。"""
+    play_intro_animation()
     console.print(Panel(
-        Text("""Claude 级 Agent v3.0 — 生产级架构
+        Text("""奇天 v1.0
 
-架构: Planner → Executor → Tool Router → Memory
-工具: 文件 / 代码 / 网络 / 系统 / 记忆
-特性: 任务分解 · 重试 · 反射 · 自校正 · 流式输出""",
-             style="bold cyan", justify="center"),
-        border_style="cyan",
+可上九天揽月，可下五洋捉鳖
+━━━━━━━━━━━━━━━━━━━━━━━━
+一个智能助手 — 读写文件 · 运行代码 · 搜索网络 · 系统工具 · 持久记忆
+
+Planner → Executor → Tool Router → Memory""",
+             style="bold #c39bdb", justify="center"),
+        border_style="#9b59b6",
         padding=(1, 2),
     ))
 
@@ -114,7 +169,7 @@ def interactive_mode(orch: AgentOrchestrator):
         try:
             answer = orch.run_chat(user_input)
         except Exception as e:
-            answer = f"❌ 执行失败: {e}"
+            answer = f"[错误] 执行失败: {e}"
 
         console.print(f"\n[bold blue]AI[/bold blue]：{answer}\n")
 
@@ -157,7 +212,7 @@ async def streaming_interactive_mode(orch: AgentOrchestrator):
                     display.render(event)
             console.print()  # 换行
         except Exception as e:
-            console.print(f"\n❌ 执行失败: {e}\n")
+            console.print(f"\n[red]错误[/red]: {e}\n")
 
 
 async def streaming_single_query(orch: AgentOrchestrator, query: str):
@@ -196,7 +251,7 @@ def _handle_command(orch: AgentOrchestrator, user_input: str) -> str | None:
 
     if cmd in {"plan", "查看计划"}:
         if orch.current_plan:
-            console.print(f"\n📋 当前计划:\n{orch.current_plan.to_json()}")
+            console.print(f"\n当前计划:\n{orch.current_plan.to_json()}")
         else:
             console.print("暂无活动计划。")
         return "handled"
@@ -210,13 +265,13 @@ def _handle_command(orch: AgentOrchestrator, user_input: str) -> str | None:
         for t in orch.registry:
             s = t.schema
             ro = "(r)" if s.is_readonly else "(w)"
-            app = "🔒" if s.requires_approval else ""
+            app = "[lock]" if s.requires_approval else ""
             console.print(f"  {app}[{s.category}] {s.name} {ro}: {s.description[:80]}")
         return "handled"
 
     if cmd in {"history", "查看历史", "查看执行历史"}:
         summary = orch.get_execution_summary()
-        console.print(f"\n📊 执行摘要:\n{json.dumps(summary, ensure_ascii=False, indent=2)}")
+        console.print(f"\n执行摘要:\n{json.dumps(summary, ensure_ascii=False, indent=2)}")
         last = orch.get_last_execution()
         if last:
             console.print(f"\n最近执行: {last.get('goal', '')[:80]}...")
@@ -240,7 +295,7 @@ def _handle_command(orch: AgentOrchestrator, user_input: str) -> str | None:
 def setup_wizard():
     """首次运行向导 — 输入并保存 API Key。"""
     console.print(Panel(
-        Text("🔑 首次设置 — API Key\n\n"
+        Text("首次设置 — API Key\n\n"
              "你的 API Key 在哪找:\n"
              "  • DeepSeek:  https://platform.deepseek.com/api_keys\n"
              "  • OpenAI:    https://platform.openai.com/api-keys",
@@ -256,7 +311,7 @@ def setup_wizard():
 
     console.print(f"\n将保存到: {config.API_KEY_FILE}")
     config.API_KEY_FILE.write_text(key, "utf-8")
-    console.print("✅ API Key 已保存！下次启动无需再次输入。\n")
+    console.print("[green]API Key 已保存！[/green] 下次启动无需再次输入。\n")
     return key
 
 
@@ -267,7 +322,7 @@ def setup_wizard():
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Dagent v3.0 — 4-layer AI Agent Framework",
+        description="奇天 v1.0 — 4-layer AI Agent Framework",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -325,7 +380,7 @@ def main():
     try:
         orch.initialize()
     except RuntimeError as e:
-        console.print(f"❌ 初始化失败: {e}")
+        console.print(f"[red]初始化失败[/red]: {e}")
         console.print("请检查 API Key 是否正确，或重新运行程序。")
         sys.exit(1)
 

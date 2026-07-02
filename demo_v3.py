@@ -210,7 +210,7 @@ def test_full_orchestrator():
 
 def main():
     print("=" * 60)
-    print("🎯 Claude 级 Agent v3.0 — 架构验证演示")
+    print("奇天 v1.0 — 架构验证演示")
     print("=" * 60)
 
     # 1. 工具调用格式

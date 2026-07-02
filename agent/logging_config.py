@@ -1,13 +1,10 @@
 """
 结构化日志配置 — 基于 structlog + Rich 渲染。
 
-Reasonix 模式: event.Sink — 所有内部事件通过结构化日志发出，
-外部可插拔渲染器 (JSON 生产 / Console 开发 / 测试捕获)。
-
 使用:
   from agent.logging_config import logger, configure_logging
-  configure_logging(level="INFO", mode="console")  # 开发模式
-  configure_logging(level="WARNING", mode="json")  # 生产模式
+  configure_logging(level="INFO", mode="console")
+  configure_logging(level="WARNING", mode="json")
 
   log = logger.bind(component="orchestrator")
   log.info("plan_generated", task_id="task_001", steps_count=3)

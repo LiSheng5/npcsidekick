@@ -62,9 +62,7 @@ class MemoryManager:
                                  max_chars: int = 4000) -> str:
         """
         获取格式化的对话历史，供 Planner/Executor 注入 LLM 上下文。
-
-        Reasonix 风格 "stable environment summary" — 始终可见的对话头部。
-        与 retrieve_for_planning() 不同: 此方法不经过语义过滤，直接返回最近消息。
+        不经过语义过滤，直接返回最近消息。
         """
         return self.retriever.get_conversation_history(max_messages, max_chars)
 

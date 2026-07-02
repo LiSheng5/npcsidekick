@@ -1,4 +1,4 @@
-# Dagent v3.0 — 快速开始指南
+# 奇天 v1.0 — 快速开始指南
 
 ## 环境要求
 
@@ -19,6 +19,8 @@ pip install -r requirements.txt -r requirements-dev.txt
 set OPENAI_API_KEY=your-key-here
 # 或
 set DEEPSEEK_API_KEY=your-key-here
+# 或 (智谱 GLM)
+set ZHIPU_API_KEY=your-key-here
 ```
 
 **方式二**：在项目根目录创建 `api_key.txt`，写入密钥。
@@ -38,8 +40,14 @@ python main.py "现在几点？"
 # 流式单次查询
 python main.py --stream "解释 Python 闭包"
 
-# 指定模型
-python main.py --model gpt-4
+# 指定模型 (自动识别 Provider)
+python main.py --model deepseek-v4-pro     # DeepSeek V4 Pro
+python main.py --model deepseek-v4-flash   # DeepSeek V4 Flash (轻量)
+python main.py --model deepseek-chat       # DeepSeek Chat
+python main.py --model gpt-5.6-sol         # OpenAI GPT-5.6 Sol (旗舰)
+python main.py --model gpt-5.6-terra       # OpenAI GPT-5.6 Terra (均衡)
+python main.py --model glm-5.2             # 智谱 GLM-5.2 (开源)
+python main.py --model gpt-4               # OpenAI GPT-4
 ```
 
 ## 交互命令

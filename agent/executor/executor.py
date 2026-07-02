@@ -177,8 +177,7 @@ class Executor:
     ) -> ToolResult:
         """让 LLM 决定如何执行这一步。"""
 
-        # 构建执行上下文
-        # Reasonix 风格: "stable environment summary" — 对话历史始终在目标之后
+        # 构建执行上下文 — 对话历史在目标之后
         context_parts = [f"## 用户原始目标\n{plan.goal}"]
 
         # 注入对话历史 (从 Planner 传递，包含最近的消息)

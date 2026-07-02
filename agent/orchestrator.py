@@ -1,28 +1,13 @@
 """
 AgentOrchestrator — 主编排器，连接所有 4 层。
 
-这是整个架构的"大脑"，负责:
-  1. 接收用户输入
-  2. 调用 Planner 生成 TaskPlan
-  3. 调用 Executor 逐步执行
-  4. 在每步后调用 Reflector 评估
-  5. 根据 Reflection 决定: continue / retry / replan / stop / ask_user
-  6. 合成最终答案并写入 Memory
-
-架构:
-  User Input
-    → Planner.plan() → TaskPlan
-    → [Loop]
-      → Executor.execute_step() → (step, result)
-      → Reflector.reflect() → decision
-      → if RETRY: re-enter loop
-      → if REPLAN: Planner.replan()
-      → if STOP: break
-      → Memory.log_execution()
+流程:
+  User Input → Planner.plan() → TaskPlan
+    → [Loop] Executor.execute_step() → Reflector.reflect()
+    → continue / retry / replan / stop / ask_user
     → synthesize answer → return to User
 
-流式版本 run_stream() 在相同流程上增加 AsyncGenerator[StreamEvent]，
-实时产出进度事件供 display.py 渲染。
+run_stream() 在此基础上增加 AsyncGenerator[StreamEvent]，实时产出进度事件。
 """
 from __future__ import annotations
 
@@ -50,15 +35,7 @@ import config
 
 
 class AgentOrchestrator:
-    """
-    主编排器 — 整个 Agent 系统的入口。
-
-    使用方式:
-      orch = AgentOrchestrator()
-      orch.initialize()          # 注册所有内置工具
-      answer = orch.run("帮我找出 login 函数的 bug")
-      print(answer)
-    """
+    """主编排器 — Agent 系统的入口。"""
 
     def __init__(self):
         # 核心组件 (初始化时创建)
@@ -241,16 +218,7 @@ class AgentOrchestrator:
         self,
         user_input: str,
     ) -> AsyncGenerator[StreamEvent, None]:
-        """
-        流式运行 Agent 循环 — 实时产出进度事件。
-
-        使用方式:
-          async for event in orch.run_stream("帮我查一下时间"):
-              display.render(event)  # 实时更新 Rich 界面
-
-        流程与 run() 相同 (Plan → Execute → Reflect → Synthesize)，
-        但在关键节点 yield StreamEvent 供 display.py 消费。
-        """
+        """流式运行 Agent 循环 — 实时产出进度事件。"""
         if not self.llm:
             raise RuntimeError("Agent 未初始化。请先调用 initialize()。")
 
@@ -385,16 +353,32 @@ class AgentOrchestrator:
         # ── Phase 3: SYNTHESIZE ────────────────────────
         yield StreamEvent(type=StreamEventType.SYNTHESIS, message="正在生成最终答案...")
 
-        # 尝试流式合成
-        answer = await self._synthesize_stream(plan)
+        # 构建 LLM 消息 (或获取直接答案)
+        messages, direct_answer = self._build_synthesis_prompt(plan)
+
+        if messages is not None and self.llm:
+            # 真正流式: 逐 token 从 LLM stream 读取并 yield text_delta
+            full_answer = ""
+            try:
+                async for chunk in self.llm.stream(messages):
+                    if chunk.has_content:
+                        yield StreamEvent.text_delta(chunk.content)
+                        full_answer += chunk.content
+            except Exception:
+                _log.warning("synthesis_stream_failed", exc_info=True)
+            if full_answer.strip():
+                answer = full_answer
+            else:
+                answer = "任务执行完成。请查看上述步骤结果。"
+        else:
+            answer = direct_answer or "任务执行完成。"
+
         duration = time.time() - start_time
 
         # 记录到记忆
         self._finalize_execution(user_input, plan, answer, duration)
 
         yield StreamEvent.done(answer=answer, duration_sec=duration)
-
-    # ── 查询 ──────────────────────────────────────────
 
     def get_execution_summary(self) -> Dict[str, Any]:
         """获取当前执行的摘要。"""
@@ -445,7 +429,7 @@ class AgentOrchestrator:
                 result_str = json.dumps(s.result, ensure_ascii=False)[:500]
                 results_text.append(f"Step {s.step_id} ({s.description[:60]}): {result_str}")
             elif s.status == StepStatus.FAILED:
-                results_text.append(f"Step {s.step_id} ({s.description[:60]}): ❌ 失败 — {s.error}")
+                results_text.append(f"Step {s.step_id} ({s.description[:60]}): [失败] {s.error}")
 
         if not results_text:
             return "任务已完成，但没有产生具体结果。"
@@ -495,28 +479,24 @@ class AgentOrchestrator:
         except Exception:
             return str(step.result)[:200]
 
-    async def _synthesize_stream(self, plan: TaskPlan) -> str:
+    def _build_synthesis_prompt(self, plan: TaskPlan) -> tuple[Optional[List[dict]], Optional[str]]:
         """
-        流式合成最终答案。
+        构建 LLM 合成所需的消息。如果不需要 LLM 调用则返回直接答案。
 
-        使用 LLM stream() 生成答案，同时 yield text_delta 事件。
-        注意: 此方法需要在 run_stream() 循环中被 await，
-        但由于架构限制 (generator 内不能同时 yield 和 await 子生成器)，
-        这里先做非流式合成，完整答案一次性返回。
-
-        未来: 可以用 asyncio.Queue 解耦 producer/consumer。
+        Returns:
+          (messages, direct_answer) — messages 为 None 时使用 direct_answer，
+          messages 非 None 时需要调用 LLM stream。
         """
-        # 收集所有成功步骤的结果
         results_text = []
         for s in plan.steps:
             if s.is_success and s.result:
                 result_str = json.dumps(s.result, ensure_ascii=False)[:500]
                 results_text.append(f"Step {s.step_id} ({s.description[:60]}): {result_str}")
             elif s.status == StepStatus.FAILED:
-                results_text.append(f"Step {s.step_id} ({s.description[:60]}): ❌ 失败 — {s.error}")
+                results_text.append(f"Step {s.step_id} ({s.description[:60]}): [失败] {s.error}")
 
         if not results_text:
-            return "任务已完成，但没有产生具体结果。"
+            return None, "任务已完成，但没有产生具体结果。"
 
         # 单步成功 → 智能提取
         if len(plan.steps) == 1 and plan.steps[0].is_success:
@@ -524,28 +504,23 @@ class AgentOrchestrator:
             if isinstance(result, dict):
                 for key in ["response", "content", "answer", "summary"]:
                     if key in result:
-                        return str(result[key])
+                        return None, str(result[key])
                 if "time" in result:
-                    return f'当前时间: {result["time"]}'
+                    return None, f'当前时间: {result["time"]}'
                 if "result" in result:
-                    return str(result["result"])
+                    return None, str(result["result"])
                 if "data" in result:
-                    return str(result["data"])
-                return self._synthesize_single_result(plan.steps[0])
-            return str(result)[:1000]
+                    return None, str(result["data"])
+            else:
+                return None, str(result)[:1000]
 
-        # 多步骤: LLM 合成
+        # 需要 LLM 合成 → 返回消息
         results_combined = "\n".join(results_text)
-        try:
-            messages = [
-                {"role": "system", "content": "你是一个结果总结助手。请根据以下步骤执行结果，生成一个简洁、有帮助的最终答案。用自然语言回答。"},
-                {"role": "user", "content": f"原始目标: {plan.goal}\n\n执行结果:\n{results_combined}\n\n请给出最终答案。"},
-            ]
-            # 使用 run_in_executor 在线程池中运行同步 chat()
-            response = await asyncio.to_thread(self.llm.chat, messages)
-            return response.content or "任务执行完成。请查看上述步骤结果。"
-        except Exception:
-            return f"任务执行完成。以下是步骤结果:\n\n{results_combined}"
+        messages = [
+            {"role": "system", "content": "你是一个结果总结助手。请根据以下步骤执行结果，生成一个简洁、有帮助的最终答案。用自然语言回答。"},
+            {"role": "user", "content": f"原始目标: {plan.goal}\n\n执行结果:\n{results_combined}\n\n请给出最终答案。"},
+        ]
+        return messages, None
 
     def _finalize_execution(
         self,
@@ -615,4 +590,4 @@ class AgentOrchestrator:
             # Memory
             SaveNoteTool(), ListNotesTool(), RememberFactTool(), SearchMemoryTool(), SummarizeContextTool(),
         ])
-        log.info("tools_registered", count=len(self.registry))
+        _log.info("tools_registered", count=len(self.registry))

@@ -1,13 +1,20 @@
 """
 Provider Factory — 按模型名自动推断 Provider。
 
+支持的最新模型 (2026 年 7 月):
+  • DeepSeek: V4-Pro, V4-Flash, deepseek-chat
+  • OpenAI: GPT-5.6 Sol / Terra / Luna, GPT-5.5, GPT-4, o1/o3/o4/o5/o6
+  • 智谱 GLM: GLM-5.2, GLM-4 系列
+  • 兼容 Anthropic: claude-* (需代理/兼容端点)
+
 规则 (按优先级):
   1. 如果显式指定 provider_name → 使用对应 Provider
   2. 如果 model_name 含 "deepseek" → OpenAIProvider(api.deepseek.com)
-  3. 如果 model_name 含 "gpt" | "openai" | "o1" | "o3" → OpenAIProvider(api.openai.com)
-  4. 否则使用 base_url (已配置的默认值) → OpenAIProvider
+  3. 如果 model_name 含 "gpt" | "openai" | "o1"~"o9" | "claude" → OpenAIProvider(api.openai.com)
+  4. 如果 model_name 含 "glm" | "zhipu" → OpenAIProvider(open.bigmodel.cn)
+  5. 否则使用 base_url (已配置的默认值) → OpenAIProvider
 
-所有 Provider 都使用 OpenAI 兼容 API 格式 — DeepSeek 的 API 与 OpenAI 兼容。
+所有 Provider 都使用 OpenAI 兼容 API 格式。
 """
 
 from __future__ import annotations
@@ -22,16 +29,24 @@ from agent.providers.openai_provider import OpenAIProvider
 _KNOWN_BASE_URLS: dict[str, str] = {
     "openai": "https://api.openai.com/v1",
     "deepseek": "https://api.deepseek.com",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+}
+
+# 各 provider 的模型名关键词
+_PROVIDER_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "deepseek": ("deepseek",),
+    "openai": ("gpt", "openai", "o1", "o3", "o4", "o5", "o6", "o7", "o8", "o9",
+               "claude", "anthropic"),  # claude 通过兼容代理
+    "zhipu": ("glm", "zhipu", "chatglm"),
 }
 
 
 def detect_provider_name(model_name: str) -> str:
     """按模型名推断 provider 名称。"""
     lower = model_name.lower()
-    if "deepseek" in lower:
-        return "deepseek"
-    if any(kw in lower for kw in ("gpt", "openai", "o1", "o3", "o4")):
-        return "openai"
+    for provider, keywords in _PROVIDER_KEYWORDS.items():
+        if any(kw in lower for kw in keywords):
+            return provider
     return "unknown"  # 未知模型 — 由调用方决定如何处理
 
 
@@ -87,7 +102,10 @@ def create_provider(
       # 自建服务
       p = create_provider("sk-...", "custom-model", base_url="http://localhost:8080/v1")
     """
-    if not base_url:
+    # 显式指定 provider_name → 使用对应已知 base_url
+    if provider_name != "auto" and provider_name in _KNOWN_BASE_URLS:
+        base_url = _KNOWN_BASE_URLS[provider_name]
+    elif not base_url:
         base_url = detect_base_url(model_name)
 
     # 所有已知 provider 都使用 OpenAI 兼容 API
