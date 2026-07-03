@@ -2,7 +2,7 @@
 Provider Factory — 按模型名自动推断 Provider。
 
 支持的最新模型 (2026 年 7 月):
-  • DeepSeek: V4-Pro, V4-Flash, deepseek-chat
+  • DeepSeek: V4-Pro, V4-Flash
   • OpenAI: GPT-5.6 Sol / Terra / Luna, GPT-5.5, GPT-4, o1/o3/o4/o5/o6
   • 智谱 GLM: GLM-5.2, GLM-4 系列
   • 兼容 Anthropic: claude-* (需代理/兼容端点)

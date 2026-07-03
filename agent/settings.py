@@ -62,7 +62,7 @@ class AgentSettings:
 
     # ── LLM ────────────────────────────────────────────
     model_name: str = field(default_factory=lambda:
-        os.getenv("AGENT_MODEL", "deepseek-chat"))
+        os.getenv("AGENT_MODEL", "deepseek-v4-pro"))
     provider_name: str = "auto"  # "auto" | "openai" | "deepseek"
     api_key: str = field(default_factory=_load_api_key)
     base_url: str = field(default_factory=lambda:

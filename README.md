@@ -92,7 +92,6 @@ Dagent auto-detects model names and routes to the correct API endpoint:
 |-------|----------|-------|
 | `deepseek-v4-pro` | DeepSeek | V4 Pro (1.6T, 49B active) |
 | `deepseek-v4-flash` | DeepSeek | V4 Flash (284B, 13B active) |
-| `deepseek-chat` | DeepSeek | DeepSeek Chat |
 | `gpt-5.6-sol` | OpenAI | GPT-5.6 Sol (flagship) |
 | `gpt-5.6-terra` | OpenAI | GPT-5.6 Terra (balanced) |
 | `gpt-5.6-luna` | OpenAI | GPT-5.6 Luna (lightweight) |
@@ -225,7 +224,7 @@ pytest tests/test_planner.py -v
 
 1. **Minimal dependencies** — No LangChain or other heavy frameworks. Core agent logic is under 500 lines; readable in one sitting.
 2. **Testability** — All components accept injected dataclass configuration; every parameter combination is testable.
-3. **Progressive enhancement** — Start simple with `deepseek-chat`, then layer on Planner, Reflector, Memory step by step.
+3. **Progressive enhancement** — Start simple with `deepseek-v4-pro`, then layer on Planner, Reflector, Memory step by step.
 4. **Safety first** — Write operations require confirmation by default; reads execute directly; graceful exit on cancel.
 
 ## License
@@ -277,7 +276,6 @@ Dagent is built from scratch, but deeply inspired by:
 |------|----------|------|
 | `deepseek-v4-pro` | DeepSeek | V4 Pro (1.6T, 49B 激活) |
 | `deepseek-v4-flash` | DeepSeek | V4 Flash (284B, 13B 激活) |
-| `deepseek-chat` | DeepSeek | DeepSeek Chat |
 | `gpt-5.6-sol` | OpenAI | GPT-5.6 Sol (旗舰) |
 | `gpt-5.6-terra` | OpenAI | GPT-5.6 Terra (均衡) |
 | `gpt-5.6-luna` | OpenAI | GPT-5.6 Luna (轻量) |
@@ -410,7 +408,7 @@ pytest tests/test_planner.py -v
 
 1. **最小依赖** — 不引入 LangChain 等重型框架。Agent 的核心逻辑不到 500 行，一眼就能看完。
 2. **可测试性** — 所有组件通过 dataclass 注入配置，测试可覆盖任意组合参数。
-3. **渐进增强** — 从最简单的 `deepseek-chat` 开始跑通，再逐层加 Planner、Reflector、Memory。
+3. **渐进增强** — 从最简单的 `deepseek-v4-pro` 开始跑通，再逐层加 Planner、Reflector、Memory。
 4. **安全第一** — 写操作默认需要确认，读操作直接执行，取消时优雅退出。
 
 ## License

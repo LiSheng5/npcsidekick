@@ -43,7 +43,6 @@ python main.py --stream "解释 Python 闭包"
 # 指定模型 (自动识别 Provider)
 python main.py --model deepseek-v4-pro     # DeepSeek V4 Pro
 python main.py --model deepseek-v4-flash   # DeepSeek V4 Flash (轻量)
-python main.py --model deepseek-chat       # DeepSeek Chat
 python main.py --model gpt-5.6-sol         # OpenAI GPT-5.6 Sol (旗舰)
 python main.py --model gpt-5.6-terra       # OpenAI GPT-5.6 Terra (均衡)
 python main.py --model glm-5.2             # 智谱 GLM-5.2 (开源)
