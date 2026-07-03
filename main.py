@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-奇天 v1.0 — 主入口点
+奇天 v3.1 — 主入口点
 
 运行:
   python main.py                  # 交互模式
@@ -102,7 +102,7 @@ def print_banner():
     """打印 Banner — 先播 Logo 动画，再显示标题。"""
     play_intro_animation()
     console.print(Panel(
-        Text("""奇天 v1.0
+        Text("""奇天 v3.1
 
 可上九天揽月，可下五洋捉鳖
 ━━━━━━━━━━━━━━━━━━━━━━━━
@@ -322,7 +322,7 @@ def setup_wizard():
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="奇天 v1.0 — 4-layer AI Agent Framework",
+        description="奇天 v3.1 — 4-layer AI Agent Framework",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:

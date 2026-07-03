@@ -49,6 +49,7 @@ class ProviderProtocol(ABC):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         response_format: Optional[dict] = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """
         同步非流式对话。
@@ -60,6 +61,8 @@ class ProviderProtocol(ABC):
           temperature: 温度参数 (可选, 使用默认值)
           max_tokens: 最大 token 数 (可选, 使用默认值)
           response_format: {"type": "json_object"} 强制 JSON 输出
+          reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")，
+            通过 extra_body 传递给 API
 
         Returns:
           LLMResponse: content + tool_calls + finish_reason + usage
@@ -74,6 +77,7 @@ class ProviderProtocol(ABC):
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         异步流式对话。
@@ -84,6 +88,8 @@ class ProviderProtocol(ABC):
           tool_choice: "auto" | "none" | "required"
           temperature: 温度参数
           max_tokens: 最大 token 数
+          reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")，
+            通过 extra_body 传递给 API
 
         Yields:
           StreamChunk: content / tool_call_delta / finish_reason

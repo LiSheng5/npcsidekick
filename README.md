@@ -1,85 +1,273 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0-9b59b6?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-3.1-9b59b6?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/python-3.10+-purple?style=flat-square" alt="python">
   <img src="https://img.shields.io/badge/tests-272%20passed-brightgreen?style=flat-square" alt="tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/lines-5%2C011-purple?style=flat-square" alt="lines">
 </p>
 
-<h1 align="center"> 奇天 v1.0</h1>
+<h1 align="center">奇天 v3.1 &middot; Dagent</h1>
 
-<p align="center"><b>可上九天揽月，可下五洋捉鳖</b></p>
+<p align="center"><b>English</b> &nbsp;|&nbsp; <a href="#中文文档">中文文档</a></p>
 
-<p align="center">一个智能助手，愿为你效劳。</p>
+<p align="center">A capable AI agent that reads, writes, runs code, searches the web, and remembers.</p>
 
 <p align="center">
-  读写文件 · 运行代码 · 搜索网络 · 系统工具 · 持久记忆 · 流式输出
+  Read/Write Files &middot; Run Code &middot; Web Search &middot; System Tools &middot; Persistent Memory &middot; Streaming Output
 </p>
 
 ---
 
-##  什么是奇天？
+## What is Dagent?
 
-**奇天** 是一个 4 层 AI Agent 框架，从零构建，不依赖 LangChain、AutoGPT 等第三方 Agent 库。用最少的抽象，做最多的事。
+**Dagent** (奇天) is a 4-layer AI agent framework built from scratch — zero dependencies on LangChain, AutoGPT, or other agent libraries. Maximum capability with minimal abstraction.
 
-核心理念：**规划 → 执行 → 路由 → 记忆**，每层独立且可替换。
+Core philosophy: **Plan → Execute → Route → Remember**. Each layer is independent and replaceable.
 
 ```
-用户输入
+User Input
   │
   ▼
 ┌──────────────────────────────────────┐
 │  Layer 1: Planner                    │
-│  理解意图 → 拆解任务 → 生成执行计划    │
-│  · 支持依赖关系 (A 完成后再 B)        │
-│  · 反思机制 (执行后自我纠正)           │
+│  Understand intent → Decompose →     │
+│  Generate execution plan             │
+│  · Dependency support (B after A)    │
+│  · Reflection (self-correct)         │
 └──────────────┬───────────────────────┘
                │
                ▼
 ┌──────────────────────────────────────┐
 │  Layer 2: Executor                   │
-│  按计划逐步执行，管理重试和超时          │
-│  · 最多 3 次重试                      │
-│  · 每步 60s 超时                      │
-│  · 支持 Skill (组合工具)               │
+│  Execute steps, manage retry &       │
+│  timeout                             │
+│  · Up to 3 retries                   │
+│  · 60s timeout per step              │
+│  · Skill (composite tool) support    │
 └──────────────┬───────────────────────┘
                │
                ▼
 ┌──────────────────────────────────────┐
 │  Layer 3: Tool Router                │
-│  14 个原子工具，按类别路由              │
-│  · 文件 (读写/编辑/搜索)               │
-│  · 代码 (执行/检查/格式化)             │
-│  · 网络 (搜索/抓取)                    │
-│  · 系统 (命令/进程/时间)               │
-│  · 记忆 (存储/检索/笔记)               │
+│  14 atomic tools, routed by category │
+│  · File (R/W/Edit/Search)            │
+│  · Code (Run/Check/Format)           │
+│  · Web (Search/Fetch)                │
+│  · System (Command/Process/Time)     │
+│  · Memory (Store/Retrieve/Notes)     │
 └──────────────┬───────────────────────┘
                │
                ▼
 ┌──────────────────────────────────────┐
 │  Layer 4: Memory                     │
-│  短期记忆 + 长期记忆 + 向量检索         │
-│  · 自动压缩 (超 4000 tokens)           │
-│  · Chroma 向量搜索                     │
-│  · 会话持久化                          │
+│  Short-term + Long-term +            │
+│  Vector retrieval                    │
+│  · Auto-compress (>4000 tokens)      │
+│  · Chroma vector search              │
+│  · Session persistence               │
 └──────────────┬───────────────────────┘
                │
                ▼
-            回答
+            Answer
 ```
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| 🛠 **14 Tools** | File, code, web, system, memory — covers all daily operations |
+| 📋 **Task Planning** | Auto-decompose complex tasks with dependency support and reflection |
+| ⚡ **Streaming Output** | Rich Live real-time display: plan → tool calls → results → answer |
+| 💾 **Multi-layer Memory** | Short-term (conversation) + Long-term (knowledge) + Chroma vector search |
+| 🔀 **Auto-routing** | Model name auto-detection for Provider (DeepSeek / OpenAI / Zhipu) |
+| 🔒 **Safety Confirmation** | Write operations require confirmation; reads execute directly |
+| 🔄 **Fault Tolerance** | Auto-retry up to 3 times without interrupting the overall flow |
+| 📦 **Zero Bloat** | No LangChain, AutoGPT, etc. — just httpx + Rich |
+
+## Supported Models
+
+Dagent auto-detects model names and routes to the correct API endpoint:
+
+| Model | Provider | Notes |
+|-------|----------|-------|
+| `deepseek-v4-pro` | DeepSeek | V4 Pro (1.6T, 49B active) |
+| `deepseek-v4-flash` | DeepSeek | V4 Flash (284B, 13B active) |
+| `deepseek-chat` | DeepSeek | DeepSeek Chat |
+| `gpt-5.6-sol` | OpenAI | GPT-5.6 Sol (flagship) |
+| `gpt-5.6-terra` | OpenAI | GPT-5.6 Terra (balanced) |
+| `gpt-5.6-luna` | OpenAI | GPT-5.6 Luna (lightweight) |
+| `glm-5.2` | Zhipu GLM | GLM-5.2 (open-source) |
+| `gpt-5.5` / `gpt-4` | OpenAI | Legacy GPT series |
+
+All providers use OpenAI-compatible APIs — no extra adapter needed.
+
+## Quick Start
+
+### 1. Install
+
+```bash
+git clone https://github.com/YOUR_USERNAME/dagent.git
+cd dagent
+pip install -r requirements.txt -r requirements-dev.txt
+```
+
+### 2. Configure API Key
+
+```bash
+# Option 1: Environment variable
+set DEEPSEEK_API_KEY=sk-your-key-here
+
+# Option 2: Create api_key.txt in the project root with your key
+```
+
+### 3. Run
+
+```bash
+# Interactive mode
+python main.py
+
+# Stream mode (recommended — watch the agent work in real time)
+python main.py --stream
+
+# Single query
+python main.py "Analyze D:\project\main.py for me"
+
+# Specify model
+python main.py --model glm-5.2 --stream
+```
+
+### 4. Interactive Commands
+
+```
+plan              — View current task plan
+memory            — View memory summary
+tools             — List all available tools
+history           — View execution history
+stream            — Switch to stream mode
+standard          — Switch back to standard mode
+```
+
+## Project Structure
+
+```
+dagent/
+├── main.py                    # CLI entry point (with startup animation)
+├── config.py                  # Global configuration
+├── agent/
+│   ├── orchestrator.py        # Orchestrator (core scheduler)
+│   ├── display.py             # Rich Live streaming display
+│   ├── settings.py            # Injectable settings (dataclass)
+│   ├── planner/
+│   │   ├── planner.py         # Plan generator
+│   │   ├── reflector.py       # Reflection & self-correction
+│   │   └── task_plan.py       # Task plan data structure
+│   ├── executor/
+│   │   ├── executor.py        # Step executor
+│   │   ├── retry.py           # Retry strategy
+│   │   └── step_context.py    # Step context
+│   ├── tools/
+│   │   ├── registry.py        # Tool registry
+│   │   ├── router.py          # Tool router
+│   │   ├── schema.py          # ToolProtocol / ToolCall / ToolResult
+│   │   ├── skill.py           # Composite tool abstraction
+│   │   ├── builtin/
+│   │   │   ├── file_tools.py  # Read/Write/Edit/Search files
+│   │   │   ├── code_tools.py  # Run/Check/Format code
+│   │   │   ├── web_tools.py   # Web search & fetch
+│   │   │   ├── system_tools.py# System commands/processes/time
+│   │   │   └── memory_tools.py# Memory store/retrieve/notes
+│   │   └── adapters/          # Tool adapters (for extensions)
+│   ├── memory/
+│   │   ├── memory_manager.py  # Memory manager
+│   │   ├── short_term.py      # Short-term memory (conversation)
+│   │   ├── long_term.py       # Long-term memory (knowledge)
+│   │   ├── vector_store.py    # Chroma vector store
+│   │   ├── compressor.py      # Context compression
+│   │   └── retriever.py       # Memory retrieval
+│   ├── providers/
+│   │   ├── base.py            # ProviderProtocol
+│   │   ├── openai_provider.py # OpenAI-compatible API
+│   │   └── factory.py         # Auto-routing factory
+│   ├── llm/                   # LLM client
+│   └── logging_config.py      # Logging configuration
+└── tests/                     # 272 tests
+    ├── test_planner.py
+    ├── test_executor.py
+    ├── test_router.py
+    ├── test_orchestrator.py
+    ├── test_orchestrator_stream.py
+    ├── test_providers.py
+    ├── test_memory_manager.py
+    ├── test_memory_tools.py
+    ├── test_code_tools.py
+    ├── test_schema.py
+    ├── test_skill.py
+    ├── test_task_plan.py
+    ├── test_llm_client.py
+    ├── test_reflector.py
+    └── conftest.py
+```
+
+## Tests
+
+```bash
+# All tests
+pytest tests/ -v
+
+# With coverage
+pytest tests/ -v --cov=agent --cov-report=term-missing
+
+# Single module
+pytest tests/test_planner.py -v
+```
+
+## Design Principles
+
+1. **Minimal dependencies** — No LangChain or other heavy frameworks. Core agent logic is under 500 lines; readable in one sitting.
+2. **Testability** — All components accept injected dataclass configuration; every parameter combination is testable.
+3. **Progressive enhancement** — Start simple with `deepseek-chat`, then layer on Planner, Reflector, Memory step by step.
+4. **Safety first** — Write operations require confirmation by default; reads execute directly; graceful exit on cancel.
+
+## License
+
+MIT — use it, modify it, ship it. See [LICENSE](LICENSE).
+
+## Acknowledgments
+
+Dagent is built from scratch, but deeply inspired by:
+
+| Project | Inspiration |
+|---------|-------------|
+| [AutoGPT](https://github.com/Significant-Gravitas/AutoGPT) | Task planning + tool invocation pattern |
+| [LangChain](https://github.com/langchain-ai/langchain) | Tool abstraction protocol & LLM call patterns |
+| [CrewAI](https://github.com/crewAIInc/crewAI) | Multi-agent collaboration & role design |
+| [AutoGLM](https://github.com/THUDM/AutoGLM) | Reflection mechanism design |
+| [Rich](https://github.com/Textualize/rich) | Terminal UI possibilities (our streaming display is built on it) |
+| [Chroma](https://github.com/chroma-core/chroma) | Vector memory inspiration and backend |
+| [DeepSeek](https://www.deepseek.com/) | High-performance, low-cost model API |
+
+---
+
+<h2 id="中文文档">中文文档</h2>
+
+## 什么是奇天？
+
+**奇天** 是一个 4 层 AI Agent 框架，从零构建，不依赖 LangChain、AutoGPT 等第三方 Agent 库。用最少的抽象，做最多的事。
+
+核心理念：**规划 → 执行 → 路由 → 记忆**，每层独立且可替换。
 
 ## 特性
 
 | 特性 | 说明 |
 |------|------|
-|  **14 个工具** | 文件、代码、网络、系统、记忆 — 覆盖日常所有操作 |
-|  **任务计划** | 自动拆解复杂任务，支持步骤依赖和反思纠正 |
-|  **流式输出** | Rich Live 实时显示：计划 → 工具调用 → 结果 → 回答 |
-|  **多层记忆** | 短期 (对话) + 长期 (知识) + Chroma 向量搜索 |
-|  **自动路由** | 模型名自动识别 Provider (DeepSeek / OpenAI / 智谱) |
-|  **安全确认** | 写操作需要用户确认，读操作直接执行 |
-|  **重试容错** | 失败自动重试 3 次，不中断整体流程 |
-|  **零依赖** | 不依赖 LangChain、AutoGPT 等框架，只用 httpx + Rich |
+| 🛠 **14 个工具** | 文件、代码、网络、系统、记忆 — 覆盖日常所有操作 |
+| 📋 **任务计划** | 自动拆解复杂任务，支持步骤依赖和反思纠正 |
+| ⚡ **流式输出** | Rich Live 实时显示：计划 → 工具调用 → 结果 → 回答 |
+| 💾 **多层记忆** | 短期 (对话) + 长期 (知识) + Chroma 向量搜索 |
+| 🔀 **自动路由** | 模型名自动识别 Provider (DeepSeek / OpenAI / 智谱) |
+| 🔒 **安全确认** | 写操作需要用户确认，读操作直接执行 |
+| 🔄 **重试容错** | 失败自动重试 3 次，不中断整体流程 |
+| 📦 **零依赖** | 不依赖 LangChain、AutoGPT 等框架，只用 httpx + Rich |
 
 ## 支持模型
 
@@ -103,8 +291,8 @@
 ### 1. 安装
 
 ```bash
-git clone https://github.com/your/奇天.git
-cd 奇天
+git clone https://github.com/YOUR_USERNAME/dagent.git
+cd dagent
 pip install -r requirements.txt -r requirements-dev.txt
 ```
 
@@ -144,7 +332,7 @@ stream              — 切换到流式模式
 standard            — 切换回标准模式
 ```
 
-##  项目结构
+## 项目结构
 
 ```
 奇天/
@@ -225,11 +413,11 @@ pytest tests/test_planner.py -v
 3. **渐进增强** — 从最简单的 `deepseek-chat` 开始跑通，再逐层加 Planner、Reflector、Memory。
 4. **安全第一** — 写操作默认需要确认，读操作直接执行，取消时优雅退出。
 
-##  License
+## License
 
 MIT — 随便用，随便改。详见 [LICENSE](LICENSE)。
 
-##  致谢
+## 致谢
 
 奇天从零构建，但深受以下项目的启发：
 
@@ -243,10 +431,5 @@ MIT — 随便用，随便改。详见 [LICENSE](LICENSE)。
 | [Chroma](https://github.com/chroma-core/chroma) | 向量记忆的灵感和向量存储后端 |
 | [DeepSeek](https://www.deepseek.com/) | 提供高性能、低成本的模型 API |
 
-> **声明**: 感谢开源社区让一个 16 岁的 builder 能站在巨人的肩膀上。
-
 ---
 
-<p align="center">
-  <sub>Made with ☀️ by a 16-year-old builder who believes AGI starts with clean code.</sub>
-</p>

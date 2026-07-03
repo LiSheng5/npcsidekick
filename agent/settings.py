@@ -68,7 +68,8 @@ class AgentSettings:
     base_url: str = field(default_factory=lambda:
         os.getenv("DEEPSEEK_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.deepseek.com")
     temperature: float = 0.2
-    max_tokens: int = 4096
+    max_tokens: int = 8192
+    reasoning_effort: str | None = None  # None | "low" | "medium" | "high" | "max"
 
     # ── Agent Limits ───────────────────────────────────
     max_plan_steps: int = 20

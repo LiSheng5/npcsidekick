@@ -57,7 +57,8 @@ PROVIDER_NAME = _s.provider_name
 API_KEY       = _s.api_key
 BASE_URL      = _s.base_url
 TEMPERATURE   = _s.temperature
-MAX_TOKENS    = _s.max_tokens
+MAX_TOKENS        = _s.max_tokens
+REASONING_EFFORT  = _s.reasoning_effort
 
 # Agent Limits
 MAX_PLAN_STEPS     = _s.max_plan_steps
