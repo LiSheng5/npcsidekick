@@ -154,7 +154,7 @@ class AgentDisplay:
     def _make_header(self) -> Panel:
         elapsed = time.time() - self._start_time
         status_line = (
-            f"[bold white]奇天 v1.0[/bold white]  |  "
+            f"[bold white]奇天 v3.1[/bold white]  |  "
             f"{self._phase}  |  "
             f"耗时: {elapsed:.1f}s  |  "
             f"步骤: {self._steps_done}/{self._steps_total}"

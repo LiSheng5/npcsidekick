@@ -2,44 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Session Start
+## Session Context
 
-At the start of every session, immediately scan all previous session files in the `.claude/sessions` directory. Identify the most recent incomplete goal by analyzing the session summaries and the user's request patterns. Present a concise recovery summary: what was last worked on, what steps were completed, what remained blocked or unfinished, and suggest three specific next actions. After presenting, ask the user if they'd like to continue where they left off or start fresh. If they choose to continue, automatically load any relevant context (branch, file state, dependencies) and proceed.
-
-When checking project status, spawn an Agent to run git log, read state files, and scan directories in parallel.
-
-## Core Behavior
-
-When the user asks you to perform an action (find a file, create a skill, delete a directory, locate a session), directly execute the appropriate tool (Bash, Edit, Write) to complete it. Do not describe the steps they should take to do it themselves.
-
-## Communication
-
-After creating a file, modifying a file, or completing a multi-step task, explicitly state what you just accomplished (e.g., 'I have created the file `.claude/skills/search/SKILL.md` and committed it'). Do not leave the user guessing whether the task was done hypothetically or actually completed.
-
-## TDD Multi-Agent Workflow
-
-When implementing a feature using test-driven development, lead a team of three AI agents in a self-correcting loop:
-
-- **AGENT 1 — IMPLEMENTER**: Write the minimal code needed to pass the failing test.
-- **AGENT 2 — TESTER**: Run the full test suite using Bash (e.g., `pytest tests/ -v`). Parse the output to identify all failures. Categorize each failure as: compilation error, assertion failure, timeout, or missing import. Write structured results to `test_results.json`.
-- **AGENT 3 — REVIEWER**: Read the implementer's code and test results. Check for code quality, edge cases, and adherence to project style. Suggest specific refactors.
-
-**Workflow**: 1) IMPLEMENTER writes code → 2) TESTER runs tests and logs failures → 3) REVIEWER evaluates and suggests improvements → 4) Repeat until all tests pass. Use TodoWrite to track each cycle. Stop after 10 cycles or all tests green, whichever comes first.
-
-## Project Scaffolding Workflow
-
-When asked to set up a new project from scratch, act as an expert project scaffolder. Given a project description:
-
-1. Ask clarifying questions if needed (max 2 questions) about language, framework, or license.
-2. Initialize a git repository with an appropriate `.gitignore` for the language/framework.
-3. Create a standard folder structure (`src/`, `tests/`, `docs/`, `config/`, etc.).
-4. Set up a package manager (pip, npm, cargo, etc.) and install sensible default dependencies (testing, linting, formatting).
-5. Write a basic `README.md` with project name, setup instructions, and usage.
-6. Create a `CLAUDE.md` file that records the project structure, key decisions, and conventions for future sessions.
-7. Make an initial git commit with message `Initial scaffold: [brief description]`.
-8. Present a summary of everything created and three suggested next development steps.
-
-Execute all steps autonomously, only pausing if a command fails critically. Use Bash for all shell commands, Write for file creation, and Edit for any modifications.
+At session start, check `.claude/sessions/` for prior incomplete work. Present a recovery summary with 3 suggested next actions. When checking project status, spawn Agents for parallel git log, file scan, and state reads.
 
 ## Project Overview
 
@@ -47,7 +12,7 @@ Dagent is a 4-layer AI agent framework: **Planner → Executor → Tool Router �
 
 Phase 1–3 are complete: 272 tests, structured logging, injectable settings, streaming + Rich CLI, Skill concept, and multi-provider abstraction.
 
-Current version: **v3.0** (per `pyproject.toml` and orchestrator docstring).
+Current version: **v3.1** — 272 tests passing, streaming synthesis complete, multi-provider abstraction complete.
 
 ## Commands
 
@@ -339,6 +304,27 @@ Reflection (`reflector.py`) and compression (`compressor.py`) prompts are hardco
 All 272 tests are unit tests with mocked LLM, memory, and tools. No integration or E2E tests exist. Tests use `pytest-asyncio` with `asyncio_mode = "auto"` — any `async def test_*` is auto-wrapped. Do NOT manually call `asyncio.run()` in test bodies.
 
 
+### Dual-Path Executor
+
+The executor has two code paths for tool dispatch (`agent/executor/executor.py`):
+
+1. **Direct dispatch** (L168-178): When Planner assigned a specific tool AND `_needs_llm_decision()` returns False, the tool is called directly without an LLM round-trip. This is the fast path for deterministic steps.
+2. **LLM decision** (L180-217): The LLM sees the step description + available tools and chooses which tool to call (or answers directly without tools).
+
+`_needs_llm_decision()` (L219-232) uses a Chinese-English hybrid keyword list (`["分析", "判断", "决定", "检查", "理解", "评估", "选择", "analyze", "decide", ...]`). Steps with these keywords always go through the LLM path. This is a pragmatic but fragile heuristic — adding new Chinese verbs requires updating the list.
+
+### Web UI
+
+`web/static/index.html` — standalone HTML/CSS/JS frontend with embedded Canvas animation (solar-storm theme, purple color scheme). Currently served by a simple HTTP server for preview; no backend yet.
+
+```bash
+# Start preview server
+python -m http.server 8765 --directory web/static
+# Then open http://127.0.0.1:8765
+```
+
+The page POSTs to `/api/chat` expecting `{"answer": "..."}` — this endpoint does not exist yet. Connecting it to the orchestrator is the next step.
+
 ## Project State
 
 **Current: v3.1** — 272 tests all passing. Phase 1 (tests + structlog + settings), Phase 2 (streaming + Rich CLI + Skill), and Phase 3 (multi-provider abstraction) are complete.
@@ -349,8 +335,10 @@ Key files by phase:
 - **Phase 3**: `agent/providers/` (base + openai_provider + factory), LLMClient refactored as thin wrapper — +21 tests
 
 ### Known Issues
-- `ARCHITECTURE.md`, `QUICKSTART.md`, and `PROJECT_DELIVERY.md` describe v2.0 architecture (AgentState, ToolPipeline, `ai.py` monolithic module) — they are outdated
+- `PROJECT_DELIVERY.md` 的测试数量和版本信息已过时（已在 v3.1 更新）
+- `ARCHITECTURE.md` 和 `QUICKSTART.md` 内容准确，仅版本号标签需要更新（v3.1 已修正）
 - `memory_tools.py` bypasses `LongTermMemory` class by reading/writing JSON files directly. Notes saved via tools are invisible to semantic search (VectorStore)
 - `WebSearchTool` uses DuckDuckGo Instant Answer API (limited); no real search engine integration
-- Streaming synthesis is non-streaming (see Streaming Synthesis Limitation above)
 - No integration/E2E tests — all 272 tests mock LLM, memory, and tools
+- Web UI (`web/static/index.html`) has no backend — `/api/chat` is a mock. Needs FastAPI or similar to connect to AgentOrchestrator
+- `_needs_llm_decision()` keyword list is brittle — Chinese-English hybrid, magic strings

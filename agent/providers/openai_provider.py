@@ -41,7 +41,8 @@ class OpenAIProvider(ProviderProtocol):
         base_url: str,
         model: str,
         temperature: float = 0.2,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
+        reasoning_effort: str | None = None,
     ):
         if not api_key:
             raise RuntimeError("API Key 不能为空")
@@ -49,6 +50,7 @@ class OpenAIProvider(ProviderProtocol):
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
+        self._reasoning_effort = reasoning_effort
         self._base_url = base_url
 
         # 同步客户端
@@ -70,6 +72,7 @@ class OpenAIProvider(ProviderProtocol):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         response_format: Optional[dict] = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """同步非流式对话。"""
         kwargs = dict(
@@ -83,6 +86,11 @@ class OpenAIProvider(ProviderProtocol):
             kwargs["tool_choice"] = tool_choice
         if response_format:
             kwargs["response_format"] = response_format
+
+        # reasoning_effort: 通过 extra_body 传递 (DeepSeek thinking / OpenAI reasoning)
+        _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
+        if _re:
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
         completion = self._client.chat.completions.create(**kwargs)
         choice = completion.choices[0]
@@ -102,6 +110,7 @@ class OpenAIProvider(ProviderProtocol):
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """异步流式对话。"""
         if self._async_client is None:
@@ -121,6 +130,11 @@ class OpenAIProvider(ProviderProtocol):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
+
+        # reasoning_effort: 通过 extra_body 传递 (DeepSeek thinking / OpenAI reasoning)
+        _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
+        if _re:
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
         stream_response = await self._async_client.chat.completions.create(**kwargs)
 

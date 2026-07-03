@@ -74,7 +74,7 @@ def create_provider(
     model_name: str,
     base_url: str = "",
     temperature: float = 0.2,
-    max_tokens: int = 4096,
+    max_tokens: int = 8192,
     provider_name: str = "auto",
 ) -> ProviderProtocol:
     """

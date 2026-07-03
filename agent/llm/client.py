@@ -80,6 +80,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         response_format: Optional[dict] = None,
+        reasoning_effort: str | None = None,
     ) -> "LLMResponse":
         """
         发送对话请求，返回 LLMResponse。
@@ -91,6 +92,7 @@ class LLMClient:
           temperature: 覆盖默认温度
           max_tokens: 覆盖默认 max_tokens
           response_format: {"type": "json_object"} 强制 JSON 输出
+          reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")
         """
         return self._provider.chat(
             messages=messages,
@@ -99,6 +101,7 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=response_format,
+            reasoning_effort=reasoning_effort,
         )
 
     def chat_with_structured_output(
@@ -121,6 +124,7 @@ class LLMClient:
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         流式 LLM 调用 — 返回 AsyncGenerator[StreamChunk]。
@@ -138,6 +142,7 @@ class LLMClient:
           tool_choice: "auto" | "none" | "required"
           temperature: 覆盖默认温度
           max_tokens: 覆盖默认 max_tokens
+          reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")
         """
         async for chunk in self._provider.stream(
             messages=messages,
@@ -145,6 +150,7 @@ class LLMClient:
             tool_choice=tool_choice,
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
         ):
             yield chunk
 

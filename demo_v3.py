@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agent v3.0 演示脚本 — 展示 4 层架构的完整功能。
+Agent v3.1 演示脚本 — 展示 4 层架构的完整功能。
 
 运行:
   python demo_v3.py
@@ -77,8 +77,8 @@ def test_planner():
             print(f"    成功标准: {s.success_criteria}")
 
         # 测试: 复杂任务
-        print("\n▶ 测试: '找出 ai.py 中所有的 print 语句并列出'")
-        plan = planner.plan("找出 ai.py 中所有的 print 语句并列出")
+        print("\n▶ 测试: '找出 config.py 中所有的 import 语句并列出'")
+        plan = planner.plan("找出 config.py 中所有的 import 语句并列出")
         print(f"  目标: {plan.goal}")
         print(f"  步骤数: {len(plan.steps)}")
         for s in plan.steps:
@@ -210,7 +210,7 @@ def test_full_orchestrator():
 
 def main():
     print("=" * 60)
-    print("奇天 v1.0 — 架构验证演示")
+    print("奇天 v3.1 — 架构验证演示")
     print("=" * 60)
 
     # 1. 工具调用格式
