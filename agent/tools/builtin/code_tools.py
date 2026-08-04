@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Set
 
 from agent.tools.schema import ToolProtocol, ToolSchema, ToolCall, ToolResult, ToolResultStatus
+from agent.tools.builtin.file_tools import _check_path
 
 
 # ── 安全配置 ──────────────────────────────────────────
@@ -238,10 +239,13 @@ class RunCodeTool(ToolProtocol):
         allowed_builtins_repr = repr(ALLOWED_BUILTINS)
         forbidden_modules_repr = repr(FORBIDDEN_MODULES)
 
+        import base64
+        encoded_code = base64.b64encode(user_code.encode("utf-8")).decode("ascii")
         wrapper = f'''
 import sys
 import builtins
 import os
+import base64 as _b64
 
 # ── 沙箱初始化 ──────────────────────────
 
@@ -270,9 +274,10 @@ def _safe_import(name, *args, **kwargs):
 
 builtins.__import__ = _safe_import
 
-# 4. 执行用户代码
+# 4. 执行用户代码 (base64 编码避免三引号冲突)
+_user_code = _b64.b64decode("{encoded_code}").decode("utf-8")
 try:
-    exec("""{user_code}""", {{"__builtins__": sandbox_builtins, "__name__": "__main__"}})
+    exec(_user_code, {{"__builtins__": sandbox_builtins, "__name__": "__main__"}})
 except SystemExit:
     pass
 '''
@@ -286,13 +291,14 @@ class LintCodeTool(ToolProtocol):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="lint_code",
-            description="对 Python 代码执行静态检查：语法验证 + 安全扫描 + 风格检查。",
+            description="对 Python 代码执行静态检查：语法验证 + 安全扫描 + 风格检查。code 与 path 二选一（提供其一即可）。",
             parameters={
                 "properties": {
                     "code": {"type": "string", "description": "要检查的 Python 代码"},
+                    "path": {"type": "string", "description": "要检查的 Python 文件路径（与 code 二选一）"},
                     "filename": {"type": "string", "description": "文件名（用于错误报告），默认 '<string>'"},
                 },
-                "required": ["code"],
+                "required": [],
             },
             category="code",
             tags=["code", "lint", "check", "python", "security"],
@@ -302,13 +308,30 @@ class LintCodeTool(ToolProtocol):
 
     def validate(self, call: ToolCall) -> tuple[bool, str]:
         code = call.input.get("code", "")
-        if not code:
-            return False, "参数 'code' 是必需的"
+        path = call.input.get("path", "")
+        if not code and not path:
+            return False, "参数 'code' 和 'path' 至少一个是必需的"
+        if path:
+            ok, msg = _check_path(Path(path))
+            if not ok:
+                return False, msg
         return True, "ok"
 
     def execute(self, call: ToolCall) -> ToolResult:
-        code = call.input["code"]
+        code = call.input.get("code", "")
         fname = call.input.get("filename", "<string>")
+        path = call.input.get("path", "")
+        if not code and path:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    code = f.read()
+            except Exception as e:
+                return ToolResult(
+                    call_id=call.call_id, tool=call.tool,
+                    status=ToolResultStatus.ERROR,
+                    error=f"读取文件失败: {e}",
+                )
+            fname = str(path)
 
         # 1. 语法检查
         syntax_ok = True
