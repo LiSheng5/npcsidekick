@@ -219,7 +219,8 @@ class AnalyzeCodeSkill(Skill):
                     file_content = r.data.get("content", "") if isinstance(r.data, dict) else str(r.data)
                 if r.tool == "lint_code":
                     if r.ok and isinstance(r.data, dict):
-                        lint_issues = r.data.get("issues", [])
+                        # 兼容自定义 dispatcher 的 "issues" 与真实 LintCodeTool 的 "lint_issues"
+                        lint_issues = r.data.get("issues") or r.data.get("lint_issues") or []
                     elif not r.ok:
                         lint_issues = [{"error": r.error}]
 

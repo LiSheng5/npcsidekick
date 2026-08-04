@@ -22,11 +22,11 @@ from agent.planner.task_plan import TaskPlan, Step, StepStatus
 from agent.planner.reflector import Reflector, ReflectionDecision
 from agent.executor.executor import Executor
 from agent.executor.step_context import StepContext
-from agent.tools.router import ToolRouter
+from agent.tools.router import ToolRouter, ApprovalHandler
 from agent.tools.registry import ToolRegistry, get_registry
 from agent.tools.adapters.openai_adapter import OpenAIAdapter
 from agent.tools.schema import ToolCall, ToolResult, ToolResultStatus
-from agent.tools.skill import Skill
+from agent.tools.skill import Skill, AnalyzeCodeSkill
 from agent.memory.memory_manager import MemoryManager
 from agent.llm.client import LLMClient
 from agent.llm.types import StreamEvent, StreamEventType
@@ -66,15 +66,50 @@ class AgentOrchestrator:
         self.llm = LLMClient()
         self.memory = MemoryManager()
         self.registry = get_registry()
-        self.router = ToolRouter(self.registry)
+        self.router = ToolRouter(self.registry, approval_handler=self._approve)
         self.adapter = OpenAIAdapter(self.registry)
+
+        # 注入 MemoryManager 到记忆工具（使它们走向量索引而非直接文件 I/O）
+        from agent.tools.builtin.memory_tools import set_memory_manager
+        set_memory_manager(self.memory)
+
+        # 设置文件工具 workspace 根目录（P0-2：防止路径穿越读/写任意文件）
+        from agent.tools.builtin.file_tools import set_workspace_root
+        from agent.settings import get_settings
+        set_workspace_root(get_settings().base_dir)
 
         # 注册内置工具
         self._register_builtin_tools()
 
+        # 注入 Skill dispatchers — run() 与 run_stream() 共用同一注入点
+        self._inject_skill_dispatchers()
+
         self.planner = Planner(self.llm, self.memory, self.registry)
         self.executor = Executor(self.llm, self.router, self.registry)
         self.reflector = Reflector(self.llm)
+
+    # ── 审批门控（CLI）─────────────────────────────────
+
+    @staticmethod
+    def _approve(call, schema) -> bool:
+        """CLI 审批处理器:打印工具名 + 参数 → 等待用户 Y/n。"""
+        import json
+
+        print(f"\n{'='*60}")
+        print(f"  ⚠  危险操作需要确认")
+        print(f"  工具: {schema.name}")
+        print(f"  描述: {schema.description}")
+        print(f"  参数: {json.dumps(call.input, ensure_ascii=False, indent=2)}")
+        print(f"{'='*60}")
+        while True:
+            ans = input("  批准执行? [y/N]: ").strip().lower()
+            if ans in ("y", "yes"):
+                return True
+            if ans in ("", "n", "no"):
+                return False
+            print("  请输入 y (批准) 或 n (拒绝)")
+
+    # ── 主循环 ──────────────────────────────────────────
 
     def run(self, user_input: str) -> str:
         """
@@ -114,7 +149,8 @@ class AgentOrchestrator:
         max_iterations = config.MAX_PLAN_STEPS * 2  # 安全上限
         iteration = 0
 
-        while not plan.is_complete() and iteration < max_iterations:
+        stopped = False
+        while not plan.is_complete() and not stopped and iteration < max_iterations:
             iteration += 1
 
             # 获取就绪步骤
@@ -125,6 +161,16 @@ class AgentOrchestrator:
                 if failed:
                     log.warning("no_ready_steps", failed_count=len(failed))
                     decision = self.reflector.reflect_plan(plan, failed)
+                    if decision == ReflectionDecision.REPLAN:
+                        log.info("replan_triggered_by_reflect_plan")
+                        plan = self.planner.replan(plan, failed[0], "步骤失败，重新规划")
+                        self.current_plan = plan
+                        continue
+                    elif decision == ReflectionDecision.ASK_USER:
+                        return self._synthesize(plan, "部分步骤执行失败，需要您的指示才能继续。")
+                    elif decision == ReflectionDecision.STOP:
+                        stopped = True
+                        break
                 else:
                     break  # 全部完成
 
@@ -181,6 +227,7 @@ class AgentOrchestrator:
                     )
 
                 elif decision == ReflectionDecision.STOP:
+                    stopped = True
                     break
 
         # ── Phase 3: SYNTHESIZE ────────────────────────
@@ -204,6 +251,8 @@ class AgentOrchestrator:
         }
         stripped = user_input.lower().strip().lstrip('﻿')
         if stripped in simple_greetings:
+            if self.memory is None:
+                return "你好！请先初始化 Agent (调用 initialize())。"
             self.memory.add_message("user", user_input)
             answer = "你好！有什么我可以帮你的吗？"
             self.memory.add_message("assistant", answer)
@@ -254,7 +303,8 @@ class AgentOrchestrator:
         max_iterations = config.MAX_PLAN_STEPS * 2
         iteration = 0
 
-        while not plan.is_complete() and iteration < max_iterations:
+        stopped = False
+        while not plan.is_complete() and not stopped and iteration < max_iterations:
             iteration += 1
 
             ready = plan.get_ready_steps()
@@ -267,6 +317,27 @@ class AgentOrchestrator:
                         reason=f"{len(failed)} 个步骤失败，需要重新规划",
                     )
                     decision = self.reflector.reflect_plan(plan, failed)
+                    if decision == ReflectionDecision.REPLAN:
+                        log.info("replan_triggered_by_reflect_plan")
+                        plan = self.planner.replan(plan, failed[0], "步骤失败，重新规划")
+                        self.current_plan = plan
+                        yield StreamEvent.plan_ready(
+                            goal=plan.goal,
+                            steps_count=len(plan.steps),
+                        )
+                        continue
+                    elif decision == ReflectionDecision.ASK_USER:
+                        yield StreamEvent.error(
+                            message="部分步骤执行失败，需要您的指示才能继续。",
+                        )
+                        answer = self._synthesize(plan, "部分步骤执行失败，需要您的指示才能继续。")
+                        duration = time.time() - start_time
+                        self._finalize_execution(user_input, plan, answer, duration)
+                        yield StreamEvent.done(answer=answer, duration_sec=duration)
+                        return
+                    elif decision == ReflectionDecision.STOP:
+                        stopped = True
+                        break
                 else:
                     break
 
@@ -348,6 +419,7 @@ class AgentOrchestrator:
                     return
 
                 elif decision == ReflectionDecision.STOP:
+                    stopped = True
                     break
 
         # ── Phase 3: SYNTHESIZE ────────────────────────
@@ -365,7 +437,7 @@ class AgentOrchestrator:
                         yield StreamEvent.text_delta(chunk.content)
                         full_answer += chunk.content
             except Exception:
-                _log.warning("synthesis_stream_failed", exc_info=True)
+                _log.exception("synthesis_stream_failed")
             if full_answer.strip():
                 answer = full_answer
             else:
@@ -589,5 +661,7 @@ class AgentOrchestrator:
             GetTimeTool(), CalculatorTool(),
             # Memory
             SaveNoteTool(), ListNotesTool(), RememberFactTool(), SearchMemoryTool(), SummarizeContextTool(),
+            # Skills (组合工具 — 内部拆解为原子调用)
+            AnalyzeCodeSkill(),
         ])
         _log.info("tools_registered", count=len(self.registry))
