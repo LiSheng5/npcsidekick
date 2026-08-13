@@ -95,7 +95,7 @@ class ContextCompressor:
             saved_count = 1
 
         # ── 从短时记忆中移除 ──────────────────────────
-        if saved_count > 0:
+        if saved_count > 0 or split_idx > 0:
             self.memory.short_term.trim_oldest(split_idx)
 
         return split_idx

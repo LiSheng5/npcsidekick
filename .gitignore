@@ -5,7 +5,6 @@ __pycache__/
 api_key.txt
 .env
 agent/memory/store/
-web/
-.claude/sessions/
-.claude/usage-data/
-.claude/shell-snapshots/
+npc/store/
+.claude/
+npc/store_test/

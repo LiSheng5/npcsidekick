@@ -1,12 +1,29 @@
 """
 记忆工具 — 笔记 / 事实 / 搜索记忆
+
+依赖注入:
+  orchestrator.initialize() 调用 set_memory_manager() 注入 MemoryManager。
+  如果已注入，工具会委托给 MemoryManager（含向量索引）；
+  如果未注入，降级为直接文件 I/O（向后兼容）。
 """
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional, TYPE_CHECKING
 
 from agent.tools.schema import ToolProtocol, ToolSchema, ToolCall, ToolResult, ToolResultStatus
 import config
+
+if TYPE_CHECKING:
+    from agent.memory.memory_manager import MemoryManager
+
+# 模块级注入点 — orchestrator 在初始化时设置
+_memory_manager: Optional["MemoryManager"] = None
+
+
+def set_memory_manager(mm: "MemoryManager") -> None:
+    """注入 MemoryManager（由 orchestrator.initialize() 调用）。"""
+    global _memory_manager
+    _memory_manager = mm
 
 
 class SaveNoteTool(ToolProtocol):
@@ -64,7 +81,15 @@ class RememberFactTool(ToolProtocol):
         if not fact:
             return ToolResult(call_id=call.call_id, tool=call.tool, status=ToolResultStatus.ERROR, error="缺少事实内容")
 
-        # 写入长期记忆文件
+        # 优先委托 MemoryManager（含向量索引 + 原子写入）
+        if _memory_manager is not None:
+            try:
+                _memory_manager.remember(fact, category="tool")
+                return ToolResult(call_id=call.call_id, tool=call.tool, status=ToolResultStatus.SUCCESS, data={"saved_fact": fact})
+            except Exception:
+                pass  # 降级到文件 I/O
+
+        # 降级: 直接写入长期记忆文件
         memory_data = {}
         if config.LONG_TERM_FILE.exists():
             try:

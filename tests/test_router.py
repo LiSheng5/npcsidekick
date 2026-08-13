@@ -222,3 +222,102 @@ class TestRouterRecommendation:
         last = router.last_result()
         assert last is not None
         assert last.tool == "read_file"
+
+
+# ── Fake Dangerous Tool（审批门控测试用）─────────────────
+
+
+class FakeRunCodeTool(ToolProtocol):
+    schema = ToolSchema(
+        name="run_code",
+        description="执行 Python 代码",
+        parameters={
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"],
+        },
+        tags=["code", "execute"],
+        category="code",
+        requires_approval=True,   # ← 需要审批
+    )
+
+    def validate(self, call: ToolCall):
+        return True, ""
+
+    def execute(self, call: ToolCall):
+        return ToolResult(
+            call_id=call.call_id,
+            tool="run_code",
+            status=ToolResultStatus.SUCCESS,
+            data={"output": "ok"},
+        )
+
+
+# ── Approval Gate Tests ────────────────────────────────────
+
+
+class TestRouterApproval:
+
+    @pytest.fixture
+    def registry_with_dangerous(self, real_registry):
+        real_registry.register(FakeRunCodeTool())
+        return real_registry
+
+    def test_dangerous_tool_rejected_without_handler(self, registry_with_dangerous):
+        """没有 approval_handler 时，requires_approval 工具必须 REJECT（安全默认）。"""
+        router = ToolRouter(registry_with_dangerous)  # ← 故意不传 handler
+        call = ToolCall(tool="run_code", input={"code": "print(1)"})
+        result = router.dispatch(call)
+
+        assert result.status == ToolResultStatus.REJECTED
+        assert "审批" in result.error
+
+    def test_dangerous_tool_approved_when_handler_returns_true(self, registry_with_dangerous):
+        """handler 返回 True → 正常执行。"""
+        router = ToolRouter(registry_with_dangerous, approval_handler=lambda c, s: True)
+        call = ToolCall(tool="run_code", input={"code": "print(1)"})
+        result = router.dispatch(call)
+
+        assert result.ok is True
+        assert result.data["output"] == "ok"
+
+    def test_dangerous_tool_rejected_when_handler_returns_false(self, registry_with_dangerous):
+        """handler 返回 False → REJECTED。"""
+        router = ToolRouter(registry_with_dangerous, approval_handler=lambda c, s: False)
+        call = ToolCall(tool="run_code", input={"code": "print(1)"})
+        result = router.dispatch(call)
+
+        assert result.status == ToolResultStatus.REJECTED
+        assert "拒绝" in result.error
+
+    def test_safe_tool_unaffected_by_approval_gate(self, registry_with_dangerous):
+        """不需要审批的工具不应触发 handler。"""
+        handler_called = [0]
+
+        def counting_handler(c, s):
+            handler_called[0] += 1
+            return True
+
+        router = ToolRouter(registry_with_dangerous, approval_handler=counting_handler)
+        result = router.dispatch(ToolCall(tool="read_file", input={"path": "/a.txt"}))
+
+        assert result.ok is True
+        assert handler_called[0] == 0  # ← handler 根本不该被调用
+
+    def test_approval_handler_receives_call_and_schema(self, registry_with_dangerous):
+        """handler 应收到正确的 ToolCall 和 ToolSchema 参数。"""
+        received = {}
+
+        def capture_handler(call, schema):
+            received["call"] = call
+            received["schema"] = schema
+            return True
+
+        router = ToolRouter(registry_with_dangerous, approval_handler=capture_handler)
+        call = ToolCall(tool="run_code", input={"code": "print(42)"}, reason="测试审批")
+        router.dispatch(call)
+
+        assert received["call"].tool == "run_code"
+        assert received["call"].input == {"code": "print(42)"}
+        assert received["schema"].name == "run_code"
+        assert received["schema"].requires_approval is True

@@ -1,0 +1,84 @@
+"""
+NPCSidekick — 人格 JSON 加载器（制作者放文件即用）。
+
+制作者体验: 往 npcs/ 文件夹放一个 <id>.json, NPC 就活了。
+零 Python 代码 — 只改 JSON。
+
+格式示例见 npc/personas/example.json。
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Dict, Optional
+
+# 自主日常活动允许的动作（routine 字段的 action 枚举 — 校验与调度共用）
+ROUTINE_ACTIONS = ("gather", "rest", "say")
+
+# 必需字段（缺失即报错，防制作者漏填导致 NPC 行为异常）
+REQUIRED_FIELDS = ("id", "identity", "personality", "speech_style", "taboos")
+# 可选字段（有默认值）
+OPTIONAL_FIELDS = ("name", "desires", "goals", "rules", "routine", "system_prompt_override", "context_extra")
+
+
+def _clean_routine(path_name: str, routine) -> list:
+    """校验 routine（自主日常表）。坏结构 → 抛错拒整个文件；坏单项 → 打印警告丢弃。
+
+    制作者友好原则: 手改 JSON 出错时 NPC 顶多"不动"，绝不炸服务。
+    """
+    if not isinstance(routine, list):
+        raise ValueError(f"{path_name} 的 routine 必须是列表")
+    cleaned = []
+    for i, item in enumerate(routine):
+        bad = None
+        if not isinstance(item, dict):
+            bad = "不是对象"
+        elif item.get("action") not in ROUTINE_ACTIONS:
+            bad = f"action 无效（{item.get('action')}，可用: {'/'.join(ROUTINE_ACTIONS)}）"
+        elif item["action"] == "gather" and not item.get("resource"):
+            bad = "gather 缺少 resource"
+        else:
+            for field in ("count", "ticks", "weight"):
+                if field in item and (not isinstance(item[field], (int, float)) or item[field] <= 0):
+                    bad = f"{field} 必须是正数"
+                    break
+        if bad:
+            print(f"[persona_loader] 跳过 {path_name}: routine 第 {i + 1} 项（{bad}）")
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
+def load_persona_from_json(path: Path) -> Dict:
+    """从 JSON 文件加载一个人格。校验必需字段。"""
+    # utf-8-sig: 兼容 Windows 工具（记事本/PowerShell）写入的 BOM — 制作者陷阱防御
+    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    # 注意: taboos 可以是空列表 []（合法），不能按 falsy 判断缺失
+    missing = [f for f in REQUIRED_FIELDS if f not in data or data.get(f) in (None, "")]
+    if missing:
+        raise ValueError(f"{path.name} 缺少必需字段: {missing}（必需: {REQUIRED_FIELDS}）")
+    if not data.get("name"):
+        data["name"] = data["id"]
+    if not isinstance(data.get("taboos", []), list):
+        raise ValueError(f"{path.name} 的 taboos 必须是列表")
+    if "routine" in data:
+        data["routine"] = _clean_routine(path.name, data["routine"])
+    return data
+
+
+def load_personas_from_dir(directory: str) -> Dict[str, Dict]:
+    """扫描目录下所有 *.json 人格文件 → {id: persona}。
+
+    找不到目录/没有 json → 返回空（调用方用默认角色表兜底）。
+    """
+    d = Path(directory)
+    personas: Dict[str, Dict] = {}
+    if not d.is_dir():
+        return personas
+    for f in sorted(d.glob("*.json")):
+        try:
+            p = load_persona_from_json(f)
+            personas[p["id"]] = p
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(f"[persona_loader] 跳过 {f.name}: {exc}")
+    return personas

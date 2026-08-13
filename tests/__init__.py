@@ -1,1 +1,1 @@
-# Dagent tests
+# NPCSidekick tests

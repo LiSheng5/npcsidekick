@@ -1,7 +1,7 @@
 [project]
-name = "dagent"
+name = "npcsidekick"
 version = "3.1.0"
-description = "Dagent — 4-layer AI agent (Planner → Executor → Tool Router → Memory)"
+description = "NPCSidekick — AI 游戏角色框架（游戏 NPC 大脑：对话 + 记忆 + 自主日常 + 规则优先）"
 requires-python = ">=3.10"
 readme = "README.md"
 license = {text = "MIT"}
@@ -30,7 +30,8 @@ python_files = ["test_*.py"]
 asyncio_mode = "auto"
 
 [tool.setuptools.packages.find]
-include = ["agent*"]
+include = ["agent*", "npc*"]
 
 [project.scripts]
-dagent = "main:main"
+npcsidekick = "main:main"
+npc-server = "npc.server:main"

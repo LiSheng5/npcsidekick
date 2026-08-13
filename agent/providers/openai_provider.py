@@ -31,7 +31,7 @@ class OpenAIProvider(ProviderProtocol):
       )
       # DeepSeek
       provider = OpenAIProvider(
-          api_key="sk-...", base_url="https://api.deepseek.com", model="deepseek-chat",
+          api_key="sk-...", base_url="https://api.deepseek.com", model="deepseek-v4-pro",
       )
     """
 
@@ -52,6 +52,7 @@ class OpenAIProvider(ProviderProtocol):
         self._max_tokens = max_tokens
         self._reasoning_effort = reasoning_effort
         self._base_url = base_url
+        self._api_key = api_key
 
         # 同步客户端
         self._client = OpenAI(api_key=api_key, base_url=base_url)
@@ -87,10 +88,10 @@ class OpenAIProvider(ProviderProtocol):
         if response_format:
             kwargs["response_format"] = response_format
 
-        # reasoning_effort: 通过 extra_body 传递 (DeepSeek thinking / OpenAI reasoning)
+        # reasoning_effort: 通过 extra_body 传递 (DeepSeek thinking)
         _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
         if _re:
-            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+            kwargs["extra_body"] = {"thinking": {"type": "enabled", "reasoning_effort": _re}}
 
         completion = self._client.chat.completions.create(**kwargs)
         choice = completion.choices[0]
@@ -115,7 +116,7 @@ class OpenAIProvider(ProviderProtocol):
         """异步流式对话。"""
         if self._async_client is None:
             self._async_client = AsyncOpenAI(
-                api_key=self._client.api_key,
+                api_key=self._api_key,
                 base_url=self._base_url,
             )
 
@@ -131,10 +132,10 @@ class OpenAIProvider(ProviderProtocol):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
 
-        # reasoning_effort: 通过 extra_body 传递 (DeepSeek thinking / OpenAI reasoning)
+        # reasoning_effort: 通过 extra_body 传递 (DeepSeek thinking)
         _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
         if _re:
-            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+            kwargs["extra_body"] = {"thinking": {"type": "enabled", "reasoning_effort": _re}}
 
         stream_response = await self._async_client.chat.completions.create(**kwargs)
 

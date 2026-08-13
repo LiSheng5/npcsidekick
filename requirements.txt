@@ -1,4 +1,4 @@
-# Dagent Production Dependencies
+# NPCSidekick Production Dependencies
 # Install: pip install -r requirements.txt
 
 # LLM
@@ -19,6 +19,10 @@ httpx>=0.28
 
 # Config & Validation
 pydantic>=2.0
+
+# Web UI
+fastapi>=0.115
+uvicorn>=0.34
 
 # Dev & Test (install separately: pip install -r requirements-dev.txt)
 # pytest>=8.0

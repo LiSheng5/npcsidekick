@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import config
+from agent.logging_config import log as _log
 
 # ChromaDB 是可选依赖 — 未安装时降级为关键词匹配
 try:
@@ -101,8 +102,8 @@ class VectorStore:
                 documents=[text],
                 metadatas=[metadata],
             )
-        except Exception:
-            pass  # 静默失败 — 向量索引不应中断主流程
+        except Exception as e:
+            _log.warning("vector_store_add_failed", doc_id=doc_id, error=str(e))
 
     def add_batch(self, items: list[tuple[str, str, dict]]) -> None:
         """批量添加文档。每项: (doc_id, text, metadata)。"""
@@ -118,8 +119,8 @@ class VectorStore:
         if ids:
             try:
                 self._collection.upsert(ids=ids, documents=docs, metadatas=metas)
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning("vector_store_add_batch_failed", count=len(ids), error=str(e))
 
     # ── Search ──────────────────────────────────────────
 
@@ -172,8 +173,8 @@ class VectorStore:
             return
         try:
             self._collection.delete(ids=[doc_id])
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("vector_store_delete_failed", doc_id=doc_id, error=str(e))
 
     def delete_by_prefix(self, prefix: str) -> None:
         """删除所有 id 以 prefix 开头的文档。"""
@@ -184,8 +185,8 @@ class VectorStore:
             to_delete = [i for i in all_ids if i.startswith(prefix)]
             if to_delete:
                 self._collection.delete(ids=to_delete)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("vector_store_delete_prefix_failed", prefix=prefix, error=str(e))
 
     def reset(self) -> None:
         """清空并重建 collection。"""
@@ -197,5 +198,5 @@ class VectorStore:
                 name="agent_memory",
                 metadata={"hnsw:space": "cosine"},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("vector_store_reset_failed", error=str(e))

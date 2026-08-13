@@ -92,16 +92,16 @@ class AgentDisplay:
     # ── Event Handlers ───────────────────────────────────
 
     def _on_thinking(self, event: StreamEvent) -> None:
-        self._phase = "🤔 思考中..."
+        self._phase = "思考中..."
         self._goal = event.message
 
     def _on_plan_ready(self, event: StreamEvent) -> None:
-        self._phase = "📋 计划就绪"
+        self._phase = "计划就绪"
         self._goal = event.data.get("goal", self._goal)
         self._steps_total = event.data.get("steps_count", 0)
 
     def _on_step_start(self, event: StreamEvent) -> None:
-        self._phase = "⚡ 执行中"
+        self._phase = "执行中"
         step_id = event.data.get("step_id", "?")
         self._current_step = f"步骤 {step_id}: {event.data.get('description', '')}"
         self._current_tool = event.data.get("tool", "")
@@ -132,7 +132,7 @@ class AgentDisplay:
         self._output_text += content
 
     def _on_synthesis(self, event: StreamEvent) -> None:
-        self._phase = "✨ 生成答案..."
+        self._phase = "生成答案..."
 
     def _on_done(self, event: StreamEvent) -> None:
         self._phase = "✅ 完成"
@@ -154,7 +154,7 @@ class AgentDisplay:
     def _make_header(self) -> Panel:
         elapsed = time.time() - self._start_time
         status_line = (
-            f"[bold white]奇天 v3.1[/bold white]  |  "
+            f"[bold white]NPCSidekick v3.1[/bold white]  |  "
             f"{self._phase}  |  "
             f"耗时: {elapsed:.1f}s  |  "
             f"步骤: {self._steps_done}/{self._steps_total}"
@@ -187,7 +187,7 @@ class AgentDisplay:
         if self._current_step:
             content += f"[bold yellow]当前:[/bold yellow]\n  {self._current_step}"
             if self._current_tool:
-                content += f"\n  🔧 工具: {self._current_tool}"
+                content += f"\n  工具: {self._current_tool}"
             content += "\n\n"
 
         if self._steps_total > 0:
@@ -202,7 +202,7 @@ class AgentDisplay:
 
         return Panel(
             content,
-            title="📋 计划",
+            title="计划",
             border_style=self._border_style,
             box=box.ROUNDED,
         )
@@ -221,7 +221,7 @@ class AgentDisplay:
 
         return Panel(
             content,
-            title="💬 输出",
+            title="输出",
             border_style=self._border_style,
             box=box.ROUNDED,
         )

@@ -1,433 +1,185 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-3.1-9b59b6?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/python-3.10+-purple?style=flat-square" alt="python">
-  <img src="https://img.shields.io/badge/tests-272%20passed-brightgreen?style=flat-square" alt="tests">
+  <img src="https://img.shields.io/badge/tests-440%20passed-brightgreen?style=flat-square" alt="tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
-  <img src="https://img.shields.io/badge/lines-5%2C011-purple?style=flat-square" alt="lines">
+  <img src="https://img.shields.io/badge/game-Godot%204.x-orange?style=flat-square" alt="godot">
 </p>
 
-<h1 align="center">奇天 v3.1 &middot; Dagent</h1>
+<h1 align="center">NPCSidekick</h1>
+
+<p align="center"><b>AI-driven game NPC framework</b> — villagers who work, follow orders, and remember.</p>
 
 <p align="center"><b>English</b> &nbsp;|&nbsp; <a href="#中文文档">中文文档</a></p>
 
-<p align="center">A capable AI agent that reads, writes, runs code, searches the web, and remembers.</p>
+---
 
-<p align="center">
-  Read/Write Files &middot; Run Code &middot; Web Search &middot; System Tools &middot; Persistent Memory &middot; Streaming Output
-</p>
+## 🎬 Demo
+
+<video src="docs/demo.mp4" controls width="100%"></video>
 
 ---
 
-## What is Dagent?
+## What is it?
 
-**Dagent** (奇天) is a 4-layer AI agent framework built from scratch — zero dependencies on LangChain, AutoGPT, or other agent libraries. Maximum capability with minimal abstraction.
+**NPCSidekick** is the brain for game characters. A small local Python server drives NPCs in any game that can speak HTTP:
 
-Core philosophy: **Plan → Execute → Route → Remember**. Each layer is independent and replaceable.
+- **NPCs actually work** — they autonomously gather resources and bring them back to the camp. The routine runs on a tick-driven world simulation, *no LLM in the loop* — fast and deterministic
+- 💬**Orders in plain dialogue** — say `give me 2 wood` and the NPC replies honestly (accept or refuse), then *really does it*: walks to the forest, chops, comes back, and hands the wood to your inventory
+- 🧠**They remember** — memory cards are plain editable JSON files; restart the server and progress survives
+- 🎨**Add an NPC by dropping one JSON file** — personality, speech style, daily routine table. Zero game code
+- **Game integration = 3 HTTP endpoints** — `/api/talk`, `/api/state`, `/api/task`. A reference Godot integration pattern is in [docs/游戏接入.md](docs/游戏接入.md)
+- **Hybrid architecture** — LLM is used only for dialogue and decisions; game mechanics stay in deterministic code. No API key? The village still lives (rule fallback)
+
+## How it works
 
 ```
-User Input
-  │
-  ▼
-┌──────────────────────────────────────┐
-│  Layer 1: Planner                    │
-│  Understand intent → Decompose →     │
-│  Generate execution plan             │
-│  · Dependency support (B after A)    │
-│  · Reflection (self-correct)         │
-└──────────────┬───────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────┐
-│  Layer 2: Executor                   │
-│  Execute steps, manage retry &       │
-│  timeout                             │
-│  · Up to 3 retries                   │
-│  · 60s timeout per step              │
-│  · Skill (composite tool) support    │
-└──────────────┬───────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────┐
-│  Layer 3: Tool Router                │
-│  14 atomic tools, routed by category │
-│  · File (R/W/Edit/Search)            │
-│  · Code (Run/Check/Format)           │
-│  · Web (Search/Fetch)                │
-│  · System (Command/Process/Time)     │
-│  · Memory (Store/Retrieve/Notes)     │
-└──────────────┬───────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────┐
-│  Layer 4: Memory                     │
-│  Short-term + Long-term +            │
-│  Vector retrieval                    │
-│  · Auto-compress (>4000 tokens)      │
-│  · Chroma vector search              │
-│  · Session persistence               │
-└──────────────┬───────────────────────┘
-               │
-               ▼
-            Answer
+┌─────────────┐   HTTP (3 endpoints)   ┌──────────────────────────────────┐
+│  Your game  │ ◄────────────────────► │   NPCSidekick server (local)     │
+│ (Godot/…)   │   talk / state / task  │                                  │
+│  mirrors &  │                        │  ┌────────────────────────────┐  │
+│  performs   │                        │  │ tick loop (every 3s)       │  │
+└─────────────┘                        │  │  · one step per NPC/tick   │  │
+                                       │  │  · routine table (weighted)│  │
+                                       │  │  · player orders win       │  │
+                                       │  │  · resource regen          │  │
+                                       │  └────────────────────────────┘  │
+                                       │  ┌────────────────────────────┐  │
+                                       │  │ dialogue (LLM, optional)   │  │
+                                       │  │ rules fast-path fallback   │  │
+                                       │  └────────────────────────────┘  │
+                                       │  memory cards = editable JSON    │
+                                       └──────────────────────────────────┘
 ```
 
-## Features
+**Design lineage**: AI Town–style tick loop · Stanford Generative Agents memory · complexity tiers (ordinary NPCs = rules + small LLM; the full agent loop is reserved for NPCSidekick v4).
 
-| Feature | Description |
-|---------|-------------|
-| 🛠 **14 Tools** | File, code, web, system, memory — covers all daily operations |
-| 📋 **Task Planning** | Auto-decompose complex tasks with dependency support and reflection |
-| ⚡ **Streaming Output** | Rich Live real-time display: plan → tool calls → results → answer |
-| 💾 **Multi-layer Memory** | Short-term (conversation) + Long-term (knowledge) + Chroma vector search |
-| 🔀 **Auto-routing** | Model name auto-detection for Provider (DeepSeek / OpenAI / Zhipu) |
-| 🔒 **Safety Confirmation** | Write operations require confirmation; reads execute directly |
-| 🔄 **Fault Tolerance** | Auto-retry up to 3 times without interrupting the overall flow |
-| 📦 **Zero Bloat** | No LangChain, AutoGPT, etc. — just httpx + Rich |
-
-## Supported Models
-
-Dagent auto-detects model names and routes to the correct API endpoint:
-
-| Model | Provider | Notes |
-|-------|----------|-------|
-| `deepseek-v4-pro` | DeepSeek | V4 Pro (1.6T, 49B active) |
-| `deepseek-v4-flash` | DeepSeek | V4 Flash (284B, 13B active) |
-| `gpt-5.6-sol` | OpenAI | GPT-5.6 Sol (flagship) |
-| `gpt-5.6-terra` | OpenAI | GPT-5.6 Terra (balanced) |
-| `gpt-5.6-luna` | OpenAI | GPT-5.6 Luna (lightweight) |
-| `glm-5.2` | Zhipu GLM | GLM-5.2 (open-source) |
-| `gpt-5.5` / `gpt-4` | OpenAI | Legacy GPT series |
-
-All providers use OpenAI-compatible APIs — no extra adapter needed.
-
-## Quick Start
-
-### 1. Install
+## Quick start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/dagent.git
-cd dagent
-pip install -r requirements.txt -r requirements-dev.txt
+# 1. install (not yet on PyPI — clone and install for now)
+git clone https://github.com/LiSheng5/npcsidekick.git && cd npcsidekick
+pip install -e .
+
+# 2. run the brain (loads the paleolithic demo villagers 苍/阿黎)
+python -m npc.server --adapter paleolithic --no-browser
+
+# 3. talk to it
+curl -X POST http://127.0.0.1:8765/api/talk \
+  -H "Content-Type: application/json" \
+  -d '{"npc_id":"cang","message":"给我两根木材"}'
 ```
 
-### 2. Configure API Key
+Then point your game at `http://127.0.0.1:8765`. See **[docs/游戏接入.md](docs/游戏接入.md)** for the full 3-endpoint contract and the Godot reference pattern.
 
-```bash
-# Option 1: Environment variable
-set DEEPSEEK_API_KEY=sk-your-key-here
+## Documentation
 
-# Option 2: Create api_key.txt in the project root with your key
-```
+- [游戏接入](docs/游戏接入.md) — endpoints, curl examples, Godot integration pattern
+- [API 参考](docs/API.md) — full endpoint contract
+- [角色制作 — Making NPCs with JSON](docs/角色制作.md) — persona fields, routine table, example
+- [本地模型接入](docs/本地模型.md) — Ollama, env vars, v4 plan
+- [ARCHITECTURE.md](ARCHITECTURE.md) — engine internals & complexity tiers
+- [QUICKSTART.md](QUICKSTART.md) — the underlying agent engine CLI
 
-### 3. Run
+## Design notes
 
-```bash
-# Interactive mode
-python main.py
+- **Player orders beat autonomous routines** — and the NPC refuses honestly when resources are depleted ("木材现在弄不到了，采空了")
+- **Anti-hallucination** — factual recall answers come from memory cards verbatim; the LLM context only states world facts, never invented ones
+- **Short-term dialogue history in memory only** — chat logs never pollute the memory cards
+- **Resource regen** — trees grow back (every tick +1 up to cap), matching the game-side 60s respawn
 
-# Stream mode (recommended — watch the agent work in real time)
-python main.py --stream
+## Built with
 
-# Single query
-python main.py "Analyze D:\project\main.py for me"
-
-# Specify model
-python main.py --model glm-5.2 --stream
-```
-
-### 4. Interactive Commands
-
-```
-plan              — View current task plan
-memory            — View memory summary
-tools             — List all available tools
-history           — View execution history
-stream            — Switch to stream mode
-standard          — Switch back to standard mode
-```
-
-## Project Structure
-
-```
-dagent/
-├── main.py                    # CLI entry point (with startup animation)
-├── config.py                  # Global configuration
-├── agent/
-│   ├── orchestrator.py        # Orchestrator (core scheduler)
-│   ├── display.py             # Rich Live streaming display
-│   ├── settings.py            # Injectable settings (dataclass)
-│   ├── planner/
-│   │   ├── planner.py         # Plan generator
-│   │   ├── reflector.py       # Reflection & self-correction
-│   │   └── task_plan.py       # Task plan data structure
-│   ├── executor/
-│   │   ├── executor.py        # Step executor
-│   │   ├── retry.py           # Retry strategy
-│   │   └── step_context.py    # Step context
-│   ├── tools/
-│   │   ├── registry.py        # Tool registry
-│   │   ├── router.py          # Tool router
-│   │   ├── schema.py          # ToolProtocol / ToolCall / ToolResult
-│   │   ├── skill.py           # Composite tool abstraction
-│   │   ├── builtin/
-│   │   │   ├── file_tools.py  # Read/Write/Edit/Search files
-│   │   │   ├── code_tools.py  # Run/Check/Format code
-│   │   │   ├── web_tools.py   # Web search & fetch
-│   │   │   ├── system_tools.py# System commands/processes/time
-│   │   │   └── memory_tools.py# Memory store/retrieve/notes
-│   │   └── adapters/          # Tool adapters (for extensions)
-│   ├── memory/
-│   │   ├── memory_manager.py  # Memory manager
-│   │   ├── short_term.py      # Short-term memory (conversation)
-│   │   ├── long_term.py       # Long-term memory (knowledge)
-│   │   ├── vector_store.py    # Chroma vector store
-│   │   ├── compressor.py      # Context compression
-│   │   └── retriever.py       # Memory retrieval
-│   ├── providers/
-│   │   ├── base.py            # ProviderProtocol
-│   │   ├── openai_provider.py # OpenAI-compatible API
-│   │   └── factory.py         # Auto-routing factory
-│   ├── llm/                   # LLM client
-│   └── logging_config.py      # Logging configuration
-└── tests/                     # 272 tests
-    ├── test_planner.py
-    ├── test_executor.py
-    ├── test_router.py
-    ├── test_orchestrator.py
-    ├── test_orchestrator_stream.py
-    ├── test_providers.py
-    ├── test_memory_manager.py
-    ├── test_memory_tools.py
-    ├── test_code_tools.py
-    ├── test_schema.py
-    ├── test_skill.py
-    ├── test_task_plan.py
-    ├── test_llm_client.py
-    ├── test_reflector.py
-    └── conftest.py
-```
-
-## Tests
-
-```bash
-# All tests
-pytest tests/ -v
-
-# With coverage
-pytest tests/ -v --cov=agent --cov-report=term-missing
-
-# Single module
-pytest tests/test_planner.py -v
-```
-
-## Design Principles
-
-1. **Minimal dependencies** — No LangChain or other heavy frameworks. Core agent logic is under 500 lines; readable in one sitting.
-2. **Testability** — All components accept injected dataclass configuration; every parameter combination is testable.
-3. **Progressive enhancement** — Start simple with `deepseek-v4-pro`, then layer on Planner, Reflector, Memory step by step.
-4. **Safety first** — Write operations require confirmation by default; reads execute directly; graceful exit on cancel.
+- **DeepSeek** — the NPCs' dialogue & decision brain (V4 Flash)
+- **Claude Code** — development, review, debugging
+- **Trae** — feature work, bug fixing
+- **WorkBuddy** — feature development, bug fixing
+- **ChatGPT** — research & reference
 
 ## License
 
-MIT — use it, modify it, ship it. See [LICENSE](LICENSE).
-
-## Acknowledgments
-
-Dagent is built from scratch, but deeply inspired by:
-
-| Project | Inspiration |
-|---------|-------------|
-| [AutoGPT](https://github.com/Significant-Gravitas/AutoGPT) | Task planning + tool invocation pattern |
-| [LangChain](https://github.com/langchain-ai/langchain) | Tool abstraction protocol & LLM call patterns |
-| [CrewAI](https://github.com/crewAIInc/crewAI) | Multi-agent collaboration & role design |
-| [AutoGLM](https://github.com/THUDM/AutoGLM) | Reflection mechanism design |
-| [Rich](https://github.com/Textualize/rich) | Terminal UI possibilities (our streaming display is built on it) |
-| [Chroma](https://github.com/chroma-core/chroma) | Vector memory inspiration and backend |
-| [DeepSeek](https://www.deepseek.com/) | High-performance, low-cost model API |
+MIT — see [LICENSE](LICENSE).
 
 ---
 
-<h2 id="中文文档">中文文档</h2>
+# 中文文档
 
-## 什么是奇天？
+## 这是什么？
 
-**奇天** 是一个 4 层 AI Agent 框架，从零构建，不依赖 LangChain、AutoGPT 等第三方 Agent 库。用最少的抽象，做最多的事。
+**NPCSidekick** 是游戏 NPC 的大脑——一个跑在本地的小型 Python 服务器，通过 HTTP 驱动游戏里的角色：
 
-核心理念：**规划 → 执行 → 路由 → 记忆**，每层独立且可替换。
+- **村民真的会干活** — 自主采集资源运回营地（tick 驱动的世界模拟，日常行动**不经过 LLM**，快且确定）
+- 💬 **对话下指令** — 说"给我两根木材"，村民诚实回答（接受或拒绝），然后**真的去做**：走去森林、砍树、回来、把木头递进你的背包
+- 🧠 **他们记得住** — 记忆卡是纯 JSON 文件，可打开直接改；重启服务器进度不丢
+- 🎨 **丢一个 JSON 就多一个 NPC** — 人设、说话风格、日常作息表，零游戏代码
+- **游戏接入 = 3 个 HTTP 端点** — `/api/talk`、`/api/state`、`/api/task`；Godot 接入模式见 [docs/游戏接入.md](docs/游戏接入.md)
+- **混合架构** — LLM 只用于对话和决策，游戏机制全在确定性代码里；没有 API key 村庄照样运转（规则回退）
 
-## 特性
+## 工作原理
 
-| 特性 | 说明 |
-|------|------|
-| 🛠 **14 个工具** | 文件、代码、网络、系统、记忆 — 覆盖日常所有操作 |
-| 📋 **任务计划** | 自动拆解复杂任务，支持步骤依赖和反思纠正 |
-| ⚡ **流式输出** | Rich Live 实时显示：计划 → 工具调用 → 结果 → 回答 |
-| 💾 **多层记忆** | 短期 (对话) + 长期 (知识) + Chroma 向量搜索 |
-| 🔀 **自动路由** | 模型名自动识别 Provider (DeepSeek / OpenAI / 智谱) |
-| 🔒 **安全确认** | 写操作需要用户确认，读操作直接执行 |
-| 🔄 **重试容错** | 失败自动重试 3 次，不中断整体流程 |
-| 📦 **零依赖** | 不依赖 LangChain、AutoGPT 等框架，只用 httpx + Rich |
+```
+┌─────────────┐   HTTP(3 个端点)    ┌──────────────────────────────────┐
+│  你的游戏    │ ◄────────────────► │   NPCSidekick 服务器(本地)        │
+│ (Godot/….)  │  talk / state /task │                                  │
+│  镜像+表演   │                     │  ┌────────────────────────────┐  │
+└─────────────┘                     │  │ tick 循环(每 3 秒)          │  │
+                                    │  │  · 每 tick 每 NPC 一步      │  │
+                                    │  │  · 日常作息表(加权随机)     │  │
+                                    │  │  · 玩家指令优先             │  │
+                                    │  │  · 资源再生                 │  │
+                                    │  └────────────────────────────┘  │
+                                    │  ┌────────────────────────────┐  │
+                                    │  │ 对话(LLM,可选)              │  │
+                                    │  │ 规则快路径回退              │  │
+                                    │  └────────────────────────────┘  │
+                                    │  记忆卡 = 可编辑 JSON            │
+                                    └──────────────────────────────────┘
+```
 
-## 支持模型
-
-奇天自动识别模型名并路由到对应 API 端点：
-
-| 模型 | Provider | 说明 |
-|------|----------|------|
-| `deepseek-v4-pro` | DeepSeek | V4 Pro (1.6T, 49B 激活) |
-| `deepseek-v4-flash` | DeepSeek | V4 Flash (284B, 13B 激活) |
-| `gpt-5.6-sol` | OpenAI | GPT-5.6 Sol (旗舰) |
-| `gpt-5.6-terra` | OpenAI | GPT-5.6 Terra (均衡) |
-| `gpt-5.6-luna` | OpenAI | GPT-5.6 Luna (轻量) |
-| `glm-5.2` | 智谱 GLM | GLM-5.2 (开源) |
-| `gpt-5.5` / `gpt-4` | OpenAI | 旧版 GPT 系列 |
-
-所有 Provider 使用 OpenAI 兼容 API，无需额外适配。
+**设计血统**：AI Town 式 tick 循环 · 斯坦福 Generative Agents 记忆 · 复杂度分级（普通 NPC = 规则 + 小模型；完整 agent 循环留给NPCSidekick v4）。
 
 ## 快速开始
 
-### 1. 安装
-
 ```bash
-git clone https://github.com/YOUR_USERNAME/dagent.git
-cd dagent
-pip install -r requirements.txt -r requirements-dev.txt
+# 1. 安装(尚未发布 PyPI,先 clone 安装)
+git clone https://github.com/LiSheng5/npcsidekick.git && cd npcsidekick
+pip install -e .
+
+# 2. 启动大脑(加载旧石器演示村民 苍/阿黎)
+python -m npc.server --adapter paleolithic --no-browser
+
+# 3. 和它说话
+curl -X POST http://127.0.0.1:8765/api/talk \
+  -H "Content-Type: application/json" \
+  -d '{"npc_id":"cang","message":"给我两根木材"}'
 ```
 
-### 2. 配置 API Key
+然后把游戏接到 `http://127.0.0.1:8765` 即可。完整端点契约和 Godot 接入模式见 **[docs/游戏接入.md](docs/游戏接入.md)**。
 
-```bash
-# 方式一：环境变量
-set DEEPSEEK_API_KEY=sk-your-key-here
+## 文档
 
-# 方式二：项目根目录创建 api_key.txt，写入密钥
-```
+- [游戏接入](docs/游戏接入.md)
+- [API 参考](docs/API.md)
+- [角色制作 — 用 JSON 做 NPC](docs/角色制作.md)
+- [本地模型接入](docs/本地模型.md)
+- [ARCHITECTURE.md](ARCHITECTURE.md) — 引擎设计与复杂度分级
+- [QUICKSTART.md](QUICKSTART.md) — 底层 agent 引擎 CLI
 
-### 3. 运行
+## 设计要点
 
-```bash
-# 交互模式
-python main.py
+- **玩家指令 > 自主日常** — 资源采空时诚实拒绝（"木材现在弄不到了，采空了，等它长回来吧"）
+- **防幻觉** — 事实回忆从记忆卡逐字回答；LLM 上下文只放世界事实，禁止编造
+- **短期对话历史只在内存** — 聊天记录绝不污染记忆卡
+- **资源再生** — 树会再长（每 tick +1 到上限），与游戏侧 60 秒重生对齐
 
-# 流式模式 (推荐 — 实时看到 Agent 工作过程)
-python main.py --stream
+## 开发工具
 
-# 单次查询
-python main.py "帮我分析 D:\project\main.py"
+- **DeepSeek** — 村民的对话与决策大脑（V4 Flash）
+- **Claude Code** — 开发、审查、调试
+- **Trae** — 功能开发、修 bug
+- **WorkBuddy** — 功能开发、修 bug
+- **ChatGPT** — 查资料
 
-# 指定模型
-python main.py --model glm-5.2 --stream
-```
+## 开源协议
 
-### 4. 交互命令
-
-```
-plan / 查看计划     — 查看当前任务计划
-memory / 查看记忆   — 查看记忆摘要
-tools / 查看工具    — 列出所有可用工具
-history / 查看历史  — 查看执行记录
-stream              — 切换到流式模式
-standard            — 切换回标准模式
-```
-
-## 项目结构
-
-```
-奇天/
-├── main.py                    # CLI 入口 (含启动动画)
-├── config.py                  # 全局配置
-├── agent/
-│   ├── orchestrator.py        # 编排器 (核心调度)
-│   ├── display.py             # Rich Live 流式显示
-│   ├── settings.py            # 可注入配置 (dataclass)
-│   ├── planner/
-│   │   ├── planner.py         # 计划生成器
-│   │   ├── reflector.py       # 反思纠正
-│   │   └── task_plan.py       # 任务计划数据结构
-│   ├── executor/
-│   │   ├── executor.py        # 步骤执行器
-│   │   ├── retry.py           # 重试策略
-│   │   └── step_context.py    # 步骤上下文
-│   ├── tools/
-│   │   ├── registry.py        # 工具注册表
-│   │   ├── router.py          # 工具路由器
-│   │   ├── schema.py          # ToolProtocol / ToolCall / ToolResult
-│   │   ├── skill.py           # 组合工具抽象
-│   │   ├── builtin/
-│   │   │   ├── file_tools.py  # 读写/编辑/搜索文件
-│   │   │   ├── code_tools.py  # 执行/检查/格式化代码
-│   │   │   ├── web_tools.py   # 网络搜索/抓取
-│   │   │   ├── system_tools.py# 系统命令/进程/时间
-│   │   │   └── memory_tools.py# 记忆存储/检索/笔记
-│   │   └── adapters/          # 工具适配器 (扩展用)
-│   ├── memory/
-│   │   ├── memory_manager.py  # 记忆管理器
-│   │   ├── short_term.py      # 短期记忆 (对话)
-│   │   ├── long_term.py       # 长期记忆 (知识)
-│   │   ├── vector_store.py    # Chroma 向量存储
-│   │   ├── compressor.py      # 上下文压缩
-│   │   └── retriever.py       # 记忆检索
-│   ├── providers/
-│   │   ├── base.py            # ProviderProtocol
-│   │   ├── openai_provider.py # OpenAI 兼容 API
-│   │   └── factory.py         # 自动路由工厂
-│   ├── llm/                   # LLM 客户端
-│   └── logging_config.py      # 日志配置
-└── tests/                     # 272 个测试
-    ├── test_planner.py
-    ├── test_executor.py
-    ├── test_router.py
-    ├── test_orchestrator.py
-    ├── test_orchestrator_stream.py
-    ├── test_providers.py
-    ├── test_memory_manager.py
-    ├── test_memory_tools.py
-    ├── test_code_tools.py
-    ├── test_schema.py
-    ├── test_skill.py
-    ├── test_task_plan.py
-    ├── test_llm_client.py
-    ├── test_reflector.py
-    └── conftest.py
-```
-
-## 一些测试
-
-```bash
-# 全部测试
-pytest tests/ -v
-
-# 覆盖率
-pytest tests/ -v --cov=agent --cov-report=term-missing
-
-# 单个模块
-pytest tests/test_planner.py -v
-```
-
-## 一些小小的设计原则
-
-1. **最小依赖** — 不引入 LangChain 等重型框架。Agent 的核心逻辑不到 500 行，一眼就能看完。
-2. **可测试性** — 所有组件通过 dataclass 注入配置，测试可覆盖任意组合参数。
-3. **渐进增强** — 从最简单的 `deepseek-v4-pro` 开始跑通，再逐层加 Planner、Reflector、Memory。
-4. **安全第一** — 写操作默认需要确认，读操作直接执行，取消时优雅退出。
-
-## License
-
-MIT — 随便用，随便改。详见 [LICENSE](LICENSE)。
-
-## 致谢
-
-奇天从零构建，但深受以下项目的启发：
-
-| 项目 | 启发 |
-|------|------|
-| [AutoGPT](https://github.com/Significant-Gravitas/AutoGPT) | 任务规划与工具调用的结合方式 |
-| [LangChain](https://github.com/langchain-ai/langchain) | Tool 抽象协议与 LLM 调用模式 |
-| [CrewAI](https://github.com/crewAIInc/crewAI) | 多 Agent 协作与角色分工 |
-| [AutoGLM](https://github.com/THUDM/AutoGLM) | 反思机制 (Reflection) 的设计思路 |
-| [Rich](https://github.com/Textualize/rich) | 终端 UI 的可能性 (我们的流式显示基于它) |
-| [Chroma](https://github.com/chroma-core/chroma) | 向量记忆的灵感和向量存储后端 |
-| [DeepSeek](https://www.deepseek.com/) | 提供高性能、低成本的模型 API |
-
----
-
+MIT — 见 [LICENSE](LICENSE)。
