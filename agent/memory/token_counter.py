@@ -36,7 +36,7 @@ def count_tokens(text: str) -> int:
     return len(text) // 3
 
 
-def count_message_tokens(messages: List[Dict], model: str = "deepseek-chat") -> int:
+def count_message_tokens(messages: List[Dict], model: str = "deepseek-v4-pro") -> int:
     """
     计算消息列表的总 token 数（按 OpenAI 消息格式估算）。
 

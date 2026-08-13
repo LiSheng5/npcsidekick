@@ -53,7 +53,6 @@ class LongTermMemory:
             "content": content,
             "category": category,
             "created_at": datetime.now().isoformat(),
-            "access_count": 0,
         }
         self.facts.append(fact)
         self._trim_facts()
@@ -70,7 +69,6 @@ class LongTermMemory:
     def get_fact(self, fact_id: str) -> Optional[Dict]:
         for f in self.facts:
             if f["id"] == fact_id:
-                f["access_count"] += 1
                 return f
         return None
 
@@ -78,8 +76,6 @@ class LongTermMemory:
         """关键词搜索事实。"""
         q = query.lower()
         results = [f for f in self.facts if q in f.get("content", "").lower()]
-        for f in results:
-            f["access_count"] += 1
         return results[-20:]  # 返回最近 20 条
 
     def list_facts(self, category: Optional[str] = None) -> List[Dict]:

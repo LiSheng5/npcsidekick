@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-奇天 v3.1 — 主入口点
+NPCSidekick v3.1 — 主入口点
 
 运行:
   python main.py                  # 交互模式
@@ -102,11 +102,9 @@ def print_banner():
     """打印 Banner — 先播 Logo 动画，再显示标题。"""
     play_intro_animation()
     console.print(Panel(
-        Text("""奇天 v3.1
+        Text("""NPCSidekick v3.1
 
-可上九天揽月，可下五洋捉鳖
-━━━━━━━━━━━━━━━━━━━━━━━━
-一个智能助手 — 读写文件 · 运行代码 · 搜索网络 · 系统工具 · 持久记忆
+读写文件 · 运行代码 · 搜索网络 · 系统工具 · 持久记忆
 
 Planner → Executor → Tool Router → Memory""",
              style="bold #c39bdb", justify="center"),
@@ -322,7 +320,7 @@ def setup_wizard():
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="奇天 v3.1 — 4-layer AI Agent Framework",
+        description="NPCSidekick v3.1 — 4-layer AI Agent Framework",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -343,6 +341,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="启用流式模式 (Rich Live 实时显示)",
+    )
+    parser.add_argument(
+        "--web", "-w",
+        action="store_true",
+        default=False,
+        help="启动 Web UI 服务 (http://127.0.0.1:8765)",
     )
     parser.add_argument(
         "--no-stream",
@@ -385,6 +389,20 @@ def main():
         sys.exit(1)
 
     query = " ".join(args.query) if args.query else ""
+
+    # Web UI 模式
+    if args.web:
+        from web.server import app
+        import uvicorn
+        from agent.settings import get_settings
+        settings = get_settings()
+        print_banner()
+        console.print(f"[green]Web UI 启动: http://{settings.web_host}:{settings.web_port}[/green]")
+        if settings.web_auto_open:
+            import webbrowser
+            webbrowser.open(f"http://{settings.web_host}:{settings.web_port}")
+        uvicorn.run(app, host=settings.web_host, port=settings.web_port, log_level="info")
+        return
 
     # 流式模式
     if args.stream:

@@ -59,7 +59,7 @@ def detect_base_url(model_name: str, configured_url: str = "") -> str:
       2. 未知 provider + 有配置 URL → 使用配置
       3. 未知 provider + 无配置 → 返回空字符串
 
-    设计理由: 模型名本身就包含了 provider 信息 — "deepseek-chat" 只能
+    设计理由: 模型名本身就包含了 provider 信息 — "deepseek-v4-pro" 只能
     在 api.deepseek.com 访问，"gpt-4" 只能在 api.openai.com。用户配置的
     base_url 仅适用于无法自动推断的自建/代理服务。
     """
@@ -82,7 +82,7 @@ def create_provider(
 
     Args:
       api_key: API 密钥
-      model_name: 模型名 (如 "deepseek-chat", "gpt-4")
+      model_name: 模型名 (如 "deepseek-v4-pro", "gpt-4")
       base_url: API 端点 (如未提供则按模型名推断)
       temperature: 温度参数
       max_tokens: 最大 token 数
@@ -93,7 +93,7 @@ def create_provider(
 
     示例:
       # 自动检测
-      p = create_provider("sk-...", "deepseek-chat")
+      p = create_provider("sk-...", "deepseek-v4-pro")
       # → OpenAIProvider(base_url="https://api.deepseek.com")
 
       # 显式指定
@@ -107,6 +107,12 @@ def create_provider(
         base_url = _KNOWN_BASE_URLS[provider_name]
     elif not base_url:
         base_url = detect_base_url(model_name)
+
+    if not base_url:
+        raise ValueError(
+            f"无法确定模型 '{model_name}' 的 API 端点。"
+            f"请设置 base_url 参数或环境变量 DEEPSEEK_BASE_URL / OPENAI_BASE_URL。"
+        )
 
     # 所有已知 provider 都使用 OpenAI 兼容 API
     return OpenAIProvider(

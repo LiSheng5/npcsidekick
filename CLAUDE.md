@@ -2,17 +2,41 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Session Recovery
+
+When context is lost or VSCode workspace changes, previous session transcripts are stored in `C:\Users\Administrator\.claude\projects\`. To resume a prior conversation, check that directory for the most recent `.jsonl` session files and reference their content before proceeding with new work. The active project directory is `D:\Projects\NPCSidekick`.
+
+**Automatic recovery at session start:** Read `.claude/sessions/SESSION_LOG.md` first — it contains the project's persistent memory: active decisions, architecture choices, unresolved issues, and a timestamped session history. Use this to reconstruct context before doing anything else. If the user seems lost or says they lost chat history, query this file immediately.
+
+**Mid-session persistence:** Use `/remember <what to remember>` to save the current decision, discovery, or progress checkpoint. This writes to `SESSION_LOG.md` so it survives context loss.
+
 ## Session Context
 
 At session start, check `.claude/sessions/` for prior incomplete work. Present a recovery summary with 3 suggested next actions. When checking project status, spawn Agents for parallel git log, file scan, and state reads.
 
+## Project Context
+
+This is the **NPCSidekick** project — an AI game-character framework built on the NPCSidekick engine (Python 4-layer agent framework). The codebase is primarily Python, with supporting Markdown documentation. Always read existing code before making changes and explain architectural implications since the user values structured progress tracking.
+
 ## Project Overview
 
-Dagent is a 4-layer AI agent framework: **Planner → Executor → Tool Router → Memory**, with a pluggable **Provider** layer (5th layer) for LLM access (OpenAI/DeepSeek/compatible APIs).
+**NPCSidekick** is an AI game-character framework — the brain that lets game characters autonomously help the protagonist. Its engine **NPCSidekick** is a 4-layer AI agent framework: **Planner → Executor → Tool Router → Memory**, with a pluggable **Provider** layer for LLM access. See [README.md](README.md) for the full project description. NPC layer design (perception, desires/goals, game actions): `.claude/analysis/FEASIBILITY_REPORT.md` + SESSION_LOG D7.
 
-Phase 1–3 are complete: 272 tests, structured logging, injectable settings, streaming + Rich CLI, Skill concept, and multi-provider abstraction.
+### Reference Codebase: AI Town
 
-Current version: **v3.1** — 272 tests passing, streaming synthesis complete, multi-provider abstraction complete.
+`D:\Projects\ai-town` (TypeScript, Convex) is the reference implementation for the AI NPC project — autonomous multi-agent simulation with generative-agents memory. Full architectural comparison, feasibility matrix, and Mermaid data-flow diagrams: `.claude/analysis/ai-town-npc-comparison.md`. When asked about NPCs or AI Town, read that file first.
+
+Phase 1–3 are complete: 321 tests, structured logging, injectable settings, streaming + Rich CLI, Skill concept, and multi-provider abstraction.
+
+Current version: **v3.1** — 321 tests passing, streaming synthesis complete, multi-provider abstraction complete.
+
+## Git Conventions
+
+This project uses git for version control. Commit after each meaningful milestone with descriptive messages. Do not delete or restructure directories that VSCode has open as a workspace without confirming with the user first.
+
+## Response Style
+
+Provide substantive, well-structured analysis. Avoid dismissive or surface-level critiques — if you disagree with an idea, explain why with depth and offer alternative frameworks or methodologies. The user values rigorous thinking (e.g., dialectical materialism, structured research approaches).
 
 ## Commands
 
@@ -31,6 +55,9 @@ python main.py "现在几点？"
 
 # Run agent (streaming single query)
 python main.py --stream "现在几点？"
+
+# Run Web UI (FastAPI + SSE)
+python main.py --web
 
 # Run with specific model
 python main.py --model gpt-4
@@ -106,7 +133,8 @@ AgentDisplay (Rich Live) consumes events → 3-panel Layout (header/body/footer)
 | `agent/settings.py` | `AgentSettings` injectable dataclass — all config in one place |
 | `config.py` | Thin backward-compat wrapper exposing `AgentSettings` fields as module-level constants |
 | `demo_v3.py` | Primary demo script: showcases AgentOrchestrator, ToolRouter dispatch, multi-tool coordination |
-| `main.py` | CLI entry point: argparse (`--stream`, `--model`, positional query), Rich Prompt REPL |
+| `web/server.py` | FastAPI backend: SSE streaming from `orch.run_stream()` to browser, internal event filtering |
+| `main.py` | CLI entry point: argparse (`--stream`, `--web`, `--model`, positional query), Rich Prompt REPL |
 
 ### 14 Builtin Tools + 1 Skill
 
@@ -301,7 +329,7 @@ Reflection (`reflector.py`) and compression (`compressor.py`) prompts are hardco
 
 ### Test Architecture
 
-All 272 tests are unit tests with mocked LLM, memory, and tools. No integration or E2E tests exist. Tests use `pytest-asyncio` with `asyncio_mode = "auto"` — any `async def test_*` is auto-wrapped. Do NOT manually call `asyncio.run()` in test bodies.
+All 321 tests are unit tests with mocked LLM, memory, and tools. No integration or E2E tests exist. Tests use `pytest-asyncio` with `asyncio_mode = "auto"` — any `async def test_*` is auto-wrapped. Do NOT manually call `asyncio.run()` in test bodies.
 
 
 ### Dual-Path Executor
@@ -315,19 +343,30 @@ The executor has two code paths for tool dispatch (`agent/executor/executor.py`)
 
 ### Web UI
 
-`web/static/index.html` — standalone HTML/CSS/JS frontend with embedded Canvas animation (solar-storm theme, purple color scheme). Currently served by a simple HTTP server for preview; no backend yet.
+`web/server.py` — FastAPI backend (~140 lines) that bridges the browser to `AgentOrchestrator.run_stream()` via SSE. `web/static/index.html` — standalone frontend with Canvas particle animation (solar-storm theme, purple color scheme). The frontend consumes SSE events using `fetch` + `ReadableStream`.
 
 ```bash
-# Start preview server
-python -m http.server 8765 --directory web/static
+# Start Web UI (preferred)
+python main.py --web
+
+# Or start server directly
+python -m web.server
+
 # Then open http://127.0.0.1:8765
 ```
 
-The page POSTs to `/api/chat` expecting `{"answer": "..."}` — this endpoint does not exist yet. Connecting it to the orchestrator is the next step.
+**API endpoints:**
+- `POST /api/chat` — non-streaming, returns full answer as JSON
+- `POST /api/chat/stream` — SSE streaming, yields `data: {json}\n\n` per StreamEvent
+- `GET /api/history` — execution history + summary
+
+**Security boundary:** Internal events (THINKING, REFLECTION, STEP_PROGRESS) are filtered server-side before SSE transmission. Only behavioral events (plan_ready, step_start, tool_result, text_delta, done, error) reach the browser.
+
+**SSE consumption (frontend):** Uses `fetch` + `reader.read()` (not `EventSource`) because chat messages are POSTed and can be long. Events are parsed from JSON Lines format and rendered per-type in `handleStreamEvent()`.
 
 ## Project State
 
-**Current: v3.1** — 272 tests all passing. Phase 1 (tests + structlog + settings), Phase 2 (streaming + Rich CLI + Skill), and Phase 3 (multi-provider abstraction) are complete.
+**Current: v3.1** — 321 tests all passing. Phase 1 (tests + structlog + settings), Phase 2 (streaming + Rich CLI + Skill), and Phase 3 (multi-provider abstraction) are complete.
 
 Key files by phase:
 - **Phase 1**: `agent/settings.py`, `agent/logging_config.py`, `config.py`, `pyproject.toml` — 79 tests
@@ -335,10 +374,12 @@ Key files by phase:
 - **Phase 3**: `agent/providers/` (base + openai_provider + factory), LLMClient refactored as thin wrapper — +21 tests
 
 ### Known Issues
+- ~~Skill 未注册~~ **已修复**（提交 33cf559：AnalyzeCodeSkill 注册进生产注册表，lint_code 接受 path，synthesize 读取 lint_issues）
+- Web UI 认证端到端断裂：前端不发 token，`main.py --web` 打开浏览器时不带 token → 所有浏览器聊天请求 401
 - `PROJECT_DELIVERY.md` 的测试数量和版本信息已过时（已在 v3.1 更新）
 - `ARCHITECTURE.md` 和 `QUICKSTART.md` 内容准确，仅版本号标签需要更新（v3.1 已修正）
 - `memory_tools.py` bypasses `LongTermMemory` class by reading/writing JSON files directly. Notes saved via tools are invisible to semantic search (VectorStore)
 - `WebSearchTool` uses DuckDuckGo Instant Answer API (limited); no real search engine integration
-- No integration/E2E tests — all 272 tests mock LLM, memory, and tools
-- Web UI (`web/static/index.html`) has no backend — `/api/chat` is a mock. Needs FastAPI or similar to connect to AgentOrchestrator
+- No integration/E2E tests — all 321 tests mock LLM, memory, and tools
 - `_needs_llm_decision()` keyword list is brittle — Chinese-English hybrid, magic strings
+- Web UI SSE streaming works but lacks Phase B features: behavior log panel, source citations with clickable `file://` links

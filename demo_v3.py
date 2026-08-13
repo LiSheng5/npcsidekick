@@ -19,7 +19,7 @@ from agent.tools.schema import ToolCall, ToolResultStatus
 def test_tool_call_format():
     """展示统一工具调用格式。"""
     print("\n" + "=" * 60)
-    print("📐 统一工具调用格式演示")
+    print("统一工具调用格式演示")
     print("=" * 60)
 
     # 构造一个 ToolCall
@@ -53,7 +53,7 @@ def test_tool_call_format():
 def test_planner():
     """展示 Planner 生成 TaskPlan。"""
     print("\n" + "=" * 60)
-    print("🧠 Planner — 任务分解演示")
+    print("Planner — 任务分解演示")
     print("=" * 60)
 
     # 初始化
@@ -94,7 +94,7 @@ def test_planner():
 def test_tool_router():
     """展示工具路由器。"""
     print("\n" + "=" * 60)
-    print("🔀 Tool Router — 动态工具选择演示")
+    print("Tool Router — 动态工具选择演示")
     print("=" * 60)
 
     from agent.tools.registry import get_registry
@@ -142,7 +142,7 @@ def test_tool_router():
 def test_memory_layer():
     """展示记忆层。"""
     print("\n" + "=" * 60)
-    print("💾 Memory Layer — 记忆系统演示")
+    print("Memory Layer — 记忆系统演示")
     print("=" * 60)
 
     from agent.memory.memory_manager import MemoryManager
@@ -179,7 +179,7 @@ def test_memory_layer():
 def test_full_orchestrator():
     """完整编排器测试。"""
     print("\n" + "=" * 60)
-    print("🚀 完整编排器测试")
+    print("完整编排器测试")
     print("=" * 60)
 
     try:
@@ -210,7 +210,7 @@ def test_full_orchestrator():
 
 def main():
     print("=" * 60)
-    print("奇天 v3.1 — 架构验证演示")
+    print("NPCSidekick v3.1 — 架构验证演示")
     print("=" * 60)
 
     # 1. 工具调用格式

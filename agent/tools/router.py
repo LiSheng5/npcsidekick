@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any
 
 from agent.tools.schema import (
     ToolProtocol, ToolCall, ToolResult, ToolResultStatus, ToolSchema
@@ -22,18 +22,32 @@ from agent.tools.schema import (
 from agent.tools.registry import ToolRegistry, get_registry
 
 
+# approval_handler 签名: (ToolCall, ToolSchema) -> bool
+# 返回 True = 批准, False = 拒绝。
+ApprovalHandler = Callable[[ToolCall, ToolSchema], bool]
+
+
 class ToolRouter:
     """
     工具路由器 — 每个 Agent 实例创建一个。
 
     使用方式:
-      router = ToolRouter(registry)
+      router = ToolRouter(registry, approval_handler=my_handler)
       result = router.dispatch(ToolCall(tool="read_file", input={"path": "x.py"}))
+
+    审批门控:
+      标记 requires_approval=True 的工具在执行前会回调 approval_handler。
+      未配置 handler 时一律 REJECT（安全默认:无人值守不执行危险操作）。
     """
 
-    def __init__(self, registry: Optional[ToolRegistry] = None):
+    def __init__(
+        self,
+        registry: Optional[ToolRegistry] = None,
+        approval_handler: Optional[ApprovalHandler] = None,
+    ):
         self.registry = registry or get_registry()
         self._call_history: List[ToolResult] = []
+        self._approval_handler = approval_handler
 
     # ── 核心: 分发工具调用 ────────────────────────────
 
@@ -78,6 +92,28 @@ class ToolRouter:
             )
             self._record(result, start)
             return result
+
+        # 2.5 审批门控 — requires_approval 工具必须经人工确认。
+        # 无 handler 时一律 REJECT，不可绕过（安全默认）。
+        if tool.schema.requires_approval:
+            if self._approval_handler is None:
+                result = ToolResult(
+                    call_id=call.call_id,
+                    tool=call.tool,
+                    status=ToolResultStatus.REJECTED,
+                    error="此操作需要审批但未配置审批处理器。请在 AgentOrchestrator 或 ToolRouter 中配置 approval_handler。",
+                )
+                self._record(result, start)
+                return result
+            if not self._approval_handler(call, tool.schema):
+                result = ToolResult(
+                    call_id=call.call_id,
+                    tool=call.tool,
+                    status=ToolResultStatus.REJECTED,
+                    error="用户拒绝了此操作。",
+                )
+                self._record(result, start)
+                return result
 
         # 3. 执行
         try:

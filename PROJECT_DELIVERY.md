@@ -1,8 +1,8 @@
-# Dagent — 项目交付报告
+# NPCSidekick — 项目交付报告（引擎: NPCSidekick）
 
 ## 项目信息
 
-- **项目名**: Dagent AI Agent 框架
+- **项目名**: NPCSidekick — AI 游戏角色框架（引擎: NPCSidekick）
 - **当前版本**: v3.1
 - **Python 版本**: 3.10+
 - **架构**: 4 层（Planner → Executor → Tool Router → Memory）+ Provider
@@ -15,7 +15,7 @@
 | Phase 1 | 测试基础设施 + structlog + 可注入 settings | 79 |
 | Phase 2 | 流式输出 + Rich CLI + Skill 模式 | +48 |
 | Phase 3 | 多 Provider 抽象（OpenAI/DeepSeek） | +21 |
-| **合计** | | **272** |
+| **合计** | | **321** |
 
 ## 核心特性
 
@@ -27,7 +27,7 @@
 - ✅ 记忆管理（短期/长期/向量存储/渐进压缩）
 - ✅ 可注入 AgentSettings，structlog 结构化日志
 - ✅ Skill 组合模式：decompose → dispatch → synthesize
-- ✅ 272 单元测试，pytest-asyncio，ProviderProtocol 测试接缝
+- ✅ 321 单元测试，pytest-asyncio，ProviderProtocol 测试接缝
 
 ## 已知限制
 

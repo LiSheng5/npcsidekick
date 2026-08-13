@@ -27,20 +27,6 @@ class RetryPolicy(ABC):
         ...
 
 
-class SimpleRetry(RetryPolicy):
-    """简单重试: 最多 N 次, 固定延迟。"""
-
-    def __init__(self, max_attempts: int = 3, delay_seconds: float = 1.0):
-        self.max_attempts = max_attempts
-        self.delay = delay_seconds
-
-    def should_retry(self, attempt: int, error: Optional[str] = None) -> bool:
-        return attempt < self.max_attempts
-
-    def wait_seconds(self, attempt: int) -> float:
-        return self.delay
-
-
 class ExponentialBackoff(RetryPolicy):
     """
     指数退避: 1s, 2s, 4s, 8s...
@@ -60,11 +46,3 @@ class ExponentialBackoff(RetryPolicy):
         return min(delay, self.max_delay)
 
 
-class NoRetry(RetryPolicy):
-    """不重试。"""
-
-    def should_retry(self, attempt: int, error: Optional[str] = None) -> bool:
-        return False
-
-    def wait_seconds(self, attempt: int) -> float:
-        return 0

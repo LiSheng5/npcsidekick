@@ -1,8 +1,8 @@
-# 奇天 v3.1 — 架构设计文档
+# NPCSidekick — 架构设计文档（引擎: NPCSidekick v3.1）
 
 ## 系统概览
 
-奇天是一个 **4 层 AI Agent 框架**，从零构建，不依赖 LangChain / AutoGPT 等第三方 Agent 库。
+NPCSidekick 的引擎 **NPCSidekick**（NPCSidekick）是一个 **4 层 AI Agent 框架**。本文档描述引擎架构；NPC 层（感知/欲望/目标/游戏行动）架构规划中，见 `.claude/analysis/FEASIBILITY_REPORT.md`。
 
 ```
                               ┌─────────────────────────┐
@@ -127,16 +127,16 @@ Executor.execute_step(step, plan, previous_results)
 
 | 类别 | 工具 | 读写 | 说明 |
 |------|------|------|------|
-| 📁 文件 | `read_file` | r | 读取文件内容 |
+| 文件 | `read_file` | r | 读取文件内容 |
 | | `write_file` | w | 写入/创建文件 |
 | | `list_dir` | r | 列出目录内容 |
-| 💻 代码 | `run_code` | w | 执行 Python 代码 |
+| 代码 | `run_code` | w | 执行 Python 代码 |
 | | `lint_code` | r | 静态检查代码 |
-| 🌐 网络 | `web_search` | r | 搜索网络 |
+| 网络 | `web_search` | r | 搜索网络 |
 | | `web_fetch` | r | 抓取网页内容 |
-| ⚙️ 系统 | `get_time` | r | 获取当前时间 |
+| 系统 | `get_time` | r | 获取当前时间 |
 | | `calculator` | r | 数学计算 |
-| 🧠 记忆 | `save_note` | w | 保存笔记 |
+| 记忆 | `save_note` | w | 保存笔记 |
 | | `list_notes` | r | 列出笔记 |
 | | `remember_fact` | w | 存储事实 |
 | | `search_memory` | r | 搜索记忆 |
@@ -275,14 +275,14 @@ create_provider(api_key, model_name, ...)  ← 工厂函数
   └── unknown + base_url     → 自定义端点
 ```
 
-**设计原则**: 模型名本身就是 Provider 信息。`deepseek-chat` 必然在 `api.deepseek.com`，`gpt-4` 必然在 `api.openai.com`。不要求用户额外配置 provider 字段。
+**设计原则**: 模型名本身就是 Provider 信息。`deepseek-v4-pro` 必然在 `api.deepseek.com`，`gpt-4` 必然在 `api.openai.com`。不要求用户额外配置 provider 字段。
 
 **支持的最新模型** (2026 年 7 月):
 
 | 模型系列 | 模型 | Provider |
 |----------|------|----------|
 | DeepSeek V4 | `deepseek-v4-pro` (1.6T, 49B 激活), `deepseek-v4-flash` (284B, 13B 激活) | DeepSeek |
-| DeepSeek | `deepseek-chat` | DeepSeek |
+| DeepSeek | `deepseek-v4-pro` (推荐), `deepseek-v4-flash` | DeepSeek |
 | GPT-5.6 | `gpt-5.6-sol` (旗舰), `gpt-5.6-terra` (均衡), `gpt-5.6-luna` (轻量) | OpenAI |
 | GPT 旧版 | `gpt-5.5`, `gpt-4`, `gpt-4o`, `gpt-3.5-turbo` | OpenAI |
 | o 系列 | `o1`, `o3`, `o4`, `o5`, `o6`, `o7`, `o8`, `o9` | OpenAI |
@@ -302,7 +302,7 @@ AgentSettings (dataclass — 可注入, 可覆盖)
   │   ├── short_term_file, long_term_file, notes_file
   │   └── api_key_file
   ├── LLM
-  │   ├── model_name (默认: AGENT_MODEL 环境变量 | "deepseek-chat")
+  │   ├── model_name (默认: AGENT_MODEL 环境变量 | "deepseek-v4-pro")
   │   ├── provider_name ("auto" | "openai" | "deepseek")
   │   ├── api_key (DEEPSEEK_API_KEY > OPENAI_API_KEY > ZHIPU_API_KEY > api_key.txt)
   │   ├── base_url, temperature, max_tokens
@@ -365,7 +365,7 @@ AgentDisplay (上下文管理器 — Rich Live)
 ## 项目结构
 
 ```
-奇天/
+NPCSidekick/
 ├── main.py                       # CLI 入口 (启动动画 + 交互/流式模式)
 ├── config.py                     # 全局配置 (兼容旧代码的属性访问)
 ├── agent/

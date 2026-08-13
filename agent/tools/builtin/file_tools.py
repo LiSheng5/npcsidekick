@@ -1,11 +1,43 @@
 """
 文件操作工具 — read_file / write_file / list_dir
+
+所有文件操作限制在 workspace root 内。
+使用 resolve() + is_relative_to() 防止路径穿越（..、symlink、短文件名等）。
 """
 import os
 from pathlib import Path
 from typing import Any
 
 from agent.tools.schema import ToolProtocol, ToolSchema, ToolCall, ToolResult, ToolResultStatus
+
+# ── Workspace 根目录 ──────────────────────────────────────
+
+_workspace_root: Path | None = None
+
+
+def set_workspace_root(root: Path) -> None:
+    """设置全局 workspace root（由 Orchestrator 在 initialize 时调用）。"""
+    global _workspace_root
+    _workspace_root = root.resolve()
+
+
+def _get_workspace_root() -> Path:
+    if _workspace_root is not None:
+        return _workspace_root
+    # 默认值: 项目根目录 (file_tools.py 向上 4 层)
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _check_path(p: Path) -> tuple[bool, str]:
+    """检查路径是否在 workspace 内。解析后再检查，不可绕过。"""
+    try:
+        real_path = p.resolve(strict=False)
+    except OSError:
+        return False, f"无法解析路径: {p}"
+    root = _get_workspace_root()
+    if not real_path.is_relative_to(root):
+        return False, f"安全限制: 路径 '{p}' 不在工作区 ({root}) 内。拒绝访问。"
+    return True, "ok"
 
 
 class ReadFileTool(ToolProtocol):
@@ -28,14 +60,10 @@ class ReadFileTool(ToolProtocol):
         )
 
     def validate(self, call: ToolCall) -> tuple[bool, str]:
-        path = call.input.get("path", "")
-        if not path:
+        raw = call.input.get("path", "")
+        if not raw:
             return False, "参数 'path' 是必需的"
-        # 安全检查: 禁止读取敏感路径
-        dangerous = ["/etc/passwd", "/etc/shadow", "C:\\Windows\\System32"]
-        if any(d in str(path) for d in dangerous):
-            return False, f"安全限制: 不允许读取路径 '{path}'"
-        return True, "ok"
+        return _check_path(Path(raw))
 
     def execute(self, call: ToolCall) -> ToolResult:
         path = Path(call.input["path"])
@@ -84,18 +112,21 @@ class WriteFileTool(ToolProtocol):
         )
 
     def validate(self, call: ToolCall) -> tuple[bool, str]:
-        path = call.input.get("path", "")
-        if not path:
+        raw = call.input.get("path", "")
+        if not raw:
             return False, "参数 'path' 是必需的"
-        content = call.input.get("content", "")
-        if not content and content != "":
+        if not call.input.get("content"):
             return False, "参数 'content' 是必需的"
-        return True, "ok"
+        return _check_path(Path(raw))  # ← P0-2：路径必须在 workspace 内
 
     def execute(self, call: ToolCall) -> ToolResult:
         path = Path(call.input["path"])
         if not path.is_absolute():
             path = Path.cwd() / path
+        # 防御深度：execute 也做一次 workspace 检查
+        ok, msg = _check_path(path)
+        if not ok:
+            return ToolResult(call_id=call.call_id, tool=call.tool, status=ToolResultStatus.REJECTED, error=msg)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -132,6 +163,9 @@ class ListDirTool(ToolProtocol):
         path = Path(call.input.get("path", "."))
         if not path.is_absolute():
             path = Path.cwd() / path
+        ok, msg = _check_path(path)
+        if not ok:
+            return ToolResult(call_id=call.call_id, tool=call.tool, status=ToolResultStatus.REJECTED, error=msg)
         if not path.exists():
             return ToolResult(call_id=call.call_id, tool=call.tool, status=ToolResultStatus.ERROR, error=f"目录不存在: {path}")
 

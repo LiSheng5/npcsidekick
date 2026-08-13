@@ -1,4 +1,4 @@
-# Dagent Development Dependencies
+# NPCSidekick Development Dependencies
 # Install: pip install -r requirements-dev.txt
 
 pytest>=8.0

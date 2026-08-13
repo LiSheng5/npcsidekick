@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NPCSidekick v3.1 — 4-Layer AI Agent Framework</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --text: #e4e4ec;
+    --text-dim: #8888a0;
+    --purple: #9b59b6;
+    --purple-light: #c39bdb;
+    --purple-glow: #7d3c98;
+    --accent-blue: #5dade2;
+    --accent-cyan: #48c9b0;
+    --accent-pink: #f06292;
+    --accent-gold: #f4d03f;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Canvas Background ── */
+  #bg-canvas {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 0;
+    pointer-events: none;
+  }
+
+  /* ── Layout ── */
+  .app {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+
+  /* ── Navbar ── */
+  .navbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 32px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(10,10,15,0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+
+  .navbar-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--purple-light);
+  }
+
+  .navbar-brand .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--purple-light);
+    box-shadow: 0 0 12px var(--purple), 0 0 24px var(--purple-glow);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { box-shadow: 0 0 12px var(--purple), 0 0 24px var(--purple-glow); }
+    50%      { box-shadow: 0 0 20px var(--purple-light), 0 0 40px var(--purple); }
+  }
+
+  .navbar-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .status-indicator {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: #2ecc71;
+    box-shadow: 0 0 6px #2ecc71;
+  }
+
+  /* ── Main Content ── */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    max-width: 900px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 0 24px;
+    overflow: hidden;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    text-align: center;
+    padding: 48px 0 24px;
+    flex-shrink: 0;
+  }
+
+  .hero h1 {
+    font-size: 36px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+
+  .hero h1 span {
+    background: linear-gradient(135deg, var(--purple-light), var(--accent-blue));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .hero .tagline {
+    font-size: 15px;
+    color: var(--text-dim);
+    font-weight: 400;
+    letter-spacing: 0.02em;
+  }
+
+  .hero .layers {
+    display: flex;
+    justify-content: center;
+    gap: 4px;
+    margin-top: 16px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .hero .layers span {
+    padding: 3px 10px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  /* ── Chat Area ── */
+  .chat-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+    margin-bottom: 24px;
+    box-shadow: 0 0 60px rgba(155, 89, 182, 0.06);
+  }
+
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    scroll-behavior: smooth;
+  }
+
+  .chat-messages::-webkit-scrollbar { width: 4px; }
+  .chat-messages::-webkit-scrollbar-track { background: transparent; }
+  .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .message {
+    max-width: 85%;
+    padding: 12px 16px;
+    border-radius: 12px;
+    font-size: 14px;
+    line-height: 1.6;
+    animation: msg-in 0.25s ease-out;
+  }
+
+  @keyframes msg-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .message.user {
+    align-self: flex-end;
+    background: linear-gradient(135deg, #7d3c98, #9b59b6);
+    color: #fff;
+    border-bottom-right-radius: 4px;
+  }
+
+  .message.assistant {
+    align-self: flex-start;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+
+  .message.assistant pre {
+    background: #0a0a0f;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    overflow-x: auto;
+    font-size: 13px;
+    margin: 8px 0;
+  }
+
+  .message.assistant code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.9em;
+  }
+
+  .message.assistant p + p { margin-top: 8px; }
+
+  .message .step-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+
+  /* Step cards (embedded in assistant messages) */
+  .step-card {
+    margin: 8px 0;
+    padding: 8px 12px;
+    border-left: 3px solid var(--purple);
+    background: rgba(155,89,182,0.06);
+    border-radius: 0 8px 8px 0;
+    font-size: 13px;
+  }
+
+  .step-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+
+  .step-indicator.running {
+    border-color: var(--accent-gold);
+    color: var(--accent-gold);
+  }
+
+  .step-indicator.done {
+    border-color: #2ecc71;
+    color: #2ecc71;
+  }
+
+  .step-indicator.failed {
+    border-color: var(--accent-pink);
+    color: var(--accent-pink);
+  }
+
+  .tool-name {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .error-msg {
+    color: var(--accent-pink);
+    font-size: 13px;
+  }
+
+  .duration {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 8px;
+  }
+
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    gap: 12px;
+  }
+
+  .empty-state .orb-placeholder {
+    width: 120px; height: 120px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(220,190,240,0.5) 0%, rgba(155,89,182,0.2) 40%, transparent 70%);
+    box-shadow: 0 0 60px rgba(155,89,182,0.4), 0 0 120px rgba(125,60,152,0.2), 0 0 200px rgba(155,89,182,0.1);
+    animation: placeholder-pulse 2.5s ease-in-out infinite;
+  }
+  @keyframes placeholder-pulse {
+    0%, 100% { box-shadow: 0 0 60px rgba(155,89,182,0.4), 0 0 120px rgba(125,60,152,0.2); transform: scale(1); }
+    50%      { box-shadow: 0 0 90px rgba(195,155,219,0.6), 0 0 180px rgba(155,89,182,0.35); transform: scale(1.05); }
+  }
+
+  .empty-state p { font-size: 14px; }
+
+  /* ── Input Area ── */
+  .chat-input-area {
+    padding: 16px 24px 20px;
+    border-top: 1px solid var(--border);
+  }
+
+  .chat-input-wrap {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+  }
+
+  .chat-input-wrap textarea {
+    flex: 1;
+    resize: none;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+    line-height: 1.5;
+    min-height: 44px;
+    max-height: 140px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .chat-input-wrap textarea:focus {
+    border-color: var(--purple);
+    box-shadow: 0 0 0 3px rgba(155,89,182,0.15);
+  }
+
+  .chat-input-wrap textarea::placeholder {
+    color: var(--text-dim);
+  }
+
+  .btn-send {
+    flex-shrink: 0;
+    width: 44px; height: 44px;
+    border: none;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #7d3c98, #9b59b6);
+    color: #fff;
+    cursor: pointer;
+    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .btn-send:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 20px rgba(155,89,182,0.4);
+  }
+
+  .btn-send:active { transform: translateY(0); }
+
+  .btn-send:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+  }
+
+  .btn-send.sending .send-icon { display: none; }
+  .btn-send:not(.sending) .spinner { display: none; }
+
+  .spinner {
+    width: 18px; height: 18px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Footer ── */
+  .footer {
+    text-align: center;
+    padding: 8px 24px 16px;
+    font-size: 12px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 640px) {
+    .hero h1 { font-size: 26px; }
+    .navbar { padding: 12px 16px; }
+    .main { padding: 0 12px; }
+    .chat-messages { padding: 16px; }
+    .chat-input-area { padding: 12px 16px 16px; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="bg-canvas"></canvas>
+
+<div class="app">
+  <!-- Navbar -->
+  <nav class="navbar">
+    <div class="navbar-brand">
+      <div class="dot"></div>
+      NPCSidekick
+    </div>
+    <div class="navbar-status">
+      <div class="status-indicator"></div>
+      v3.1 ready
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <div class="main">
+    <!-- Hero -->
+    <header class="hero">
+      <h1><span>NPCSidekick</span> AI Agent</h1>
+      <p class="tagline">4-layer architecture. Minimal dependencies. Readable in an afternoon.</p>
+      <div class="layers">
+        <span>Planner</span>
+        <span>Executor</span>
+        <span>Tool Router</span>
+        <span>Memory</span>
+      </div>
+    </header>
+
+    <!-- Chat -->
+    <div class="chat-container">
+      <div class="chat-messages" id="chatMessages">
+        <div class="empty-state">
+          <div class="orb-placeholder"></div>
+          <p>输入你的问题，NPCSidekick会拆解并执行</p>
+          <p style="font-size:12px;color:var(--text-dim)">试试："帮我分析 D:\Projects\NPCSidekick 项目的架构"</p>
+        </div>
+      </div>
+
+      <div class="chat-input-area">
+        <div class="chat-input-wrap">
+          <textarea
+            id="chatInput"
+            rows="1"
+            placeholder="输入消息..."
+            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"
+            oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,140)+'px'"
+          ></textarea>
+          <button class="btn-send" id="btnSend" onclick="sendMessage()">
+            <span class="send-icon">↑</span>
+            <span class="spinner"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <p class="footer"></p>
+  </div>
+</div>
+
+<!-- ── Background Animation ── -->
+<script>
+(function() {
+  const canvas = document.getElementById('bg-canvas');
+  const ctx = canvas.getContext('2d');
+
+  let W, H, cx, cy;
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cx = W * 0.15;
+    cy = H * 0.18;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ── Star Core / Black Hole ──
+  const orb = { get x() { return cx; }, get y() { return cy; } };
+
+  // ── Accretion disk: elliptical particle rings ──
+  const RING_COUNT = 5;
+  const PARTICLES_PER_RING = 60;
+  const totalParticles = RING_COUNT * PARTICLES_PER_RING;
+  const ringParticles = [];
+
+  const ringColors = [
+    '#c39bdb','#e8c5f0','#9b59b6','#5dade2','#48c9b0',
+    '#f06292','#f4d03f','#af7ac5','#e74c3c','#ff9ff3'
+  ];
+
+  class RingParticle {
+    constructor(ringIndex, particleIndex) {
+      this.ringIndex = ringIndex;
+      // Tilt: each ring has different eccentricity and rotation
+      this.baseDist = 90 + ringIndex * 55;           // distance from center
+      this.ellipseRatio = 0.3 + ringIndex * 0.12;     // flattening of ellipse
+      this.tiltAngle = ringIndex * 0.5;                // ring rotation
+      this.baseAngle = (particleIndex / PARTICLES_PER_RING) * Math.PI * 2;
+      this.orbitSpeed = 0.3 + ringIndex * 0.12 + Math.random() * 0.15;
+      // Inner rings orbit faster
+      if (ringIndex < 2) this.orbitSpeed = 0.6 + Math.random() * 0.4;
+      this.size = 0.6 + Math.random() * (2.5 - ringIndex * 0.25);
+      this.opacity = 0.25 + Math.random() * 0.5;
+      this.color = ringColors[Math.floor(Math.random() * ringColors.length)];
+      this.angle = this.baseAngle;
+      // Random vertical wobble
+      this.wobbleAmp = Math.random() * 15;
+      this.wobbleFreq = 0.5 + Math.random() * 1.5;
+      this.wobbleOffset = Math.random() * Math.PI * 2;
+    }
+
+    update(dt, time) {
+      this.angle += this.orbitSpeed * dt;
+      if (this.angle > Math.PI * 2) this.angle -= Math.PI * 2;
+    }
+
+    pos(time) {
+      const a = this.angle;
+      const wobble = Math.sin(time * this.wobbleFreq + this.wobbleOffset) * this.wobbleAmp;
+      return {
+        x: orb.x + Math.cos(a) * this.baseDist,
+        y: orb.y + Math.sin(a) * this.baseDist * this.ellipseRatio + wobble,
+      };
+    }
+  }
+
+  for (let r = 0; r < RING_COUNT; r++) {
+    for (let p = 0; p < PARTICLES_PER_RING; p++) {
+      ringParticles.push(new RingParticle(r, p));
+    }
+  }
+
+  // ── Free-roaming particles (solar wind / ejected matter) ──
+  const WIND_COUNT = 120;
+  const windParticles = [];
+
+  class WindParticle {
+    constructor(init = false) {
+      this.reset(init);
+    }
+    reset(init) {
+      const a = Math.random() * Math.PI * 2;
+      this.dist = init ? 80 + Math.random() * 500 : 80 + Math.random() * 100;
+      this.angle = a;
+      this.speed = (0.08 + Math.random() * 0.35) * (Math.random() > 0.5 ? 1 : -1);
+      this.size = 0.3 + Math.random() * 1.8;
+      this.opacity = 0.08 + Math.random() * 0.5;
+      this.color = ringColors[Math.floor(Math.random() * ringColors.length)];
+      this.drift = 0.5 + Math.random() * 6;           // outward drift speed
+      this.maxDist = 200 + Math.random() * 700;
+      this.verticalDrift = (Math.random() - 0.5) * 3;
+      this.wobbleAmp = Math.random() * 20;
+      this.wobbleFreq = 0.3 + Math.random() * 1.2;
+      this.wobbleOffset = Math.random() * Math.PI * 2;
+      this.age = 0;
+      this.lifetime = 3 + Math.random() * 8; // seconds before respawn
+    }
+    update(dt, time) {
+      this.age += dt;
+      this.angle += this.speed * dt;
+      this.dist += this.drift * dt;
+      if (this.angle > Math.PI * 2) this.angle -= Math.PI * 2;
+      if (this.angle < 0) this.angle += Math.PI * 2;
+      if (this.dist > this.maxDist || this.age > this.lifetime) {
+        this.reset(false);
+        this.dist = 40 + Math.random() * 120;
+        this.age = 0;
+      }
+    }
+    pos(time) {
+      const wobble = Math.sin(time * this.wobbleFreq + this.wobbleOffset) * this.wobbleAmp;
+      return {
+        x: orb.x + Math.cos(this.angle) * this.dist + wobble * 0.5,
+        y: orb.y + Math.sin(this.angle) * this.dist * 0.5 + wobble,
+      };
+    }
+  }
+
+  for (let i = 0; i < WIND_COUNT; i++) windParticles.push(new WindParticle(true));
+
+  // ── Solar flares / energy jets ──
+  const FLARE_COUNT = 3;
+  const flares = [];
+  for (let i = 0; i < FLARE_COUNT; i++) {
+    flares.push({
+      angle: (i / FLARE_COUNT) * Math.PI * 2 + Math.random() * 0.5,
+      length: 160 + Math.random() * 260,
+      speed: 0.03 + Math.random() * 0.08,
+      arcWidth: 8 + Math.random() * 20,
+      opacity: 0.06 + Math.random() * 0.12,
+      pulseOffset: Math.random() * Math.PI * 2,
+    });
+  }
+
+  // ── Render ──
+  let lastTime = performance.now();
+
+  function draw(now) {
+    const time = now / 1000;
+    const dt = Math.min((now - lastTime) / 1000, 0.1);
+    lastTime = now;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // ── 1. Massive ambient glow ──
+    const pulseMain = 1 + Math.sin(time * 0.4) * 0.15 + Math.sin(time * 0.7) * 0.08;
+    const bigGlow = ctx.createRadialGradient(orb.x, orb.y, 0, orb.x, orb.y, 320 * pulseMain);
+    bigGlow.addColorStop(0, 'rgba(155,89,182,0.15)');
+    bigGlow.addColorStop(0.3, 'rgba(125,60,152,0.08)');
+    bigGlow.addColorStop(0.6, 'rgba(100,40,130,0.03)');
+    bigGlow.addColorStop(1, 'rgba(10,10,15,0)');
+    ctx.fillStyle = bigGlow;
+    ctx.beginPath();
+    ctx.arc(orb.x, orb.y, 320 * pulseMain, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Second wider glow ring
+    const wideGlow = ctx.createRadialGradient(orb.x, orb.y, 200, orb.x, orb.y, 600);
+    wideGlow.addColorStop(0, 'rgba(155,89,182,0.04)');
+    wideGlow.addColorStop(0.5, 'rgba(80,30,120,0.02)');
+    wideGlow.addColorStop(1, 'rgba(10,10,15,0)');
+    ctx.fillStyle = wideGlow;
+    ctx.beginPath();
+    ctx.arc(orb.x, orb.y, 600, 0, Math.PI * 2);
+    ctx.fill();
+
+    // ── 2. Core star ──
+    const corePulse = 1 + Math.sin(time * 1.2) * 0.2 + Math.sin(time * 2.5) * 0.1;
+    for (let layer = 0; layer < 4; layer++) {
+      const r = (15 + layer * 22) * corePulse;
+      const alpha = 0.5 - layer * 0.11;
+      const coreGrad = ctx.createRadialGradient(orb.x, orb.y, 0, orb.x, orb.y, r);
+      coreGrad.addColorStop(0, `rgba(220,190,240,${alpha})`);
+      coreGrad.addColorStop(0.4, `rgba(155,89,182,${alpha * 0.6})`);
+      coreGrad.addColorStop(0.8, `rgba(100,40,150,${alpha * 0.2})`);
+      coreGrad.addColorStop(1, 'rgba(10,10,15,0)');
+      ctx.fillStyle = coreGrad;
+      ctx.beginPath();
+      ctx.arc(orb.x, orb.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // White-hot center
+    const hotCenter = ctx.createRadialGradient(orb.x, orb.y, 0, orb.x, orb.y, 8);
+    hotCenter.addColorStop(0, 'rgba(255,255,255,0.9)');
+    hotCenter.addColorStop(0.3, 'rgba(240,220,255,0.5)');
+    hotCenter.addColorStop(1, 'rgba(155,89,182,0)');
+    ctx.fillStyle = hotCenter;
+    ctx.beginPath();
+    ctx.arc(orb.x, orb.y, 8 * corePulse, 0, Math.PI * 2);
+    ctx.fill();
+
+    // ── 3. Accretion disk rings ──
+    for (const p of ringParticles) {
+      p.update(dt, time);
+      const pos = p.pos(time);
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = p.opacity;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // ── 4. Wind / ejected particles with trails ──
+    for (const wp of windParticles) {
+      wp.update(dt, time);
+      const pos = wp.pos(time);
+      // Trail
+      const trailLen = wp.dist > 150 ? 3 : 0;
+      if (trailLen > 0) {
+        const prevAngle = wp.angle - wp.speed * 0.03;
+        const prevX = orb.x + Math.cos(prevAngle) * (wp.dist - 4);
+        const prevY = orb.y + Math.sin(prevAngle) * (wp.dist - 4) * 0.5;
+        ctx.strokeStyle = wp.color;
+        ctx.globalAlpha = wp.opacity * 0.3;
+        ctx.lineWidth = wp.size * 0.6;
+        ctx.beginPath();
+        ctx.moveTo(prevX, prevY);
+        ctx.lineTo(pos.x, pos.y);
+        ctx.stroke();
+      }
+      // Glow dot
+      ctx.fillStyle = wp.color;
+      ctx.globalAlpha = wp.opacity;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, wp.size, 0, Math.PI * 2);
+      ctx.fill();
+      // Tiny glow halo around bright particles
+      if (wp.opacity > 0.35) {
+        const haloGrad = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, wp.size * 4);
+        haloGrad.addColorStop(0, wp.color);
+        haloGrad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = haloGrad;
+        ctx.globalAlpha = wp.opacity * 0.25;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, wp.size * 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // ── 5. Connecting lines between nearby particles ──
+    const allParts = [...ringParticles, ...windParticles];
+    const sampleSize = Math.min(allParts.length, 180);
+    const sampled = [];
+    for (let i = 0; i < sampleSize; i++) {
+      sampled.push(allParts[Math.floor(Math.random() * allParts.length)]);
+    }
+
+    for (let i = 0; i < sampled.length - 1; i += 2) {
+      const a = sampled[i].pos(time);
+      const b = sampled[i + 1].pos(time);
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const maxDist = 180;
+      if (dist > maxDist) continue;
+
+      const alpha = (1 - dist / maxDist) * 0.06;
+      ctx.strokeStyle = `rgba(155,89,182,${alpha})`;
+      ctx.lineWidth = 0.4;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+
+    // ── 6. Solar flares / energy jets ──
+    for (const flare of flares) {
+      flare.angle += flare.speed * dt;
+      if (flare.angle > Math.PI * 2) flare.angle -= Math.PI * 2;
+
+      const pulse = 1 + Math.sin(time * 1.5 + flare.pulseOffset) * 0.5;
+      const flen = flare.length * pulse;
+
+      // Curved flare path
+      const cx1 = orb.x + Math.cos(flare.angle) * flen * 0.4;
+      const cy1 = orb.y + Math.sin(flare.angle) * flen * 0.4 * 0.5;
+      const cx2 = orb.x + Math.cos(flare.angle + 0.3) * flen * 0.7;
+      const cy2 = orb.y + Math.sin(flare.angle + 0.3) * flen * 0.7 * 0.5;
+      const ex = orb.x + Math.cos(flare.angle) * flen;
+      const ey = orb.y + Math.sin(flare.angle) * flen * 0.5;
+
+      const flareGrad = ctx.createLinearGradient(orb.x, orb.y, ex, ey);
+      flareGrad.addColorStop(0, `rgba(200,160,230,${flare.opacity * 2})`);
+      flareGrad.addColorStop(0.5, `rgba(155,89,182,${flare.opacity})`);
+      flareGrad.addColorStop(1, 'rgba(100,40,150,0)');
+
+      ctx.strokeStyle = flareGrad;
+      ctx.lineWidth = flare.arcWidth * pulse;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(orb.x, orb.y);
+      ctx.quadraticCurveTo(cx1, cy1, cx2, cy2);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+
+      // Second thinner flare
+      const flare2Angle = flare.angle + Math.PI * 0.7;
+      const flen2 = flen * 0.6;
+      const ex2 = orb.x + Math.cos(flare2Angle) * flen2;
+      const ey2 = orb.y + Math.sin(flare2Angle) * flen2 * 0.5;
+      const flareGrad2 = ctx.createLinearGradient(orb.x, orb.y, ex2, ey2);
+      flareGrad2.addColorStop(0, 'rgba(180,200,240,0.12)');
+      flareGrad2.addColorStop(1, 'rgba(100,140,200,0)');
+      ctx.strokeStyle = flareGrad2;
+      ctx.lineWidth = flare.arcWidth * 0.4 * pulse;
+      ctx.beginPath();
+      ctx.moveTo(orb.x, orb.y);
+      ctx.lineTo(ex2, ey2);
+      ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
+
+    // ── 7. Energy halo rings (pulsing circles) ──
+    for (let i = 0; i < 3; i++) {
+      const ringR = 60 + i * 50 + Math.sin(time * 0.6 + i) * 20;
+      const ringAlpha = 0.04 - i * 0.01 + Math.sin(time * 0.8 + i) * 0.015;
+      ctx.strokeStyle = `rgba(155,89,182,${Math.max(0, ringAlpha)})`;
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.arc(orb.x, orb.y, ringR, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    requestAnimationFrame(draw);
+  }
+
+  requestAnimationFrame(draw);
+})();
+
+// ── Chat Logic ──
+const messages = document.getElementById('chatMessages');
+const input = document.getElementById('chatInput');
+const btn = document.getElementById('btnSend');
+
+function addMessage(role, text) {
+  const empty = messages.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+  div.innerHTML = text.replace(/\n/g, '<br>');
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+  return div;
+}
+
+function appendContent(el, html) {
+  el.innerHTML += html;
+  messages.scrollTop = messages.scrollHeight;
+}
+
+let _fullAnswer = '';
+
+function handleStreamEvent(event, msgEl) {
+  const d = event.data || {};
+  switch (event.type) {
+    case 'plan_ready':
+      appendContent(msgEl,
+        `<div class="step-card"><div class="step-indicator">目标: ${escHtml(d.goal || '')} (${d.steps_count || 0} 步)</div></div>`);
+      break;
+    case 'step_start':
+      appendContent(msgEl,
+        `<div class="step-card" id="step-${d.step_id}">
+          <div class="step-indicator running">步骤 ${d.step_id}: ${escHtml(d.description || '')}</div>
+          ${d.tool ? `<div class="tool-name">工具: ${escHtml(d.tool)}</div>` : ''}
+        </div>`);
+      break;
+    case 'tool_result':
+      const stepCard = document.getElementById(`step-${d.step_id}`);
+      if (stepCard) {
+        const indicator = stepCard.querySelector('.step-indicator');
+        if (indicator) {
+          indicator.classList.remove('running');
+          indicator.classList.add(d.ok ? 'done' : 'failed');
+          indicator.textContent += d.ok ? ' ✓' : ' ✗';
+        }
+      }
+      break;
+    case 'step_done':
+      const card = document.getElementById(`step-${d.step_id}`);
+      if (card && d.success) {
+        const ind = card.querySelector('.step-indicator');
+        if (ind) { ind.classList.remove('running'); ind.classList.add('done'); }
+      }
+      break;
+    case 'text_delta':
+      _fullAnswer += d.content || '';
+      msgEl.innerHTML = formatAnswer(_fullAnswer);
+      break;
+    case 'synthesis':
+      appendContent(msgEl, '<div class="step-indicator">生成答案...</div>');
+      break;
+    case 'done':
+      if (!_fullAnswer && d.answer) {
+        msgEl.innerHTML = formatAnswer(d.answer);
+      } else if (!_fullAnswer) {
+        msgEl.innerHTML = '<span style="color:var(--text-dim)">任务执行完成。</span>';
+      }
+      if (d.duration_sec) {
+        appendContent(msgEl, `<div class="duration">耗时: ${d.duration_sec.toFixed(1)}s</div>`);
+      }
+      _fullAnswer = '';
+      break;
+    case 'error':
+      appendContent(msgEl, `<div class="error-msg">${escHtml(event.message)}</div>`);
+      break;
+  }
+}
+
+function formatAnswer(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/```(\w*)\n([\s\S]*?)```/g,
+      '<pre><code>$2</code></pre>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\n/g, '<br>');
+}
+
+function escHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text || btn.classList.contains('sending')) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  btn.classList.add('sending');
+  btn.disabled = true;
+
+  addMessage('user', text);
+  const assistantMsg = addMessage('assistant', '');
+  _fullAnswer = '';
+
+  try {
+    const resp = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+
+        try {
+          const event = JSON.parse(data);
+          handleStreamEvent(event, assistantMsg);
+        } catch(e) {}
+      }
+    }
+  } catch (err) {
+    assistantMsg.innerHTML = `<span class="error-msg">Error: ${escHtml(err.message)}</span>`;
+  } finally {
+    btn.classList.remove('sending');
+    btn.disabled = false;
+    input.focus();
+  }
+}
+</script>
+</body>
+</html>

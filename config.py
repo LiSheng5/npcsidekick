@@ -1,5 +1,5 @@
 """
-全局配置 — Dagent 项目的共享设置入口。
+全局配置 — NPCSidekick 项目的共享设置入口。
 
 此文件是 AgentSettings 的薄封装：
   import config; config.MAX_RETRIES

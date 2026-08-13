@@ -1,4 +1,4 @@
-# 奇天 v3.1 — 快速开始指南
+# NPCSidekick — 快速开始指南（引擎: NPCSidekick ）
 
 ## 环境要求
 
@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-cd D:\Dagent
+cd <仓库根目录>
 pip install -r requirements.txt -r requirements-dev.txt
 ```
 
@@ -71,7 +71,7 @@ orch = AgentOrchestrator()
 orch.initialize()
 
 # 同步查询
-answer = orch.run("帮我分析 d:/Dagent/config.py")
+answer = orch.run("帮我分析 d:/NPCSidekick/config.py")
 print(answer)
 
 # 流式查询

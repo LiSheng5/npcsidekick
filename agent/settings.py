@@ -13,13 +13,14 @@ AgentSettings — 可注入的配置数据类。
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 
 def _default_base_dir() -> Path:
-    return Path(__file__).resolve().parent.parent  # D:\Dagent
+    return Path(__file__).resolve().parent.parent  # D:\Projects\NPCSidekick
 
 
 def _default_memory_dir() -> Path:
@@ -47,7 +48,7 @@ def _load_api_key() -> str:
 @dataclass
 class AgentSettings:
     """
-    Dagent 全局配置 — 可注入, 可覆盖。
+    NPCSidekick 全局配置 — 可注入, 可覆盖。
 
     所有字段都有合理默认值, 测试只需覆盖关心的字段。
     """
@@ -110,6 +111,12 @@ class AgentSettings:
     # ── Logging ────────────────────────────────────────
     log_level: str = "INFO"
     log_mode: str = "console"  # "console" | "json" | "test"
+
+    # ── Web UI ─────────────────────────────────────────
+    web_host: str = "127.0.0.1"
+    web_port: int = 8765
+    web_token: str = field(default_factory=lambda: secrets.token_hex(16))  # 启动时随机生成
+    web_auto_open: bool = False  # 启动时自动打开浏览器
 
     # ── Streaming ──────────────────────────────────────
     streaming_enabled: bool = False

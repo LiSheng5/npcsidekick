@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NPCSidekick — AI 游戏角色框架</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    color:#1f1a24;min-height:100vh;
+    display:flex;align-items:center;justify-content:center;
+    background:
+      radial-gradient(900px 500px at 85% -10%, rgba(224,138,30,0.10), transparent 60%),
+      linear-gradient(135deg,#ffffff,#f4f1f8);
+  }
+  .card{
+    max-width:560px;text-align:center;padding:48px 40px;
+    background:#fff;border:1px solid rgba(224,138,30,0.3);
+    border-radius:20px;
+  }
+  h1{font-size:30px;letter-spacing:1px;margin-bottom:8px;}
+  h1 span{color:#9c5a12;}
+  .tag{color:#6b6470;font-size:15px;line-height:1.7;margin-bottom:28px;}
+  .btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;}
+  .btn{
+    display:inline-block;padding:12px 26px;border-radius:12px;
+    text-decoration:none;font-size:15px;font-weight:600;
+  }
+  .btn.demo{background:linear-gradient(135deg,#e08a1e,#d97a14);color:#fff;}
+  .btn.gh{border:1px solid rgba(224,138,30,0.4);color:#9c5a12;}
+  .foot{color:#6b6470;font-size:12px;margin-top:26px;line-height:1.6;}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>NPCSidekick</h1>
+    <p class="tag">AI 游戏角色框架 — 让游戏 NPC 拥有丰富互动的大脑。<br>玩家与制作者自由填写世界、人格、模型。</p>
+    <div class="btns">
+      <a class="btn demo" href="npc.html">在线 Demo</a>
+      <a class="btn gh" href="https://github.com/" target="_blank" rel="noopener">查看源码</a>
+    </div>
+    <p class="foot">在线 Demo 为静态预览（内置示例数据）。<br>完整 AI 对话需本地运行：<code>python -m npc.server</code></p>
+  </div>
+</body>
+</html>

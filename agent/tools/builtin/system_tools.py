@@ -74,6 +74,10 @@ class CalculatorTool(ToolProtocol):
             ast.Mod: operator.mod, ast.USub: operator.neg, ast.UAdd: operator.pos,
         }
 
+        # 指数上界：防止 9**9**9**9 之类的指数爆炸把进程挂死 / 耗尽内存（DoS）。
+        # 在实际求值前拦截，right 是已求值的指数，abs 超过阈值即拒绝。
+        MAX_EXPONENT = 1000
+
         try:
             tree = ast.parse(cleaned, mode="eval")
 
@@ -81,7 +85,11 @@ class CalculatorTool(ToolProtocol):
                 if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
                     return node.value
                 if isinstance(node, ast.BinOp) and type(node.op) in allowed_ops:
-                    return allowed_ops[type(node.op)](eval_node(node.left), eval_node(node.right))
+                    left = eval_node(node.left)
+                    right = eval_node(node.right)
+                    if isinstance(node.op, ast.Pow) and abs(right) > MAX_EXPONENT:
+                        raise ValueError(f"指数超出安全上界（|exp| ≤ {MAX_EXPONENT}）")
+                    return allowed_ops[type(node.op)](left, right)
                 if isinstance(node, ast.UnaryOp) and type(node.op) in allowed_ops:
                     return allowed_ops[type(node.op)](eval_node(node.operand))
                 raise ValueError("暂不支持该表达式")
