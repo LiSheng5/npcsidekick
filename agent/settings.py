@@ -20,7 +20,7 @@ from typing import Optional
 
 
 def _default_base_dir() -> Path:
-    return Path(__file__).resolve().parent.parent  # D:\Projects\NPCSidekick
+    return Path(__file__).resolve().parent.parent  # 项目根目录
 
 
 def _default_memory_dir() -> Path:

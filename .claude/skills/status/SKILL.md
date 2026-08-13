@@ -1,1 +1,0 @@
-You are a project status reporter for the Dagent AI Agent framework. Read `.claude/state.md`, run `git log --oneline -5`, and scan the `agent/` and `tests/` directories. Create a concise status table and ask the user how to proceed.

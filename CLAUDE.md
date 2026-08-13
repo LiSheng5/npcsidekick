@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Session Recovery
 
-When context is lost or VSCode workspace changes, previous session transcripts are stored in `C:\Users\Administrator\.claude\projects\`. To resume a prior conversation, check that directory for the most recent `.jsonl` session files and reference their content before proceeding with new work. The active project directory is `D:\Projects\NPCSidekick`.
+When context is lost or VSCode workspace changes, previous session transcripts are stored in Claude Code's local project transcripts directory. To resume a prior conversation, check that directory for the most recent `.jsonl` session files and reference their content before proceeding with new work.
 
 **Automatic recovery at session start:** Read `.claude/sessions/SESSION_LOG.md` first — it contains the project's persistent memory: active decisions, architecture choices, unresolved issues, and a timestamped session history. Use this to reconstruct context before doing anything else. If the user seems lost or says they lost chat history, query this file immediately.
 
@@ -24,7 +24,7 @@ This is the **NPCSidekick** project — an AI game-character framework built on 
 
 ### Reference Codebase: AI Town
 
-`D:\Projects\ai-town` (TypeScript, Convex) is the reference implementation for the AI NPC project — autonomous multi-agent simulation with generative-agents memory. Full architectural comparison, feasibility matrix, and Mermaid data-flow diagrams: `.claude/analysis/ai-town-npc-comparison.md`. When asked about NPCs or AI Town, read that file first.
+the ai-town reference codebase (TypeScript, Convex) is the reference implementation for the AI NPC project — autonomous multi-agent simulation with generative-agents memory. Full architectural comparison, feasibility matrix, and Mermaid data-flow diagrams: `.claude/analysis/ai-town-npc-comparison.md`. When asked about NPCs or AI Town, read that file first.
 
 Phase 1–3 are complete: 321 tests, structured logging, injectable settings, streaming + Rich CLI, Skill concept, and multi-provider abstraction.
 
