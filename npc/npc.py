@@ -10,6 +10,8 @@ NPCSidekick — NPC 运行时（轻路径）。
 from __future__ import annotations
 
 import json
+import os
+import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +44,16 @@ DIALOGUE_HISTORY_TURNS = 5
 REFLECT_IMPORTANCE_THRESHOLD = 12
 # 一次反思最多纳入的条目数（防上下文过长）
 REFLECT_MAX_ENTRIES = 8
+
+
+def _dedup_enabled() -> bool:
+    """记忆卡治理·总开关 NPC_MEMORY_DEDUP（方案稿获批 2026-08-25，默认关：不设/0 全链路与旧版一致）。
+
+    开启后生效两道闸：
+    闸1 写入去重聚合 —— remember() 里同文日常条目就地计数，不再新增重复行；
+    闸2 反思卫生 —— 噪音批不产反思、重复反思不重写（防"总结垃圾产生垃圾"）。
+    """
+    return os.environ.get("NPC_MEMORY_DEDUP", "") not in ("", "0")
 
 
 def _reflect_rules(entries: List[Dict]) -> str:
@@ -231,6 +243,17 @@ class NPC:
         if _safety.enabled() and _safety.scan(note).level == "L1":
             log.warning("npc_memory_rejected_unsafe", npc=self.persona["id"])
             return
+        # 记忆卡治理·闸1(2026-08-25): 同文日常条目(general 且 imp≤6)就地聚合计数,
+        # 不再新增重复行 —— 休息循环从 3500 条变 1 条; imp≥7 玩家正事永不合并。
+        if _dedup_enabled() and importance <= 6 and category == "general":
+            for e in reversed(self.memory.all()):
+                if (e.get("category") == "general"
+                        and e.get("importance", 5) <= 6
+                        and e.get("content") == note):
+                    e["created_at"] = time.time()
+                    e["count"] = e.get("count", 1) + 1
+                    log.info("npc_memory_deduped", npc=self.persona["id"], count=e["count"])
+                    return
         self.memory.add(note, importance=importance, category=category)
         log.info("npc_remembered", npc=self.persona["id"], importance=importance)
 
@@ -248,6 +271,12 @@ class NPC:
             return None
         if sum(e.get("importance", 5) for e in entries) < REFLECT_IMPORTANCE_THRESHOLD:
             return None
+        # 记忆卡治理·闸2(2026-08-25): 候选批唯一内容 <3 → 判定日常噪音,
+        # 推进反思指针但不调 LLM、不产废话洞察（防"总结垃圾产生垃圾"）。
+        if _dedup_enabled() and len({e.get("content", "") for e in entries}) < 3:
+            self._reflected_upto += len(entries)
+            log.info("npc_reflect_skipped_noise", npc=self.persona["id"], batch=len(entries))
+            return None
         facts = "\n".join(f"- {e['content']}" for e in entries)
         llm = self._get_llm(role="review")     # 反思用 review 档模型（可独立配置）
         if llm is not None:
@@ -256,6 +285,13 @@ class NPC:
             reflection = _reflect_rules(entries)
         reflection = reflection.strip() if reflection else ""
         if not reflection:
+            return None
+        # 闸2b: 产出与既有反思条同文 → 不重写（指针仍前进, 静默翻篇）。
+        if _dedup_enabled() and any(
+                e.get("category") == "reflection" and e.get("content") == reflection
+                for e in self.memory.all()):
+            self._reflected_upto = len(self.memory.all())
+            log.info("npc_reflect_deduped", npc=self.persona["id"])
             return None
         self.memory.add(reflection, importance=8, category="reflection")
         self._reflected_upto = len(self.memory.all())   # 这批已归纳，不再重复

@@ -9,3 +9,4 @@ npc/store/
 .claude/
 npc/store_test/
 api_key_zen.txt
+npc/store_backup_*/
