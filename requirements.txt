@@ -24,6 +24,9 @@ pydantic>=2.0
 fastapi>=0.115
 uvicorn>=0.34
 
+# Voice (NPC TTS) — 免费微软 TTS; 未安装时语音自动降级纯文本
+edge-tts>=6.1
+
 # Dev & Test (install separately: pip install -r requirements-dev.txt)
 # pytest>=8.0
 # pytest-asyncio>=0.24

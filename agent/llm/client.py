@@ -16,13 +16,58 @@ LLMClient 本身不直接调用 API — 它委托给 ProviderProtocol 实现。
 """
 from __future__ import annotations
 
+import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
 
 from agent.llm.types import StreamChunk
+from agent.logging_config import log
 import config
 
 if TYPE_CHECKING:
     from agent.providers.base import ProviderProtocol
+
+# ── 网关抖动重试（2026-08-25, 思想借自 ExponentialBackoff/DSH retryPolicy）──
+# 开关: NPC_LLM_RETRY=1 才启用（代码默认关 — 家规）。每次调用现读环境变量，可热切。
+# 节奏: 默认最多补试 2 次，等待 2s/6s（最坏多花 8s，仍在 talk 60s 预算内）。
+#       NPC_LLM_RETRY_DELAYS="3,9" 可自定义。
+# 只救瞬时病（超时/连接断/限流429/5xx），参数错(4xx)立刻原样抛出——盲试是浪费预算。
+
+
+def _retry_delays() -> List[float]:
+    import os
+    raw = os.environ.get("NPC_LLM_RETRY_DELAYS", "").strip()
+    if not raw:
+        return [2.0, 6.0]
+    try:
+        return [max(0.0, float(x)) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        return [2.0, 6.0]
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """不依赖具体 SDK 的宽判别: 看异常名和 status_code 属性。"""
+    name = type(exc).__name__.lower()
+    if any(k in name for k in ("timeout", "connection", "ratelimit",
+                               "internal", "overloaded", "unavailable")):
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and (status == 429 or status >= 500)
+
+
+def _chat_with_retry(provider: "ProviderProtocol", kwargs: Dict[str, Any]) -> "LLMResponse":
+    delays = _retry_delays() if __import__("os").environ.get("NPC_LLM_RETRY") == "1" else []
+    attempt = 0
+    while True:
+        try:
+            return provider.chat(**kwargs)
+        except Exception as exc:
+            if attempt >= len(delays) or not _is_retryable(exc):
+                raise
+            wait = delays[attempt]
+            attempt += 1
+            log.warning("llm_retry_scheduled", attempt=attempt,
+                        delay_s=wait, error=str(exc)[:120])
+            time.sleep(wait)
 
 
 class LLMClient:
@@ -94,7 +139,7 @@ class LLMClient:
           response_format: {"type": "json_object"} 强制 JSON 输出
           reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")
         """
-        return self._provider.chat(
+        return _chat_with_retry(self._provider, dict(
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,
@@ -102,7 +147,7 @@ class LLMClient:
             max_tokens=max_tokens,
             response_format=response_format,
             reasoning_effort=reasoning_effort,
-        )
+        ))
 
     def chat_with_structured_output(
         self,
@@ -173,12 +218,13 @@ class LLMResponse:
     """
 
     def __init__(self, content: str, tool_calls: List, finish_reason: str,
-                 model: str, usage: Any):
+                 model: str, usage: Any, reasoning: str = ""):
         self.content = content
         self.tool_calls = tool_calls
         self.finish_reason = finish_reason
         self.model = model
         self.usage = usage
+        self.reasoning = reasoning   # 思考可视化: 模型思考内容(无则空串)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -194,6 +240,7 @@ class LLMResponse:
             "tool_calls_count": len(self.tool_calls),
             "finish_reason": self.finish_reason,
             "model": self.model,
+            "reasoning": self.reasoning,
         }
 
     def __repr__(self) -> str:

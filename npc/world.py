@@ -11,11 +11,34 @@ NPCSidekick — 世界契约 + 文本世界参考实现。
 """
 from __future__ import annotations
 
+import json
 from copy import deepcopy
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 # ── 行动集（契约）───────────────────────────────────
 ACTIONS = ("move", "gather", "craft", "deliver", "say")
+
+# ── 耐力系统(2026-08-22):动作级消耗,每点=1% 体力池 ——————————————
+# 参数 [PLACEHOLDER]:参考"轻活/重活"粗分,后续按真实生理功耗(MET 值)再调比例。
+# 归零不死:耐力见底只影响 scheduler 动态权重(强推休息),行动本身不禁止 —
+# 与游戏端玩家侧"耗尽禁跑"不同:村民会硬撑(老猎手风格),但很快会去歇。
+STAMINA_MAX = 100
+STAMINA_COST = {"move": 4, "gather": 10, "craft": 6, "deliver": 2, "say": 0}
+
+
+def stamina_of(world: Dict, who: str) -> float:
+    """读 actor 耐力(旧档无键 → 视为满,向后兼容)。"""
+    return float(world["actors"].get(who, {}).get("stamina", STAMINA_MAX))
+
+
+def _drain_stamina(world: Dict, who: str, action: str) -> None:
+    """按动作扣耐力,下限 0。所有行动路径(自主循环+LLM 工具)都经 apply_action,统一在此扣。"""
+    cost = STAMINA_COST.get(action, 0)
+    if cost <= 0:
+        return
+    actor = world["actors"][who]
+    actor["stamina"] = max(0.0, stamina_of(world, who) - cost)
 
 
 def default_world() -> Dict:
@@ -61,8 +84,15 @@ def default_world() -> Dict:
 
 
 def actor_of(world: Dict, who: str) -> Dict:
-    """取角色槽（NPC 注册时自动创建）。"""
-    return world["actors"].setdefault(who, {"position": "村庄", "inventory": {}})
+    """取角色槽（NPC 注册时自动创建）。
+
+    出生点: 世界可用 _default_spawn 声明(如 GTA 的罗克福山);缺省"村庄"。
+    2026-08-22 修: 原来硬编码"村庄" — GTA 世界没有这个地点,新槽 KeyError。
+    """
+    slot = world["actors"].setdefault(
+        who, {"position": world.get("_default_spawn", "村庄"), "inventory": {}})
+    slot.setdefault("stamina", STAMINA_MAX)   # 旧档补键(向后兼容)
+    return slot
 
 
 def observe(world: Dict, who: str = "cang") -> str:
@@ -79,6 +109,20 @@ def observe(world: Dict, who: str = "cang") -> str:
         lines.append(f"可前往: {'、'.join(loc['exits'])}")
     inv = actor["inventory"]
     lines.append(f"你的背包: {('、'.join(f'{k} ×{v}' for k, v in inv.items())) if inv else '空'}")
+    st = actor.get("stamina", STAMINA_MAX)
+    if st < 30:
+        lines.append("你浑身发沉,胳膊抬不起来——该歇了。")
+    elif st < 60:
+        lines.append("你有些喘,体力过半。")
+    # 天气/真实时间感知(2026-08-22): 游戏经 /api/talk context 同步;未同步时静默(文本世界自洽)
+    weather = world.get("_weather", "")
+    if weather == "rain":
+        lines.append("天上下着雨,雨点砸在树叶上噼啪响。")
+    elif weather == "festival":
+        lines.append("今天是部落的节庆日,营地热闹得很。")
+    gh = world.get("_game_hour")
+    if gh is not None and (gh >= 22 or gh < 6):
+        lines.append("夜已经很深了。")
     for other_id, other in world["actors"].items():
         if other_id != who and other["position"] == pos:
             lines.append(f"{other_id}也在附近。")
@@ -136,6 +180,7 @@ def apply_action(world: Dict, action: str, params: Dict, who: str = "cang") -> T
             return world, False, f"无法从{pos}前往{dest}（可前往: {'、'.join(loc['exits'])}）"
         actor["position"] = dest
         world["log"].append(f"{who} 前往 {dest}")
+        _drain_stamina(world, who, "move")
         return world, True, f"你来到了{dest}。{world['locations'][dest]['desc']}"
 
     if action == "gather":
@@ -147,6 +192,7 @@ def apply_action(world: Dict, action: str, params: Dict, who: str = "cang") -> T
         loc["resources"][resource] -= 1
         actor["inventory"][resource] = actor["inventory"].get(resource, 0) + 1
         world["log"].append(f"{who} 采集了 1 个{resource}")
+        _drain_stamina(world, who, "gather")
         return world, True, f"你采集了 1 个{resource}（背包现有 {actor['inventory'][resource]}）"
 
     if action == "craft":
@@ -169,6 +215,7 @@ def apply_action(world: Dict, action: str, params: Dict, who: str = "cang") -> T
         product = recipe["produces"]
         inv[product] = inv.get(product, 0) + 1
         world["log"].append(f"{who} 制作了 {product}")
+        _drain_stamina(world, who, "craft")
         return world, True, f"你制作了 1 个{product}（背包现有 {inv[product]}）"
 
     if action == "deliver":
@@ -181,6 +228,7 @@ def apply_action(world: Dict, action: str, params: Dict, who: str = "cang") -> T
         actor["inventory"][resource] -= 1
         world["delivered"][resource] = world["delivered"].get(resource, 0) + 1
         world["log"].append(f"{who} 将 {resource} 交给了 {prot['name']}")
+        _drain_stamina(world, who, "deliver")
         return world, True, f"你已将 1 个{resource}交给{prot['name']}（累计 {world['delivered'][resource]}）"
 
     if action == "say":
@@ -189,3 +237,39 @@ def apply_action(world: Dict, action: str, params: Dict, who: str = "cang") -> T
         return world, True, f"你说: {text}"
 
     return world, False, f"行动 {action} 参数错误"
+
+
+# ── §18 记忆分层·冷层: world.log 分段归档（2026-08-24）──────────────
+# 热数据(画像/人设)常驻上下文、温数据(记忆卡+检索)已有、本函数补冷层:
+# 长会话 world.log 无上限疯长(RAM 泄漏, SSE 游标吊在它上面) → 头部段落
+# 归档落盘, 内存只留尾部。本体(日志流)只追加不删除 — 归档是搬家不是销毁。
+LOG_TAIL_DEFAULT = 500
+ARCHIVE_FILENAME = "log_archive.jsonl"
+
+
+def rotate_world_log(world: Dict, tail: int = LOG_TAIL_DEFAULT,
+                     archive_dir: Optional[str] = None) -> int:
+    """world.log 超过 tail 条 → 头部段落搬进归档文件，内存只留尾部。返回搬动条数。
+
+    契约（游标兼容是铁律）:
+      - world["_log_offset"] 累计已搬走的条数; 逻辑索引 = offset + 物理索引。
+        /api/events 用它换算 since/log_count — 旧客户端游标是绝对流位置, 不受轮转影响;
+      - 归档行带绝对索引 {"i": 逻辑索引, "text": 原行}, 追加写
+        <archive_dir>/log_archive.jsonl — since<offset 的冷数据可从它回放;
+      - 任何写失败 → 异常上抛, 调用方记日志后放弃本轮轮转（宁可多占内存,
+        绝不丢事件 — 本体只追加的只读语义不破）。
+    """
+    log = world.setdefault("log", [])
+    if tail <= 0 or len(log) <= tail or not archive_dir:
+        return 0
+    cut = len(log) - tail
+    dest = Path(archive_dir)
+    dest.mkdir(parents=True, exist_ok=True)      # 失败 → 异常上抛 → 调用方放弃轮转
+    offset = int(world.get("_log_offset", 0))
+    with (dest / ARCHIVE_FILENAME).open("a", encoding="utf-8") as fh:
+        for i, line in enumerate(log[:cut]):
+            fh.write(json.dumps({"i": offset + i, "text": line},
+                                ensure_ascii=False) + "\n")
+    del log[:cut]
+    world["_log_offset"] = offset + cut
+    return cut

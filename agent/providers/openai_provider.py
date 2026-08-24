@@ -9,6 +9,8 @@ OpenAIProvider — OpenAI / DeepSeek / 任何 OpenAI 兼容 API 的 Provider 实
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from openai import OpenAI, AsyncOpenAI
@@ -65,6 +67,45 @@ class OpenAIProvider(ProviderProtocol):
     def model_name(self) -> str:
         return self._model
 
+    def _thinking_body(self, re_value: str) -> dict:
+        """把 reasoning_effort 档位翻译成各家 thinking body。
+
+        OpenRouter: {reasoning:{effort:值, exclude:false}} — 响应经 message.reasoning 回传思考
+        DeepSeek/OpenAI: 支持分级思考 -> {thinking:{type:enabled, reasoning_effort:值}}
+        Zhipu GLM(<5.2): 仅支持开/关 -> {thinking:{type:enabled}}
+        off/disabled/none        -> 显式关闭 {thinking:{type:disabled}}
+        """
+        val = str(re_value).lower()
+        if val in ("off", "disabled", "none"):
+            # OpenRouter 无显式关闭:不发 reasoning 参数即不回传思考
+            if self._is_openrouter():
+                return {}
+            return {"thinking": {"type": "disabled"}}
+        if self._is_openrouter():
+            # OpenRouter effort 仅支持 low/medium/high; max 等高档位归一到 high
+            effort = val if val in ("low", "medium", "high") else "high"
+            return {"reasoning": {"effort": effort, "exclude": False}}
+        if not self._glm_supports_effort():
+            return {"thinking": {"type": "enabled"}}
+        return {"thinking": {"type": "enabled", "reasoning_effort": re_value}}
+
+    def _is_openrouter(self) -> bool:
+        """OpenRouter 聚合端点:思考请求/响应字段与 DeepSeek 直连不同。"""
+        return "openrouter" in (self._base_url or "").lower()
+
+    def _glm_supports_effort(self) -> bool:
+        """GLM 系列仅在 5.2 及以上支持 reasoning_effort 分级思考。"""
+        m = self._model.lower()
+        if "glm" not in m:
+            return True
+        mm = re.search(r"glm[-_]?(\d+(?:\.\d+)?)", m)
+        if not mm:
+            return True
+        try:
+            return float(mm.group(1)) >= 5.2
+        except ValueError:
+            return True
+
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -88,13 +129,29 @@ class OpenAIProvider(ProviderProtocol):
         if response_format:
             kwargs["response_format"] = response_format
 
-        # reasoning_effort: 通过 extra_body 传递 (DeepSeek thinking)
+        # reasoning_effort -> 各家 thinking (经 extra_body 传递, 见 _thinking_body)
+        #   off/disabled/none -> 关闭 {thinking:{type:disabled}}
+        #   deepseek/openai -> {thinking:{type:enabled, reasoning_effort:值}}
+        #   zhipu GLM(<5.2) -> {thinking:{type:enabled}} (仅支持开/关)
+        #   None -> 不指定(服务端默认)
         _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
         if _re:
-            kwargs["extra_body"] = {"thinking": {"type": "enabled", "reasoning_effort": _re}}
+            kwargs["extra_body"] = self._thinking_body(_re)
 
         completion = self._client.chat.completions.create(**kwargs)
         choice = completion.choices[0]
+
+        # 思考可视化: 兼容 OpenRouter/DeepSeek 的思考内容字段
+        # (OpenRouter: message.reasoning / reasoning_details; DeepSeek: message.reasoning_content)
+        reasoning = getattr(choice.message, "reasoning", None)
+        if not reasoning:
+            reasoning = getattr(choice.message, "reasoning_content", None)
+        if not reasoning:
+            extra = getattr(choice.message, "model_extra", None) or {}
+            reasoning = extra.get("reasoning") or ""
+        if reasoning and not isinstance(reasoning, str):
+            details = getattr(reasoning, "text", None)
+            reasoning = details if details else str(reasoning)
 
         return LLMResponse(
             content=choice.message.content or "",
@@ -102,6 +159,7 @@ class OpenAIProvider(ProviderProtocol):
             finish_reason=choice.finish_reason,
             model=completion.model,
             usage=completion.usage,
+            reasoning=reasoning or "",
         )
 
     async def stream(
@@ -132,10 +190,14 @@ class OpenAIProvider(ProviderProtocol):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
 
-        # reasoning_effort: 通过 extra_body 传递 (DeepSeek thinking)
+        # reasoning_effort -> 各家 thinking (经 extra_body 传递, 见 _thinking_body)
+        #   off/disabled/none -> 关闭 {thinking:{type:disabled}}
+        #   deepseek/openai -> {thinking:{type:enabled, reasoning_effort:值}}
+        #   zhipu GLM(<5.2) -> {thinking:{type:enabled}} (仅支持开/关)
+        #   None -> 不指定(服务端默认)
         _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
         if _re:
-            kwargs["extra_body"] = {"thinking": {"type": "enabled", "reasoning_effort": _re}}
+            kwargs["extra_body"] = self._thinking_body(_re)
 
         stream_response = await self._async_client.chat.completions.create(**kwargs)
 

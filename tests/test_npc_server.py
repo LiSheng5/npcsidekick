@@ -2,6 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from agent.llm.client import LLMResponse
 from npc.npc import NPC
 from npc.server import create_npc_server
 
@@ -170,3 +171,135 @@ class TestSecurity:
             headers={"Origin": "http://127.0.0.1:8765"},
         )
         assert r.status_code == 200
+
+class TestEventsApi:
+    """事件协议（Codex core/界面协议化）: 结构化事件流 + since 游标增量。"""
+
+    def test_events_empty_log(self, client):
+        r = client.get("/api/events")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["events"] == []
+        assert data["log_count"] == 0
+        assert data["tick"] == 0
+
+    def test_events_structured_after_ticks(self, client):
+        """推帧产生世界日志 → 被解析为结构化事件（type/npc/字段）。"""
+        for _ in range(30):
+            client.post("/api/tick", json={"seed": 7})
+        r = client.get("/api/events")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["log_count"] > 0
+        types = {ev["type"] for ev in data["events"]}
+        assert types <= {"say", "move", "gather", "craft", "deliver"}
+        for ev in data["events"]:
+            assert "npc" in ev and ev["npc"]
+
+    def test_events_cursor_incremental(self, client):
+        """游标增量: 第二次用 since=log_count 只拿新增事件。"""
+        for _ in range(10):
+            client.post("/api/tick", json={"seed": 7})
+        r1 = client.get("/api/events")
+        assert r1.json()["log_count"] > 0
+        r2 = client.get("/api/events", params={"since": r1.json()["log_count"]})
+        assert r2.json()["events"] == []
+        assert r2.json()["log_count"] == r1.json()["log_count"]
+
+    def test_events_since_negative_clamped(self, client):
+        """负数游标不崩溃: 收拢到 0, 返回全部事件。"""
+        for _ in range(10):
+            client.post("/api/tick", json={"seed": 7})
+        r = client.get("/api/events", params={"since": -5})
+        assert r.status_code == 200
+        assert r.json()["log_count"] > 0
+
+class TestApprovalApi:
+    """审批策略 API（Codex /approvals 对照）: 查询 + 运行时调整。"""
+
+    def test_get_approval_table(self, client):
+        r = client.get("/api/approval")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["policy"] == "auto"
+        assert set(data["actions"]) == {"gather", "craft", "move", "deliver"}
+        assert data["actions"]["gather"] == "allow"
+        assert data["actions"]["deliver"] == "ask"
+
+    def test_post_approval_runtime(self, client):
+        r = client.post("/api/approval", json={"action": "deliver", "decision": "deny"})
+        assert r.status_code == 200
+        assert r.json()["actions"]["deliver"] == "deny"
+        client.post("/api/approval", json={"action": "deliver", "decision": "ask"})  # 还原
+
+    def test_post_approval_invalid(self, client):
+        r = client.post("/api/approval", json={"action": "nope", "decision": "allow"})
+        assert r.status_code == 400
+        r = client.post("/api/approval", json={"action": "deliver", "decision": "bogus"})
+        assert r.status_code == 400
+
+    def test_approval_per_npc(self, client):
+        """按 NPC 粒度: 只改 cang, 不波及其他 NPC / 全局。"""
+        r = client.post("/api/approval",
+                        json={"npc_id": "cang", "action": "deliver", "decision": "deny"})
+        assert r.status_code == 200
+        assert r.json()["npc_id"] == "cang"
+        assert r.json()["actions"]["deliver"] == "deny"
+        r = client.get("/api/approval")
+        assert r.json()["actions"]["deliver"] == "ask"   # 全局不受影响
+        r = client.get("/api/approval", params={"npc_id": "cang"})
+        assert r.json()["actions"]["deliver"] == "deny"  # 该 NPC 生效
+        client.post("/api/approval",
+                    json={"npc_id": "cang", "action": "deliver", "decision": "ask"})  # 还原
+
+
+class TestThinkingTextApi:
+    """思考可视化: /api/talk 响应含 thinking_text(LLM 有思考时)。"""
+
+    def test_talk_returns_thinking_text(self):
+        """LLM 桩返回带 reasoning 的响应 → thinking_text 透传到 API。"""
+        npc = NPC(store_dir="npc/store_test")
+        npc.use_llm = True
+        npc._llm = _StubLLMWithThinking()
+        c = TestClient(create_npc_server({"cang": npc}))
+        r = c.post("/api/talk", json={"message": "你觉得部落未来会怎么样"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reply"] == "天气不错，适合出门。"
+        assert data["thinking_text"] == "玩家在问天气，按记忆回答。"
+
+    def test_talk_no_thinking_field_when_rules(self, client):
+        """规则模式(无 LLM) → 不带 thinking_text 字段(保持契约干净)。"""
+        r = client.post("/api/talk", json={"message": "你好"})
+        assert r.status_code == 200
+        assert "thinking_text" not in r.json()
+
+    def test_talk_empty_thinking_omitted(self):
+        """LLM 桩返回空思考 → thinking_text 字段省略。"""
+        npc = NPC(store_dir="npc/store_test")
+        npc.use_llm = True
+        npc._llm = _StubLLMNoThinking()
+        c = TestClient(create_npc_server({"cang": npc}))
+        r = c.post("/api/talk", json={"message": "你好"})
+        assert r.status_code == 200
+        assert "thinking_text" not in r.json()
+
+
+class _StubLLMWithThinking:
+    def chat(self, messages, **kwargs):
+        return LLMResponse(
+            content="天气不错，适合出门。",
+            tool_calls=[], finish_reason="stop",
+            model="stub", usage=None,
+            reasoning="玩家在问天气，按记忆回答。",
+        )
+
+
+class _StubLLMNoThinking:
+    def chat(self, messages, **kwargs):
+        return LLMResponse(
+            content="嗯。",
+            tool_calls=[], finish_reason="stop",
+            model="stub", usage=None,
+            reasoning="",
+        )

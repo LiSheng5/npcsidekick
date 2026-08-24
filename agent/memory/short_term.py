@@ -21,6 +21,11 @@ import config
 if TYPE_CHECKING:
     from agent.memory.vector_store import VectorStore
 
+# 入口截流 (Codex middle-truncation 对照, 2026-08):
+# 单条超长消息(如工具输出)在进入历史时就保留头尾、裁掉中间
+ENTRY_HEAD_CHARS = 500
+ENTRY_TAIL_CHARS = 200
+
 
 class ShortTermMemory:
     """
@@ -44,7 +49,8 @@ class ShortTermMemory:
     # ── 读写 ──────────────────────────────────────────
 
     def add(self, role: str, content: str) -> None:
-        """添加一条消息到历史。"""
+        """添加一条消息到历史（入口截流: 超长内容保留头尾）。"""
+        content = _entry_truncate(content)
         self.history.append({
             "role": role,
             "content": content,
@@ -59,9 +65,10 @@ class ShortTermMemory:
         """批量添加消息。"""
         now = datetime.now().isoformat()
         for msg in messages:
+            content = _entry_truncate(msg.get("content", ""))
             self.history.append({
                 "role": msg.get("role", "system"),
-                "content": msg.get("content", ""),
+                "content": content,
                 "timestamp": now,
             })
         self._trim()
@@ -226,3 +233,10 @@ class ShortTermMemory:
 
     def __len__(self) -> int:
         return len(self.history)
+
+
+def _entry_truncate(content: str) -> str:
+    """入口截流: 单条超长内容保留头尾、裁掉中间 (避免工具输出吃满窗口)。"""
+    if len(content) <= ENTRY_HEAD_CHARS + ENTRY_TAIL_CHARS + 3:
+        return content
+    return content[:ENTRY_HEAD_CHARS] + "..." + content[-ENTRY_TAIL_CHARS:]
