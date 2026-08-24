@@ -2,7 +2,7 @@
 
 ## 系统概览
 
-NPCSidekick 的引擎 **NPCSidekick**（NPCSidekick）是一个 **4 层 AI Agent 框架**。本文档描述引擎架构；NPC 层（感知/欲望/目标/游戏行动）架构规划中，见 `.claude/analysis/FEASIBILITY_REPORT.md`。
+NPCSidekick 的引擎 **NPCSidekick**（NPCSidekick）是一个 **4 层 AI Agent 框架**。本文档描述引擎架构；NPC 层（感知/欲望/目标/游戏行动）已落地，见 `docs/NPC大脑架构.md`。
 
 ```
                               ┌─────────────────────────┐

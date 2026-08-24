@@ -3,105 +3,65 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NPCSidekick</title>
+<title>NPCSidekick 调试台</title>
 <style>
   :root{
-    --bg-1:#ffffff;
-    --bg-2:#f4f1f8;
-    --accent:#e08a1e;
-    --accent-soft:#9c5a12;
-    --accent-dim:rgba(224,138,30,0.22);
-    --card:#ffffff;
-    --card-border:rgba(224,138,30,0.30);
-    --text:#1f1a24;
-    --text-dim:#6b6470;
-    --green:#2f7d49;
-    --green-soft:#3f8f57;
-    --danger:#c0392b;
-    --radius:16px;
+    --bg-1:#ffffff; --bg-2:#f4f1f8;
+    --accent:#e08a1e; --accent-soft:#9c5a12; --accent-dim:rgba(224,138,30,0.22);
+    --card:#ffffff; --card-border:rgba(224,138,30,0.30);
+    --text:#1f1a24; --text-dim:#6b6470;
+    --green:#2f7d49; --green-soft:#3f8f57;
+    --danger:#c0392b; --radius:16px;
     --font:"PingFang SC","Microsoft YaHei","Hiragino Sans GB","Noto Sans CJK SC",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
     --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box;margin:0;padding:0;}
   html,body{height:100%;}
   body{
-    font-family:var(--font);
-    color:var(--text);
+    font-family:var(--font); color:var(--text);
     background:
       radial-gradient(1200px 600px at 85% -10%, rgba(224,138,30,0.10), transparent 60%),
       radial-gradient(900px 500px at 10% 110%, rgba(120,80,200,0.06), transparent 60%),
-      linear-gradient(135deg, #ffffff, #f4f1f8);
-    background-attachment:fixed;
-    min-height:100vh;
-    display:flex;
-    flex-direction:column;
-    overflow:hidden;
+      linear-gradient(135deg,#ffffff,#f4f1f8);
+    background-attachment:fixed; min-height:100vh;
+    display:flex; flex-direction:column; overflow:hidden;
   }
-
   /* ---------- 标题栏 ---------- */
-  .topbar{
-    display:flex;align-items:center;justify-content:space-between;
-    padding:14px 22px;
-    border-bottom:1px solid var(--card-border);
-    background:rgba(255,255,255,0.85);
-    backdrop-filter:blur(10px);
-    flex:0 0 auto;
-  }
-  .brand{display:flex;align-items:center;gap:12px;font-size:19px;font-weight:700;letter-spacing:.5px;}
-  .mode-btn{flex:0 0 auto;background:transparent;border:1px solid var(--card-border);color:var(--accent-soft);font-weight:600;border-radius:999px;padding:6px 14px;cursor:pointer;font-size:13px;font-family:var(--font);}
+  .topbar{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--card-border);background:rgba(255,255,255,0.85);backdrop-filter:blur(10px);flex:0 0 auto;}
+  .brand{display:flex;align-items:baseline;gap:10px;font-size:18px;font-weight:700;letter-spacing:.5px;white-space:nowrap;}
+  .brand small{font-size:11px;color:var(--text-dim);font-weight:400;font-family:var(--mono);}
+  .top-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .npc-select,.world-inp{background:#f6f3fa;border:1px solid var(--card-border);border-radius:10px;padding:6px 10px;font-size:13px;font-family:var(--font);color:var(--text);outline:none;}
+  .world-inp{width:130px;}
+  .world-inp:focus{border-color:var(--accent);}
+  .mode-btn{background:transparent;border:1px solid var(--card-border);color:var(--accent-soft);font-weight:600;border-radius:999px;padding:6px 14px;cursor:pointer;font-size:13px;font-family:var(--font);}
   .mode-btn:hover{background:var(--accent-dim);}
-  .mode-btn.llm{color:#2f7d49;border-color:rgba(47,125,73,0.4);}
-  .npc-select{flex:0 0 auto;background:#f6f3fa;border:1px solid var(--card-border);border-radius:10px;padding:6px 10px;font-size:13px;font-family:var(--font);color:var(--text);outline:none;}
+  .mode-btn.llm{color:var(--green);border-color:rgba(47,125,73,0.4);}
   /* ---------- 主布局 ---------- */
-  .main{
-    flex:1 1 auto;min-height:0;
-    display:grid;
-    grid-template-columns:300px 1fr 330px;
-    gap:18px;padding:16px;
-  }
-  .col{display:flex;flex-direction:column;gap:18px;min-height:0;min-width:0;overflow-y:auto;padding-right:4px;}
-  .col::-webkit-scrollbar{width:8px;}
-  .col::-webkit-scrollbar-thumb{background:rgba(246,161,61,0.2);border-radius:8px;}
+  .main{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:300px 1fr 360px;gap:16px;padding:14px;}
+  .col{display:flex;flex-direction:column;gap:14px;min-height:0;min-width:0;overflow-y:auto;padding-right:4px;}
+  .col::-webkit-scrollbar{width:8px;} .col::-webkit-scrollbar-thumb{background:rgba(246,161,61,0.2);border-radius:8px;}
   .col-mid{display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden;}
-
-  .card{
-    background:var(--card);
-    border:1px solid var(--card-border);
-    border-radius:var(--radius);
-    padding:12px;
-  }
-  .card h3{
-    font-size:14px;color:var(--accent-soft);margin-bottom:12px;
-    display:flex;align-items:center;justify-content:space-between;gap:8px;letter-spacing:.5px;
-  }
+  .card{background:var(--card);border:1px solid var(--card-border);border-radius:var(--radius);padding:12px;}
+  .card h3{font-size:14px;color:var(--accent-soft);margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;letter-spacing:.5px;}
   .card h3 .hint{font-size:11px;color:var(--text-dim);font-weight:400;font-family:var(--mono);}
-
-  /* ---------- 左栏：NPC 名片 ---------- */
+  /* ---------- 左栏 ---------- */
   .npc{display:flex;gap:14px;align-items:center;margin-bottom:14px;}
   .npc .avatar{border-radius:50%;box-shadow:0 0 18px rgba(246,161,61,0.25);flex:0 0 auto;}
-  .npc .name{font-size:20px;font-weight:700;}
-  .npc .role{font-size:12px;color:var(--text-dim);margin-top:2px;}
-  .kv{display:flex;flex-direction:column;gap:10px;font-size:13px;line-height:1.5;}
-  .kv .row{display:flex;gap:8px;}
-  .kv .k{color:var(--accent-soft);flex:0 0 48px;font-weight:600;}
-  .kv .v{color:var(--text);flex:1;}
-  .taboo .v{color:var(--danger);}
-
-  /* ---------- 左栏：世界状态 ---------- */
-  .state-grid{display:flex;flex-direction:column;gap:12px;}
-  .state-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;}
-  .state-row .label{color:var(--text-dim);}
-  .state-row .val{color:var(--accent-soft);font-weight:600;}
-  .bag{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;}
-  .bag .item{flex:1;min-width:70px;background:rgba(224,138,30,0.06);border:1px solid var(--card-border);border-radius:12px;padding:10px;text-align:center;}
-  .bag .item .num{font-size:20px;font-weight:700;color:var(--accent-soft);}
-  .bag .item .lab{font-size:11px;color:var(--text-dim);margin-top:2px;}
-
+  .npc .name{font-size:20px;font-weight:700;} .npc .role{font-size:12px;color:var(--text-dim);margin-top:2px;line-height:1.5;}
+  .kv{display:flex;flex-direction:column;gap:9px;font-size:13px;line-height:1.5;}
+  .kv .row{display:flex;gap:8px;} .kv .k{color:var(--accent-soft);flex:0 0 48px;font-weight:600;} .kv .v{color:var(--text);flex:1;}
+  .state-grid{display:flex;flex-direction:column;gap:11px;font-size:13px;}
+  .state-row{display:flex;justify-content:space-between;align-items:center;} .state-row .label{color:var(--text-dim);} .state-row .val{color:var(--accent-soft);font-weight:600;}
+  .bar{height:8px;background:rgba(224,138,30,0.12);border-radius:99px;overflow:hidden;margin-top:5px;}
+  .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),#ffce8a);border-radius:99px;transition:width .4s;}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px;}
+  .chip{background:rgba(224,138,30,0.07);border:1px solid var(--card-border);border-radius:99px;padding:4px 10px;font-size:12px;color:var(--accent-soft);}
+  .chip b{color:var(--accent-soft);}
   /* ---------- 中栏：对话 ---------- */
   .chat-card{flex:1;display:flex;flex-direction:column;min-height:0;}
-  .stream{flex:1 1 auto;overflow-y:auto;display:flex;flex-direction:column;gap:14px;padding:4px;}
-  .stream::-webkit-scrollbar{width:8px;}
-  .stream::-webkit-scrollbar-thumb{background:rgba(246,161,61,0.2);border-radius:8px;}
+  .stream{flex:1 1 auto;overflow-y:auto;display:flex;flex-direction:column;gap:13px;padding:4px;}
+  .stream::-webkit-scrollbar{width:8px;} .stream::-webkit-scrollbar-thumb{background:rgba(246,161,61,0.2);border-radius:8px;}
   .msg{display:flex;gap:10px;max-width:82%;align-items:flex-end;}
   .msg.player{align-self:flex-end;flex-direction:row-reverse;}
   .msg.npc{align-self:flex-start;}
@@ -109,404 +69,470 @@
   .msg.player .bubble{background:linear-gradient(135deg,#2f6b40,#3f8f57);color:#eafff0;border-bottom-right-radius:4px;}
   .msg.npc .bubble{background:linear-gradient(135deg,rgba(246,161,61,0.16),rgba(246,161,61,0.08));border:1px solid var(--card-border);color:var(--text);border-bottom-left-radius:4px;}
   .mini-avatar{width:36px;height:36px;border-radius:50%;flex:0 0 auto;box-shadow:0 0 10px rgba(246,161,61,0.2);}
-  .system-msg{align-self:center;text-align:center;font-size:12.5px;color:var(--text-dim);font-style:italic;background:rgba(20,15,40,0.04);padding:8px 14px;border-radius:999px;border:1px dashed var(--card-border);max-width:90%;}
   .thinking .bubble{color:var(--accent-soft);}
   .thinking .dots::after{content:"";animation:blink 1.2s infinite steps(4,end);}
   @keyframes blink{0%{content:"";}25%{content:".";}50%{content:"..";}75%{content:"...";}}
-
+  details.think{margin-top:8px;font-size:12px;color:var(--text-dim);}
+  details.think summary{cursor:pointer;color:var(--accent-soft);}
+  details.think pre{white-space:pre-wrap;font-family:var(--font);margin-top:6px;background:rgba(20,15,40,0.04);padding:8px;border-radius:8px;max-height:220px;overflow:auto;}
   .composer{flex:0 0 auto;display:flex;gap:10px;padding-top:12px;}
   .composer input{flex:1;background:#f6f3fa;border:1px solid var(--card-border);border-radius:12px;padding:12px 14px;color:var(--text);font-size:14px;font-family:var(--font);outline:none;}
   .composer input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(246,161,61,0.12);}
-  .composer input::placeholder{color:var(--text-dim);}
   .composer button{background:linear-gradient(135deg,var(--accent),#ffce8a);color:#1a1030;font-weight:700;border:none;border-radius:12px;padding:0 20px;cursor:pointer;font-size:14px;font-family:var(--font);}
-  .composer button:hover{filter:brightness(1.08);}
-
-  /* ---------- 右栏：记忆（可编辑） ---------- */
-  .mem-item{background:rgba(224,138,30,0.05);border:1px solid var(--card-border);border-radius:12px;padding:10px 12px;margin-bottom:10px;}
-  .mem-time{font-size:11px;color:var(--text-dim);font-family:var(--mono);margin-bottom:4px;}
-  .mem-content{font-size:13px;line-height:1.5;color:var(--text);outline:none;border-radius:6px;padding:2px 4px;cursor:text;}
+  /* ---------- 右栏：记忆编辑 ---------- */
+  .mem-item{background:rgba(224,138,30,0.05);border:1px solid var(--card-border);border-radius:12px;padding:9px 11px;margin-bottom:9px;}
+  .mem-head{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-dim);font-family:var(--mono);margin-bottom:4px;}
+  .mem-tag{color:var(--accent-soft);border:1px dashed var(--accent-dim);border-radius:99px;padding:1px 7px;font-size:10px;}
+  .mem-del{background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;line-height:1;padding:2px 4px;border-radius:6px;}
+  .mem-del:hover{background:rgba(192,57,43,0.08);}
+  .mem-content{font-size:13px;line-height:1.5;color:var(--text);outline:none;border-radius:6px;padding:2px 4px;cursor:text;min-height:20px;}
   .mem-content:focus{background:rgba(246,161,61,0.08);box-shadow:0 0 0 1px var(--accent-dim);}
-  .mem-imp{font-size:10px;color:var(--accent-soft);margin-top:6px;opacity:.8;}
-  .add-btn{margin-top:4px;width:100%;background:rgba(246,161,61,0.08);border:1px dashed var(--accent-dim);color:var(--accent-soft);border-radius:10px;padding:8px;cursor:pointer;font-size:12px;font-family:var(--font);}
+  .mem-content:empty::before{content:"（点此输入记忆内容…）";color:var(--text-dim);}
+  .mem-foot{display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11px;color:var(--text-dim);}
+  .imp-btn{background:rgba(246,161,61,0.10);border:1px solid var(--accent-dim);color:var(--accent-soft);width:20px;height:20px;border-radius:6px;cursor:pointer;font-size:13px;line-height:1;}
+  .imp-btn:hover{background:rgba(246,161,61,0.2);}
+  .save-btn{margin-top:4px;width:100%;background:linear-gradient(135deg,var(--accent),#ffce8a);color:#1a1030;font-weight:700;border:none;border-radius:10px;padding:9px;cursor:pointer;font-size:13px;font-family:var(--font);}
+  .add-btn{margin-top:6px;width:100%;background:rgba(246,161,61,0.08);border:1px dashed var(--accent-dim);color:var(--accent-soft);border-radius:10px;padding:8px;cursor:pointer;font-size:12px;font-family:var(--font);}
   .add-btn:hover{background:rgba(246,161,61,0.14);}
-
-  /* ---------- 右栏：任务日志 ---------- */
-  .task{margin-bottom:14px;}
-  .task-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;display:flex;align-items:center;gap:8px;}
-  .step{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.5;padding:4px 0;color:var(--text);}
-  .step .mark{flex:0 0 18px;text-align:center;font-weight:700;}
-  .step.done .mark{color:var(--green-soft);}
-  .step.fail .mark{color:var(--danger);}
-
-  /* ---------- 响应式：窄屏折叠 ---------- */
+  /* ---------- 右栏：审批 ---------- */
+  .ap-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:6px 0;border-bottom:1px dashed rgba(224,138,30,0.15);}
+  .ap-row:last-child{border-bottom:none;}
+  .ap-row .name b{color:var(--text);} .ap-row .name small{display:block;color:var(--text-dim);font-size:11px;}
+  .ap-row select{background:#f6f3fa;border:1px solid var(--card-border);border-radius:8px;padding:4px 8px;font-size:12px;font-family:var(--font);color:var(--text);outline:none;}
+  .dec-allow{color:var(--green);} .dec-ask{color:var(--accent-soft);} .dec-deny{color:var(--danger);}
+  /* ---------- 右栏：时间线 ---------- */
+  .tl{display:flex;flex-direction:column;gap:6px;max-height:340px;overflow-y:auto;}
+  .tl::-webkit-scrollbar{width:8px;} .tl::-webkit-scrollbar-thumb{background:rgba(246,161,61,0.2);border-radius:8px;}
+  .tl-item{display:flex;gap:8px;font-size:12.5px;line-height:1.45;background:rgba(224,138,30,0.05);border:1px solid var(--card-border);border-radius:10px;padding:7px 10px;}
+  .tl-item .t{color:var(--text-dim);font-family:var(--mono);flex:0 0 auto;font-size:11px;padding-top:1px;}
+  .tl-item .ic{flex:0 0 auto;}
+  /* ---------- 徽标/Toast ---------- */
+  .ver-badge{position:fixed;left:14px;bottom:12px;font-size:11px;color:var(--text-dim);font-family:var(--mono);background:rgba(255,255,255,0.8);border:1px solid var(--card-border);border-radius:99px;padding:4px 12px;z-index:50;}
+  .toast{position:fixed;right:16px;bottom:14px;background:#1f1538;color:#fff;font-size:13px;border-radius:10px;padding:10px 16px;opacity:0;transform:translateY(8px);transition:.25s;z-index:60;pointer-events:none;}
+  .toast.show{opacity:1;transform:none;}
+  .err-banner{display:none;background:rgba(192,57,43,0.08);border:1px solid rgba(192,57,43,0.35);color:var(--danger);font-size:13px;border-radius:12px;padding:10px 14px;margin:0 14px;}
+  /* ---------- 响应式 ---------- */
   @media (max-width:1080px){
     body{overflow:auto;}
     .main{display:flex;flex-direction:column;flex:0 0 auto;height:auto;padding:12px;}
-    .col{overflow:visible;}
-    .col-mid{order:0;overflow:visible;}
-    .col-left{order:1;}
-    .col-right{order:2;}
-    .chat-card{min-height:60vh;}
-    .stream{max-height:none;}
+    .col{overflow:visible;} .col-mid{order:0;overflow:visible;} .chat-card{min-height:60vh;} .stream{max-height:none;}
   }
 </style>
 </head>
 <body>
 
-  <div class="topbar">
-    <div class="brand">NPCSidekick</div>
-    <select id="npcSelect" class="npc-select" title="切换 NPC（共享同一个世界）"></select>
-    <button id="modeBtn" class="mode-btn" title="切换对话模式：规则模式无需 API key，LLM 模式用小模型生成">模式: <b id="modeLabel">—</b></button>
+<div class="topbar">
+  <div class="brand">NPCSidekick <small>调试台</small></div>
+  <div class="top-tools">
+    <select id="npcSelect" class="npc-select" title="切换 NPC"></select>
+    <input id="worldInp" class="world-inp" placeholder="world_id（可选）" title="多世界隔离: 与服务器 --world-id 一致时才受理 POST">
+    <button id="modeBtn" class="mode-btn" title="规则模式无需 key，LLM 模式走大模型">模式: <b id="modeLabel">—</b></button>
+  </div>
+</div>
+<div class="err-banner" id="errBanner"></div>
+
+<div class="main">
+
+  <!-- 左栏 -->
+  <div class="col col-left">
+    <div class="card">
+      <div class="npc">
+        <div id="npc-avatar"></div>
+        <div><div class="name" id="npc-name">—</div><div class="role" id="npc-role">—</div></div>
+      </div>
+      <div class="kv">
+        <div class="row"><span class="k">性格</span><span class="v" id="npc-personality">—</span></div>
+        <div class="row"><span class="k">说话</span><span class="v" id="npc-speech">—</span></div>
+        <div class="row"><span class="k">禁忌</span><span class="v" id="npc-taboos" style="color:var(--danger)">—</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>世界状态 <span class="hint" id="hudHint"></span></h3>
+      <div class="state-grid" id="worldPanels"><!-- 面板由 /api/state 的 panels 驱动(§16): 世界 JSON 声明什么就渲染什么, 换游戏零改页面 --></div>
+    </div>
   </div>
 
-  <div class="main">
-
-    <!-- 左栏 -->
-    <div class="col col-left">
-      <div class="card">
-        <div class="npc">
-          <div id="npc-avatar"></div>
-          <div>
-            <div class="name" id="npc-name">—</div>
-            <div class="role" id="npc-role">—</div>
-          </div>
-        </div>
-        <div class="kv">
-          <div class="row"><span class="k">性格</span><span class="v" id="npc-personality">—</span></div>
-          <div class="row"><span class="k">说话</span><span class="v" id="npc-speech">—</span></div>
-          <div class="row taboo"><span class="k">禁忌</span><span class="v" id="npc-taboos">—</span></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>世界状态</h3>
-        <div class="state-grid">
-          <div class="state-row"><span class="label">当前位置</span><span class="val" id="pos">村庄</span></div>
-          <div>
-            <div class="label" style="color:var(--text-dim);font-size:12px;margin-bottom:6px;">背包</div>
-            <div class="bag">
-              <div class="item"><div class="num" id="inv-wood">5</div><div class="lab">木材</div></div>
-              <div class="item"><div class="num" id="inv-stone">0</div><div class="lab">石头</div></div>
-              <div class="item"><div class="num" id="inv-tool">0</div><div class="lab">工具</div></div>
-            </div>
-          </div>
-          <div class="state-row"><span class="label">已交付主角</span><span class="val"><b id="del-wood">5</b> 木材</span></div>
-        </div>
+  <!-- 中栏 -->
+  <div class="col col-mid">
+    <div class="card chat-card">
+      <h3>对话 <span class="hint" id="chatHint"></span></h3>
+      <div class="stream" id="stream"></div>
+      <div class="composer">
+        <input id="input" placeholder="说点什么…（回车发送）" autocomplete="off">
+        <button id="send">发送</button>
       </div>
     </div>
-
-    <!-- 中栏 -->
-    <div class="col col-mid">
-      <div class="card chat-card">
-        <h3>对话 <span class="hint">NPCSidekick</span></h3>
-        <div class="stream" id="stream"></div>
-        <div class="composer">
-          <input id="input" placeholder="说点什么…（回车发送）" autocomplete="off">
-          <button id="send">发送</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 右栏 -->
-    <div class="col col-right">
-      <div class="card">
-        <h3>记忆 <span class="hint">记忆=可编辑文档</span></h3>
-        <div id="memory"></div>
-        <button class="add-btn" id="addMem">+ 新记忆</button>
-      </div>
-      <div class="card">
-        <h3>任务日志</h3>
-        <div id="tasks"></div>
-      </div>
-    </div>
-
   </div>
+
+  <!-- 右栏 -->
+  <div class="col col-right">
+    <div class="card">
+      <h3>记忆卡 <span class="hint">可编辑 · 整卡保存</span></h3>
+      <div id="memory"></div>
+      <button class="add-btn" id="addMem">＋ 新记忆</button>
+      <button class="save-btn" id="saveMem">保存记忆卡</button>
+    </div>
+    <div class="card">
+      <h3>审批策略 <span class="hint" id="manifestHint"></span></h3>
+      <div id="approval"></div>
+    </div>
+    <div class="card">
+      <h3>时间线 <span class="hint" id="feedHint">SSE</span></h3>
+      <div class="tl" id="timeline"></div>
+    </div>
+  </div>
+
+</div>
+<div class="ver-badge" id="verBadge">连接中…</div>
+<div class="toast" id="toast"></div>
 
 <script>
 (function(){
-  "use strict";
-  const $ = (s,el)=> (el||document).querySelector(s);
+"use strict";
+const $ = (s,el)=> (el||document).querySelector(s);
 
-  /* ===== 配置：mock / 真实后端切换 ===== */
-  const USE_MOCK = true;       // 接真实后端时改为 false
-  const API_BASE = "";         // 真实接口前缀，例如 "/api"
+/* ===== 全局状态 ===== */
+const S = {
+  worldId: localStorage.getItem("npc.world") || "",
+  current: null,
+  memory: [],          // [{id?,content,importance,category,created_at}]
+  cursor: 0,           // 事件流游标 = world.log 长度
+  es: null,            // EventSource
+  pollTimer: null,
+  sseFail: 0,
+};
 
-  /* ===== NPC 人设（示例: 苍 — 制作者改成自己的角色即可） ===== */
-  const NPC_INFO = {
-    id: "cang",
-    name: "苍",
-    role: "部落的老猎手，火塘边的话事人，见过冰河那边的大兽热爱合作",
-    personality: "寡言直接，经验老到，话里都是日子熬出来的道理",
-    speech: "短句，不废话，带点长辈的训诫味",
-    taboos: "追跑得快的猎物、烧湿柴、入冬前不备兽皮、没把握就进冰河",
-    intro: "你走进了苍所在的部落营地。"
-  };
-
-  /* ===== 预设回复（mock 模式用，苍口吻） ===== */
-  const PRESET_REPLIES = [
-    "别追跑得快的，追跑不动的。老骨头的话，错不了。",
-    "柴火要挑干透的，湿柴烧起来全是烟。",
-    "那只小狼崽……喂熟了就是家人。野兽和人，差的就是一口饭的情分。",
-    "天冷下来之前，把兽皮晾够。冬天不认人，只认准备。",
-    "冰河那边有长毛的大兽，比山还高。我年轻时远远见过一回。",
-    "嗯，火塘边坐着说。"
-  ];
-
-  /* ===== Mock 数据 ===== */
-  const mockState = { position:"村庄", inventory:{木材:5}, delivered:{木材:5} };
-  const mockMemory = [
-    { id:"m1", time:"今天 08:30", content:"完成: 采集 5 个木材交给主角", importance:8 },
-    { id:"m2", time:"今天 10:05", content:"主角说今天天气好，适合干活。", importance:4 }
-  ];
-  const mockTasks = [
-    { title:"采集木材交给主角", steps:[
-      {text:"前往森林", done:true},
-      {text:"采集 5 个木材", done:true},
-      {text:"送回村庄交付", done:true}
-    ]}
-  ];
-
-  const wait = (ms)=> new Promise(r=> setTimeout(r, ms));
-  let mockMode = "rules";   // mock 模式的本地开关（接真实后端后由 /api/mode 管）
-
-  /* ===== 数据接口契约（mock / 真实统一封装） ===== */
-  const api = {
-    async getState(){
-      if(USE_MOCK){ await wait(120); return mockState; }
-      const r = await fetch(API_BASE + "/api/state"); return r.json();
-    },
-    async getMemory(npcId){
-      if(USE_MOCK){ await wait(120); return { entries: mockMemory }; }
-      const r = await fetch(API_BASE + "/api/memory?npc_id=" + npcId); return r.json();
-    },
-    async getNpc(npcId){
-      if(USE_MOCK){ return NPC_INFO; }
-      const r = await fetch(API_BASE + "/api/npc?npc_id=" + npcId); return r.json();
-    },
-    async getNpcs(){
-      if(USE_MOCK){ return { npcs: [{id:"cang",name:"苍"},{id:"ali",name:"阿黎"}] }; }
-      const r = await fetch(API_BASE + "/api/npcs"); return r.json();
-    },
-    async talk(message, npcId){
-      if(USE_MOCK){
-        await wait(900); // 模拟思考延迟
-        const reply = PRESET_REPLIES[Math.floor(Math.random()*PRESET_REPLIES.length)];
-        return { reply };
-      }
-      const r = await fetch(API_BASE + "/api/talk", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ message, npc_id: npcId || currentNpc })
-      });
-      return r.json();
-    },
-    async submitTask(resource, count, npcId){
-      if(USE_MOCK){ await wait(300); return { ok:true, steps: mockTasks[0].steps }; }
-      const r = await fetch(API_BASE + "/api/task", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ resource, count, npc_id: npcId || currentNpc })
-      });
-      return r.json();
-    },
-    async getMode(){
-      if(USE_MOCK){ return { mode: mockMode }; }
-      const r = await fetch(API_BASE + "/api/mode"); return r.json();
-    },
-    async setMode(mode){
-      if(USE_MOCK){ mockMode = mode; return { mode: mockMode }; }
-      const r = await fetch(API_BASE + "/api/mode", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ mode })
-      });
-      return r.json();
-    }
-  };
-
-  /* ===== 工具 ===== */
-  function escapeHtml(s){
-    return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+/* ===== 工具 ===== */
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function hhmm(){ const d=new Date(),p=n=>String(n).padStart(2,"0"); return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds()); }
+let toastTimer=null;
+function toast(msg){ const t=$("#toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),2200); }
+function showError(msg){ const b=$("#errBanner"); if(!msg){b.style.display="none";return;} b.style.display="block"; b.textContent=msg; }
+async function jfetch(url, opts){
+  const r = await fetch(url, opts);
+  if(!r.ok){
+    let detail=""; try{ detail=(await r.json()).detail||""; }catch(_){}
+    throw new Error(`HTTP ${r.status}${detail?" · "+detail:""}`);
   }
-  function nowStr(){
-    const d = new Date(); const p = n=> String(n).padStart(2,"0");
-    return `今天 ${p(d.getHours())}:${p(d.getMinutes())}`;
-  }
+  return r.json();
+}
+const get = (url)=> jfetch(url);
+function post(url, body){
+  const payload = Object.assign({}, body);
+  if(S.worldId) payload.world_id = S.worldId;   // 多世界守卫: 带 ID 的 POST 全部声明
+  return jfetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+}
 
-  /* ===== 渲染：世界状态 ===== */
-  let currentNpc = "cang";   // 当前选中 NPC（多 NPC 切换）
-  function renderState(s){
-    // 兼容 mock（position/inventory 顶层）与真实后端（actors 多 NPC）
-    const actor = s.actors ? (s.actors[currentNpc] || {}) : s;
-    $("#pos").textContent = actor.position || s.position || "—";
-    const inv = actor.inventory || s.inventory || {};
-    $("#inv-wood").textContent  = inv["木材"]  ?? 0;
-    $("#inv-stone").textContent = inv["石头"] ?? 0;
-    $("#inv-tool").textContent  = inv["工具"]  ?? 0;
-    const del = s.delivered || {};
-    $("#del-wood").textContent  = del["木材"] ?? 0;
-  }
+/* ===== 版本握手 ===== */
+async function initVersion(){
+  try{
+    const v = await get("/api/version");
+    const f = v.features||{};
+    const flag = b=> b?"✓":"✗";
+    $("#verBadge").textContent =
+      `brain ${v.version} · 世界:${v.world_id||"默认"} · sse${flag(f.events_sse)} jieba${flag(f.jieba_tokenize)} tts${flag(f.tts)} 编辑${flag(f.memory_edit)}`;
+    return v;
+  }catch(e){ $("#verBadge").textContent="未连上大脑服务器"; throw e; }
+}
 
-  /* ===== 渲染：记忆（可编辑） ===== */
-  let memoryData = [];
-  function renderMemory(){
-    const box = $("#memory");
-    box.innerHTML = "";
-    memoryData.forEach((m,i)=>{
-      const el = document.createElement("div");
-      el.className = "mem-item";
-      el.innerHTML =
-        '<div class="mem-time">'+ escapeHtml(m.time) +'</div>'+
-        '<div class="mem-content" contenteditable="true" data-i="'+ i +'">'+ escapeHtml(m.content) +'</div>'+
-        '<div class="mem-imp">重要度 '+ (m.importance!=null?m.importance:5) +'</div>';
-      box.appendChild(el);
-    });
-    box.querySelectorAll(".mem-content").forEach(node=>{
-      node.addEventListener("blur", ()=>{
-        const i = +node.dataset.i;
-        if(memoryData[i]) memoryData[i].content = node.textContent.trim();
-      });
-    });
-  }
-  $("#addMem").addEventListener("click", ()=>{
-    memoryData.push({ id:"m"+Date.now(), time:nowStr(), content:"（新记忆，点此编辑）", importance:5 });
-    renderMemory();
-    const items = $("#memory").querySelectorAll(".mem-content");
-    const last = items[items.length-1];
-    if(last){ last.focus(); const sel=window.getSelection(); sel.removeAllRanges(); const r=document.createRange(); r.selectNodeContents(last); sel.addRange(r); }
-  });
+/* ===== NPC 切换 ===== */
+const AVATAR_INNER =
+  '<circle cx="32" cy="32" r="31" fill="#1f1538"/>'+
+  '<ellipse cx="32" cy="26" rx="22" ry="6" fill="#caa24a"/>'+
+  '<path d="M20 26 Q32 8 44 26 Z" fill="#b5893a"/>'+
+  '<circle cx="32" cy="40" r="13" fill="#e8b487"/>'+
+  '<circle cx="27" cy="39" r="1.8" fill="#3a2418"/>'+
+  '<circle cx="37" cy="39" r="1.8" fill="#3a2418"/>'+
+  '<path d="M27 45 Q32 49 37 45" stroke="#7a4a2a" stroke-width="1.6" fill="none" stroke-linecap="round"/>';
+function renderNpcCard(npc){
+  $("#npc-name").textContent = npc.name || npc.id;
+  $("#npc-role").textContent = npc.role || "";
+  $("#npc-personality").textContent = npc.personality || "";
+  $("#npc-speech").textContent = npc.speech || "";
+  $("#npc-taboos").textContent = npc.taboos || "";
+  $("#npc-avatar").innerHTML = `<svg class="avatar" viewBox="0 0 64 64" width="64" height="64">${AVATAR_INNER}</svg>`;
+  $("#input").placeholder = npc.name ? `对${npc.name}说点什么…（回车发送）` : "说点什么…";
+  $("#chatHint").textContent = npc.name || "";
+}
+async function switchNpc(npcId){
+  if(!npcId) return;
+  S.current = npcId;
+  renderNpcCard(await get("/api/npc?npc_id="+encodeURIComponent(npcId)));
+  await Promise.all([loadMemory(), refreshState()]);
+}
 
-  /* ===== 渲染：任务日志 ===== */
-  function renderTasks(tasks){
-    const box = $("#tasks");
-    box.innerHTML = "";
-    tasks.forEach(t=>{
-      const el = document.createElement("div");
-      el.className = "task";
-      let html = '<div class="task-title">'+ escapeHtml(t.title) +'</div>';
-      t.steps.forEach(s=>{
-        html += '<div class="step '+(s.done?"done":"fail")+'"><span class="mark">'+(s.done?"✓":"✗")+'</span><span class="txt">'+ escapeHtml(s.text) +'</span></div>';
-      });
-      el.innerHTML = html;
-      box.appendChild(el);
-    });
-  }
-
-  /* ===== 聊天 ===== */
-  const AVATAR_INNER =
-    '<circle cx="32" cy="32" r="31" fill="#1f1538"/>'+
-    '<ellipse cx="32" cy="26" rx="22" ry="6" fill="#caa24a"/>'+
-    '<path d="M20 26 Q32 8 44 26 Z" fill="#b5893a"/>'+
-    '<circle cx="32" cy="40" r="13" fill="#e8b487"/>'+
-    '<circle cx="27" cy="39" r="1.8" fill="#3a2418"/>'+
-    '<circle cx="37" cy="39" r="1.8" fill="#3a2418"/>'+
-    '<circle cx="24" cy="43" r="2" fill="#f0a0a0" opacity="0.5"/>'+
-    '<circle cx="40" cy="43" r="2" fill="#f0a0a0" opacity="0.5"/>'+
-    '<path d="M27 45 Q32 49 37 45" stroke="#7a4a2a" stroke-width="1.6" fill="none" stroke-linecap="round"/>';
-
-  const stream = $("#stream");
-  function scrollDown(){ stream.scrollTop = stream.scrollHeight; }
-  function addSystem(text){
-    const d = document.createElement("div");
-    d.className = "system-msg"; d.textContent = text;
-    stream.appendChild(d); scrollDown();
-  }
-  function addPlayer(text){
-    const d = document.createElement("div");
-    d.className = "msg player";
-    d.innerHTML = '<div class="bubble">'+ escapeHtml(text) +'</div>';
-    stream.appendChild(d); scrollDown();
-  }
-  function addNpcThinking(){
-    const d = document.createElement("div");
-    d.className = "msg npc thinking";
-    d.innerHTML =
-      '<svg class="mini-avatar" viewBox="0 0 64 64">'+ AVATAR_INNER +'</svg>'+
-      '<div class="bubble">'+ NPC_INFO.name +'正在想<span class="dots"></span></div>';
-    stream.appendChild(d); scrollDown();
+/* ===== 世界状态（数据驱动面板 §16: 界面跟着世界契约走, 换游戏零改页面）===== */
+function row(label, id){
+  const d=document.createElement("div"); d.className="state-row";
+  d.innerHTML=`<span class="label">${label}</span><span class="val" id="${id}">—</span>`;
+  return d;
+}
+function chipsBlock(label, id){
+  const d=document.createElement("div");
+  d.innerHTML=`<div class="label" style="color:var(--text-dim);font-size:12px;">${label}</div><div class="chips" id="${id}"></div>`;
+  return d;
+}
+const PANELS = {
+  position(){ return row("位置", "pos"); },
+  activity(){ return row("在做", "act"); },
+  stamina(){
+    const d=document.createElement("div");
+    d.innerHTML='<div class="state-row"><span class="label">耐力</span><span class="val" id="staminaNum">—</span></div>'+
+                '<div class="bar"><i id="staminaBar" style="width:0%"></i></div>';
     return d;
-  }
-  function setNpcReply(el, text){
-    el.classList.remove("thinking");
-    el.querySelector(".bubble").textContent = text;
-    scrollDown();
-  }
-
-  async function send(){
-    const input = $("#input");
-    const text = input.value.trim();
-    if(!text) return;
-    input.value = "";
-    addPlayer(text);
-    const thinking = addNpcThinking();
-    try{
-      const res = await api.talk(text, currentNpc);
-      setNpcReply(thinking, (res && res.reply) ? res.reply : "（"+ NPC_INFO.name +"没吭声…）");
-    }catch(e){
-      setNpcReply(thinking, "（连接出了点问题，稍后再试）");
+  },
+  inventory(){ return chipsBlock("背包", "bagChips"); },
+  delivered(){ return chipsBlock("已交付主角", "deliveredChips"); },
+};
+let _panelsKey = null;
+function ensurePanels(panels){
+  const key=(panels||[]).join("|");
+  if(key===_panelsKey) return;          // 面板清单没变不重建（保 DOM 引用稳定）
+  _panelsKey=key;
+  const box=$("#worldPanels"); box.innerHTML="";
+  (panels||[]).forEach(p=>{ const b=PANELS[p]; if(b) box.appendChild(b()); });   // 未知面板名静默忽略(向前兼容)
+  $("#hudHint").textContent=(panels&&panels.length)?("面板:"+panels.join("/")):"";
+}
+function chipRow(el, obj){
+  el.innerHTML = "";
+  const keys = Object.keys(obj||{});
+  if(!keys.length){ el.innerHTML = '<span class="chip" style="opacity:.55">空</span>'; return; }
+  keys.forEach(k=>{ const d=document.createElement("span"); d.className="chip"; d.innerHTML=`${escapeHtml(k)} <b>${escapeHtml(obj[k])}</b>`; el.appendChild(d); });
+}
+async function refreshState(){
+  if(!S.current) return;
+  try{
+    const s = await get("/api/state");
+    ensurePanels(s.panels);
+    const a = (s.actors&&s.actors[S.current]) || {};
+    const pos=$("#pos"); if(pos) pos.textContent = a.position || "—";
+    const act=$("#act"); if(act) act.textContent = a.activity || a.state || "—";
+    const bar=$("#staminaBar");
+    if(bar){
+      const st = Math.max(0, Math.min(100, a.stamina==null?100:a.stamina));
+      bar.style.width = st+"%";
+      $("#staminaNum").textContent = Math.round(st)+" / 100";
     }
-  }
-  $("#send").addEventListener("click", send);
-  $("#input").addEventListener("keydown", e=>{ if(e.key==="Enter") send(); });
+    const bag=$("#bagChips"); if(bag) chipRow(bag, a.inventory||{});
+    const del=$("#deliveredChips"); if(del) chipRow(del, s.delivered||{});
+  }catch(e){ /* 静默: 下轮再试 */ }
+}
 
-  /* ===== 模式开关（规则 ↔ LLM，演示用） ===== */
-  function renderMode(m){
-    const btn = $("#modeBtn");
-    if(!m) return;
-    const label = m.mode === "llm" ? "LLM" : "规则";
-    $("#modeLabel").textContent = label;
-    btn.classList.toggle("llm", m.mode === "llm");
+/* ===== 对话 ===== */
+const stream = $("#stream");
+function scrollDown(){ stream.scrollTop = stream.scrollHeight; }
+function addPlayer(text){
+  const d=document.createElement("div"); d.className="msg player";
+  d.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
+  stream.appendChild(d); scrollDown();
+}
+function addThinking(){
+  const d=document.createElement("div"); d.className="msg npc thinking";
+  d.innerHTML = `<svg class="mini-avatar" viewBox="0 0 64 64">${AVATAR_INNER}</svg><div class="bubble">正在想<span class="dots"></span></div>`;
+  stream.appendChild(d); scrollDown(); return d;
+}
+function setReply(el, text, thinking){
+  el.classList.remove("thinking");
+  const box = el.querySelector(".bubble");
+  box.textContent = text || "（没吭声…）";
+  if(thinking){
+    const det=document.createElement("details"); det.className="think";
+    det.innerHTML = `<summary>💭 思考过程</summary><pre>${escapeHtml(thinking)}</pre>`;
+    box.parentElement.appendChild(det);
   }
-  $("#modeBtn").addEventListener("click", async ()=>{
-    const cur = $("#modeLabel").textContent === "LLM" ? "llm" : "rules";
-    const next = cur === "llm" ? "rules" : "llm";
-    const r = await api.setMode(next);
-    renderMode(r);
+  scrollDown();
+}
+async function send(){
+  const inp=$("#input"), text=inp.value.trim();
+  if(!text||!S.current) return;
+  inp.value=""; showError("");
+  addPlayer(text);
+  const th=addThinking();
+  try{
+    const r = await post("/api/talk", {message:text, npc_id:S.current});
+    setReply(th, r.reply, r.thinking_text);
+  }catch(e){ setReply(th, "（发送失败: "+e.message+"）"); }
+}
+$("#send").addEventListener("click",send);
+$("#input").addEventListener("keydown",e=>{ if(e.key==="Enter") send(); });
+
+/* ===== 模式开关 ===== */
+function renderMode(m){
+  if(!m) return;
+  $("#modeLabel").textContent = m.mode==="llm" ? "LLM" : "规则";
+  $("#modeBtn").classList.toggle("llm", m.mode==="llm");
+}
+$("#modeBtn").addEventListener("click", async ()=>{
+  const next = $("#modeLabel").textContent==="LLM" ? "rules":"llm";
+  try{ renderMode(await post("/api/mode",{mode:next})); }catch(e){ toast("切换失败: "+e.message); }
+});
+
+/* ===== 记忆卡编辑（可编辑文档的写通道）===== */
+async function loadMemory(){
+  if(!S.current) return;
+  const mem = await get("/api/memory?npc_id="+encodeURIComponent(S.current));
+  S.memory = (mem.entries||[]).map(e=>({
+    id:e.id, content:e.content||"", importance:e.importance==null?5:e.importance,
+    category:e.category||"general", created_at:e.created_at
+  }));
+  renderMemory();
+}
+function renderMemory(){
+  const box=$("#memory"); box.innerHTML="";
+  S.memory.forEach((m,i)=>{
+    const el=document.createElement("div"); el.className="mem-item";
+    const tag = m.category!=="general" ? `<span class="mem-tag">${escapeHtml(m.category)}</span>` : "";
+    el.innerHTML =
+      `<div class="mem-head"><span>#${i+1} ${tag}</span><button class="mem-del" data-i="${i}" title="删除">✕</button></div>`+
+      `<div class="mem-content" contenteditable="true" data-i="${i}">${escapeHtml(m.content)}</div>`+
+      `<div class="mem-foot">重要度 <button class="imp-btn" data-i="${i}" data-d="-1">−</button><b id="imp-${i}">${m.importance}</b><button class="imp-btn" data-i="${i}" data-d="1">＋</button></div>`;
+    box.appendChild(el);
   });
+  box.querySelectorAll(".mem-content").forEach(node=>{
+    node.addEventListener("input", ()=>{ const m=S.memory[+node.dataset.i]; if(m) m.content=node.textContent.trim(); });
+  });
+  box.querySelectorAll(".imp-btn").forEach(b=>{
+    b.addEventListener("click", ()=>{
+      const m=S.memory[+b.dataset.i]; if(!m) return;
+      m.importance = Math.max(0, Math.min(9, m.importance + (+b.dataset.d)));
+      $("#imp-"+b.dataset.i).textContent = m.importance;
+    });
+  });
+  box.querySelectorAll(".mem-del").forEach(b=>{
+    b.addEventListener("click", ()=>{ S.memory.splice(+b.dataset.i,1); renderMemory(); });
+  });
+}
+$("#addMem").addEventListener("click", ()=>{
+  S.memory.push({content:"", importance:5, category:"general"});
+  renderMemory();
+  const nodes=$("#memory").querySelectorAll(".mem-content");
+  const last=nodes[nodes.length-1]; if(last) last.focus();
+});
+$("#saveMem").addEventListener("click", async ()=>{
+  const empty = S.memory.findIndex(m=>!m.content);
+  if(empty>=0){ toast(`第 ${empty+1} 条是空的，填内容或删除它`); return; }
+  try{
+    const r = await post("/api/memory", {npc_id:S.current, entries:S.memory});
+    toast(`已保存 ${r.count} 条记忆`);
+    await loadMemory();
+  }catch(e){ toast("保存失败: "+e.message); }
+});
 
-  /* ===== NPC 切换（多 NPC 共享世界） ===== */
-  function renderNpcCard(npc){
-    if(npc && npc.name){
-      Object.assign(NPC_INFO, npc);
-      $("#npc-name").textContent = npc.name;
-      $("#npc-role").textContent = npc.role || "";
-      $("#npc-personality").textContent = npc.personality || "";
-      $("#npc-speech").textContent = npc.speech || "";
-      $("#npc-taboos").textContent = npc.taboos || "";
-      $("#npc-avatar").innerHTML = '<svg class="avatar" viewBox="0 0 64 64" width="64" height="64">'+ AVATAR_INNER +'</svg>';
-      $("#input").placeholder = "对" + npc.name + "说点什么…（回车发送）";
-    }
-  }
-  async function switchNpc(npcId){
-    if(!npcId) return;
-    currentNpc = npcId;
-    addSystem("你走到了 " + NPC_INFO.name + " 身边。");
-    try{
-      const npc = await api.getNpc(npcId); renderNpcCard(npc);
-      const s = await api.getState(); renderState(s);
-      const mem = await api.getMemory(npcId); memoryData = (mem && mem.entries) || []; renderMemory();
-    }catch(e){ console.warn("切换 NPC 失败：", e); }
-  }
+/* ===== 审批面板 ===== */
+function decCls(d){ return d==="allow"?"dec-allow":d==="deny"?"dec-deny":"dec-ask"; }
+async function loadApproval(){
+  try{
+    const ap = await get("/api/approval");
+    renderApproval(ap);
+    const mf = await get("/api/manifest");
+    const names = Object.keys(mf.actions||{});
+    $("#manifestHint").textContent = (mf.is_default?"清单(默认)":"清单") + ": " + (names.join("/")||"—");
+  }catch(e){ $("#approval").innerHTML='<div style="font-size:12px;color:var(--text-dim)">读取失败</div>'; }
+}
+function renderApproval(ap){
+  const box=$("#approval"); box.innerHTML="";
+  const head=document.createElement("div");
+  head.style.cssText="font-size:12px;color:var(--text-dim);margin-bottom:6px;";
+  head.innerHTML=`档位 <b class="${ap.policy==="never"?"dec-deny":ap.policy==="on-failure"?"dec-ask":"dec-allow"}">${escapeHtml(ap.policy)}</b> · 改动立即生效`;
+  box.appendChild(head);
+  Object.entries(ap.actions||{}).forEach(([action,dec])=>{
+    const row=document.createElement("div"); row.className="ap-row";
+    row.innerHTML =
+      `<span class="name"><b>${escapeHtml(action)}</b><small>当前: <span class="${decCls(dec)}">${dec}</span></small></span>`+
+      `<select data-action="${escapeHtml(action)}">`+
+        ["allow","ask","deny"].map(d=>`<option value="${d}"${d===dec?" selected":""}>${d}</option>`).join("")+
+      `</select>`;
+    row.querySelector("select").addEventListener("change", async ev=>{
+      try{
+        const r = await post("/api/approval", {action: ev.target.dataset.action, decision: ev.target.value});
+        renderApproval(Object.assign(ap,{actions:r.actions}));
+        toast(`${ev.target.dataset.action} → ${ev.target.value}`);
+      }catch(e){ toast("调整失败: "+e.message); loadApproval(); }
+    });
+    box.appendChild(row);
+  });
+}
 
-  /* ===== 初始化 ===== */
-  async function init(){
+/* ===== 时间线（SSE 主通道, 轮询兜底）===== */
+const TYPE_ICON = {say:"💬", move:"🚶", gather:"🌲", craft:"🔨", deliver:"🎁"};
+function addTimeline(ev){
+  const tl=$("#timeline");
+  const d=document.createElement("div"); d.className="tl-item";
+  let txt="";
+  if(ev.type==="say") txt=`${ev.npc} 说: ${ev.text}`;
+  else if(ev.type==="move") txt=`${ev.npc} 前往 ${ev.dest}`;
+  else if(ev.type==="gather") txt=`${ev.npc} 采集了 ${ev.resource}`;
+  else if(ev.type==="craft") txt=`${ev.npc} 制作了 ${ev.product}`;
+  else if(ev.type==="deliver") txt=`${ev.npc} 将 ${ev.resource} 交给了 ${ev.to}`;
+  else txt=JSON.stringify(ev);
+  d.innerHTML = `<span class="ic">${TYPE_ICON[ev.type]||"•"}</span><span class="t">${hhmm()}</span><span>${escapeHtml(txt)}</span>`;
+  tl.prepend(d);
+  while(tl.children.length>80) tl.removeChild(tl.lastChild);
+  if(ev.type==="deliver") refreshState();   // 交付动画数据源
+}
+function handleEvent(ev){ addTimeline(ev); }
+async function openFeed(){
+  // 先取基线游标（不回放历史, 只看新事件）
+  try{
+    const base = await get("/api/events?since=0");
+    S.cursor = base.log_count||0;
+  }catch(_){ S.cursor = 0; }
+  startSSE();
+}
+function startSSE(){
+  try{
+    S.es = new EventSource(`/api/events/stream?since=${S.cursor}`);
+    S.es.onmessage = e=>{ S.sseFail=0; try{ handleEvent(JSON.parse(e.data)); }catch(_){} };
+    S.es.onerror = ()=>{
+      S.sseFail++;
+      if(S.sseFail>=3){ stopSSE(); startPolling(); }
+    };
+  }catch(_){ startPolling(); }
+}
+function stopSSE(){ if(S.es){ S.es.close(); S.es=null; } }
+function startPolling(){
+  $("#feedHint").textContent = "轮询(兜底)";
+  if(S.pollTimer) return;
+  S.pollTimer = setInterval(async ()=>{
     try{
-      const npcs = await api.getNpcs();          // NPC 列表 → 下拉
-      const sel = $("#npcSelect");
-      (npcs.npcs || []).forEach(n => {
-        const opt = document.createElement("option");
-        opt.value = n.id; opt.textContent = n.name;
-        sel.appendChild(opt);
-      });
-      sel.addEventListener("change", e => switchNpc(e.target.value));
-      const npc = await api.getNpc(sel.value || "cang"); renderNpcCard(npc);
-    }catch(e){ console.warn("读取 NPC 列表失败，使用默认示例：", e); }
-    addSystem(NPC_INFO.intro);
-    try{
-      const s = await api.getState(); renderState(s);
-      const mem = await api.getMemory(currentNpc); memoryData = (mem && mem.entries) || []; renderMemory();
-      renderTasks(mockTasks);
-      const m = await api.getMode(); renderMode(m);
-    }catch(e){ console.warn("初始化部分数据失败：", e); }
+      const r = await get("/api/events?since="+S.cursor);
+      (r.events||[]).forEach(handleEvent);
+      S.cursor = r.log_count!=null ? r.log_count : S.cursor;
+    }catch(_){}
+  }, 2000);
+}
+
+/* ===== world_id 输入 ===== */
+$("#worldInp").value = S.worldId;
+$("#worldInp").addEventListener("change", e=>{
+  S.worldId = e.target.value.trim();
+  localStorage.setItem("npc.world", S.worldId);
+  toast(S.worldId ? `world_id = ${S.worldId}（POST 请求将携带）` : "已清除 world_id");
+});
+
+/* ===== 初始化 ===== */
+(async function init(){
+  try{
+    await initVersion();
+    const list = await get("/api/npcs");
+    const sel=$("#npcSelect");
+    (list.npcs||[]).forEach(n=>{ const o=document.createElement("option"); o.value=n.id; o.textContent=n.name; sel.appendChild(o); });
+    sel.addEventListener("change", e=>switchNpc(e.target.value));
+    await switchNpc(sel.value || (list.npcs&&list.npcs[0]&&list.npcs[0].id));
+    renderMode(await get("/api/mode"));
+    loadApproval();
+    openFeed();
+    setInterval(refreshState, 15000);
+    addSystemLine("调试台就绪 — 左侧选人对话，右侧改记忆/审批，时间线看全村动静。");
+  }catch(e){
+    showError("连不上大脑服务器: "+e.message+" —— 先启动 bat（python -m npc.server …），刷新本页重试。");
   }
-  init();
+  function addSystemLine(t){
+    const d=document.createElement("div");
+    d.className="msg npc"; d.innerHTML=`<div class="bubble" style="opacity:.65;font-size:12.5px">${escapeHtml(t)}</div>`;
+    stream.appendChild(d); scrollDown();
+  }
+})();
 })();
 </script>
 </body>

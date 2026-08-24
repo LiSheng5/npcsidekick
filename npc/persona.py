@@ -31,6 +31,7 @@ PERSONA_FIELDS = (
     # 扩展口（制作者自加系统/情绪/好感度）:
     "system_prompt_override",  # 完整自定义系统提示词（覆盖默认模板，高级用户）
     "context_extra",           # 额外上下文行（如 "你对主角的好感度: 52" — 自定义状态展示）
+    "voice_samples",           # 原台词样本(注入系统提示词 — LLM 按本人语气说话)
 )
 
 
@@ -44,6 +45,13 @@ def build_system_prompt(persona: Dict) -> str:
         f"性格: {persona.get('personality', '友善')}。",
         f"说话风格: {persona.get('speech_style', '自然')}。",
     ]
+    # 原台词样本(2026-08-22): 喂"本人说过的话" — LLM 从模仿性格变成演本人,
+    # 语气/用词/口头禅直接锚定,是 persona 里性价比最高的一条
+    samples = persona.get("voice_samples", [])
+    if samples:
+        lines.append("你说过的台词(说话语气和用词严格按这些来):")
+        for s in samples:
+            lines.append(f"- 「{s}」")
     taboos = persona.get("taboos", [])
     if taboos:
         lines.append(f"禁忌: 你绝不会{'、'.join(taboos)}。")

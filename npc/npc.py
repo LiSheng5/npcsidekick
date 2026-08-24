@@ -18,15 +18,36 @@ from typing import Dict, List, Optional
 from agent.logging_config import log
 from agent.llm.client import LLMClient
 from agent.providers.factory import create_provider
+from npc import safety as _safety
+from npc import subagent as _sub
+from npc.scheduler import P_REFLECT, SCHED
 from npc.memory import NPCMemory
 from npc.persona import SAMPLE_NPC, build_system_prompt
+from npc.reviewer import (REVIEW_RETRY_HINT, APPROVAL_POLICY_VALUES, APPROVE_DENY, compile_task,
+                          approve_action, get_manifest, get_resource_aliases, needs_deep_review,
+                          looks_like_intent, review_dialogue, review_task,
+                          set_approval as reviewer_set_approval, should_review)
 from npc.world import apply_action, default_world, find_path, observe
 
-# 对话模型（普通 NPC 用小模型 — 设计点 A 模型路由分层）
-DIALOGUE_MODEL = "deepseek-v4-flash"
+# §22(2026-08-25): A 审查退役 —— 旧开关读到即警告忽略（机器按"乙案"封存于 subagent.py / _a_semantic_block）
+import os as _env_probe
+if _env_probe.environ.get("NPC_SUBAGENT_A"):
+    log.warning("npc_subagent_a_deprecated",
+                hint="A 已退役(§22)，NPC_SUBAGENT_A 被忽略；见 docs/NPC大脑架构.md §22")
 
 # 短期对话历史轮数（只记最近 N 轮 — 上下文定期重置；对话不进长期记忆卡防污染，Day 2 铁律）
 DIALOGUE_HISTORY_TURNS = 5
+
+# 反思归纳（阶段① 海马体升级）: 未反思记忆重要性之和达阈值 → 触发反思（Generative Agents 同款语义）
+REFLECT_IMPORTANCE_THRESHOLD = 12
+# 一次反思最多纳入的条目数（防上下文过长）
+REFLECT_MAX_ENTRIES = 8
+
+
+def _reflect_rules(entries: List[Dict]) -> str:
+    """规则兜底反思: 只做事实摘要，不发明新事实（防 confabulation）。"""
+    tops = sorted(entries, key=lambda e: e.get("importance", 0), reverse=True)[:2]
+    return "我最近做了这些事：" + "；".join(t["content"] for t in tops)
 
 
 class NPC:
@@ -38,9 +59,13 @@ class NPC:
         world: Optional[Dict] = None,
         store_dir: str = "npc/store",
         use_llm: bool = True,
+        ephemeral: bool = False,
     ):
         self.persona = dict(SAMPLE_NPC if persona is None else persona)
         self.actor_id = self.persona["id"]
+        # 流民层(2026-08-22): RAM-only,save() 跳过 — despawn 即忘(陌生人聊一次就忘)。
+        # 常驻层(cast 静态角色/GTA locals)默认 False,记忆落盘可续前缘。
+        self.ephemeral = ephemeral
         # 共享世界: 传入世界 = 引用（多 NPC 共用一个世界 — AI Town 模式）；
         # 未传入 = 新建独立世界。
         self.world = deepcopy(default_world()) if world is None else world
@@ -50,18 +75,32 @@ class NPC:
         self.store_path = Path(store_dir) / f"{self.actor_id}_memory.json"
         self.task_log: List[Dict] = []
         self.memory = NPCMemory()          # 加权记忆（AI Town 公式，MIT）
+        # 反思进度: 已归纳到第几个记忆条目（不重复反思；随记忆卡落盘）
+        self._reflected_upto = 0
         # 自主循环运行时状态（不落盘 — 重启 = 活动清零回 idle 重新规划，AI Town 同款语义）
         self.state = "idle"                # "idle" | "walking" | "working" | "resting"
         self.activity: Optional[Dict] = None   # {"item", "steps", "desc"} — 进行中的日常
         self._blocked: Dict = {}           # {(action, resource): 冷却到第几个 tick}
         # 对话下的指令（"给我两根木材" → 村民真去干，tick 循环一步步执行）
         self.pending_task: Optional[Dict] = None   # {"action","resource","count"} — 玩家指令 > 自主日常
+        # 审批策略 (Codex approval policy 对照): auto / on-failure / never
+        # 由环境变量 NPC_APPROVAL_POLICY 配置, 默认 auto(安全)
+        import os as _os
+        _policy = _os.environ.get("NPC_APPROVAL_POLICY", "auto")
+        self.approval_policy = _policy if _policy in APPROVAL_POLICY_VALUES else "auto"
+        # 按 NPC 粒度的审批覆盖（Codex /approvals 对照）: {action: allow|ask|deny}
+        # 优先级: 本实例覆盖 > 会话级全局覆盖 > 环境变量 > 默认表
+        self.approval_overrides: Dict[str, str] = {}
         # 短期对话历史（运行时，不落盘 — 重启清零；只记最近 N 轮，不进记忆卡）
         self.dialogue_history: List[Dict] = []
         # 自定义系统提示词覆盖（高级制作者）— 否则用结构化人格编译的默认模板
         self.system_prompt = self.persona.get("system_prompt_override") or build_system_prompt(self.persona)
         self.use_llm = use_llm
+        # LLM 客户端分槽缓存（2026-08-23 修复）: dialogue 槽 = _llm；
+        # review 仅在配了不同模型名时才启用独立槽 _llm_review ——
+        # 修复前 bug: 单槽使第一个调用者的模型被所有角色共用，NPC_REVIEW_MODEL 永不生效
         self._llm: Optional[LLMClient] = None
+        self._llm_review: Optional[LLMClient] = None
 
     @property
     def actor_pos(self) -> str:
@@ -74,27 +113,81 @@ class NPC:
             return ""
         return f"{self.activity['desc']}（剩 {len(self.activity['steps'])} 步）"
 
-    def _get_llm(self) -> Optional[LLMClient]:
-        """惰性创建 LLM 客户端（DeepSeek 小模型）。无 key 时返回 None → 规则回退。"""
+    @staticmethod
+    def _read_api_key_file() -> str:
+        """直接从项目根 api_key.txt 读 key (不受环境变量污染)。"""
+        import pathlib
+        f = pathlib.Path(__file__).resolve().parent.parent / "api_key.txt"
+        if f.exists():
+            k = f.read_text(encoding="utf-8").strip()
+            if k:
+                return k
+        return ""
+
+    def _get_llm(self, role: str = "dialogue") -> Optional[LLMClient]:
+        """惰性创建 LLM 客户端（可插拔 — 每角色一个模型，默认云端小模型）。
+
+        role: "dialogue"（B1 对话）/ "review"（A 审查 + 反思归纳）。
+        模型名/端点由环境变量配置（NPC_DIALOGUE_MODEL / NPC_REVIEW_MODEL），
+        切本地小模型只改环境变量不写代码（见 docs/本地模型.md）。
+        无 key 时返回 None → 规则回退。
+
+        v2026-08-23 分槽规则: 两角色配了**不同**模型 → 各自一部电话；
+        同款/未配 review → 共用对话槽（单模型场景与旧行为完全一致，
+        测试注入 npc._llm 即对全角色生效）。
+        """
         if not self.use_llm:
             return None
-        if self._llm is None:
-            import os
+        import os
 
-            import config
+        def _model_of(r: str) -> str:
+            return {
+                "dialogue": os.environ.get("NPC_DIALOGUE_MODEL", "deepseek-v4-flash"),
+                "review": os.environ.get("NPC_REVIEW_MODEL", "deepseek-v4-flash"),
+            }.get(r, os.environ.get("NPC_DIALOGUE_MODEL", "deepseek-v4-flash"))
 
-            api_key = os.environ.get("DEEPSEEK_API_KEY") or config.API_KEY
-            if not api_key:
-                log.warning("npc_llm_no_key", npc=self.persona["id"])
-                return None
-            provider = create_provider(api_key=api_key, model_name=DIALOGUE_MODEL)
-            self._llm = LLMClient(provider=provider)
-        return self._llm
+        dname = _model_of("dialogue")
+        slot, model_name = "_llm", dname
+        if role == "review":
+            rname = _model_of("review")
+            if rname != dname:
+                if self._llm_review is not None:
+                    return self._llm_review      # 异款已建 → 直接用
+                slot, model_name = "_llm_review", rname
+            # 同款 → 落到对话槽，与旧版单槽行为一致
+        cached = getattr(self, slot)
+        if cached is not None:
+            return cached
+        # key 按模型 provider 匹配对应 env; LLM_API_KEY 是显式通道 key(OpenRouter/自定义/本地);
+        # 均未设置则直接读 api_key.txt(绕过被污染的 config)
+        lower = model_name.lower()
+        env_key = os.environ.get("LLM_API_KEY", "")   # 显式通道优先
+        if not env_key:
+            if "deepseek" in lower:
+                env_key = os.environ.get("DEEPSEEK_API_KEY", "")
+            elif "glm" in lower or "zhipu" in lower or "chatglm" in lower:
+                env_key = os.environ.get("ZHIPU_API_KEY", "")
+            else:
+                env_key = os.environ.get("OPENAI_API_KEY", "")
+        api_key = env_key or self._read_api_key_file()
+        if not api_key:
+            log.warning("npc_llm_no_key", npc=self.persona["id"])
+            return None
+        # base_url: LLM_BASE_URL 显式通道端点优先; 空 → create_provider 按模型名推断(deepseek 等)
+        # (不能用 config.BASE_URL 兜底 — 它默认 deepseek,会把 OpenRouter/本地模型发错地方)
+        provider = create_provider(
+            api_key=api_key, model_name=model_name,
+            base_url=os.environ.get("LLM_BASE_URL", ""))
+        client = LLMClient(provider=provider)
+        setattr(self, slot, client)
+        return client
 
     # ── 记忆卡（设计点 #4: 可编辑文档）────────────────────
 
     def save(self) -> None:
         """记忆卡落盘: 人格 + 世界状态 + 任务日志 + 笔记。重启后 load() 恢复。"""
+        if self.ephemeral:
+            return   # 流民不落盘 — despawn 即忘(见 __init__ 注释)
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         card = {
             "id": self.persona["id"],
@@ -104,6 +197,7 @@ class NPC:
             "world": self.world,
             "task_log": self.task_log[-50:],   # 只保留最近 50 条（文档可编辑）
             "memory": self.memory.to_dict(),   # 加权记忆（可编辑文档）
+            "reflected_upto": self._reflected_upto,   # 反思进度（阶段①）
         }
         self.store_path.write_text(
             json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -119,6 +213,7 @@ class NPC:
         npc = cls(persona=card["persona"], world=card["world"], store_dir=store_dir)
         npc.task_log = card.get("task_log", [])
         npc.memory.load(card.get("memory", []))
+        npc._reflected_upto = card.get("reflected_upto", 0)   # 反思进度（阶段①）
         # 迁移旧格式记忆卡（Day 1 的 "notes" 字段 → 新 memory 格式）
         legacy_notes = card.get("notes", [])
         if legacy_notes and not npc.memory.all():
@@ -131,9 +226,72 @@ class NPC:
         """记一条记忆（追加到记忆卡 — 用户可打开文件直接编辑）。
 
         importance 0-9: 越高越重要（检索加权 — AI Town 公式）。
+        §22 三不清除之"不入记忆卡": 安检门开启时 L1 违规素材在写卡口拒收。
         """
+        if _safety.enabled() and _safety.scan(note).level == "L1":
+            log.warning("npc_memory_rejected_unsafe", npc=self.persona["id"])
+            return
         self.memory.add(note, importance=importance, category=category)
         log.info("npc_remembered", npc=self.persona["id"], importance=importance)
+
+    def maybe_reflect(self) -> Optional[str]:
+        """反思归纳（阶段① 海马体升级）: 重要记忆攒够 → 归纳成高层结论。
+
+        触发: 未反思记忆的重要性之和 ≥ REFLECT_IMPORTANCE_THRESHOLD。
+        铁律: 反思只准复述/归纳给定记忆里的事实，禁止编造（防 confabulation）。
+        无 LLM → 规则兜底（只做事实摘要，不发明新事实）。
+        返回生成的反思文本；未触发 → None。
+        """
+        entries = self.memory.all()[self._reflected_upto:]
+        entries = [e for e in entries if e.get("category") != "reflection"][:REFLECT_MAX_ENTRIES]
+        if not entries:
+            return None
+        if sum(e.get("importance", 5) for e in entries) < REFLECT_IMPORTANCE_THRESHOLD:
+            return None
+        facts = "\n".join(f"- {e['content']}" for e in entries)
+        llm = self._get_llm(role="review")     # 反思用 review 档模型（可独立配置）
+        if llm is not None:
+            reflection = self._reflect_with_llm(llm, facts)
+        else:
+            reflection = _reflect_rules(entries)
+        reflection = reflection.strip() if reflection else ""
+        if not reflection:
+            return None
+        self.memory.add(reflection, importance=8, category="reflection")
+        self._reflected_upto = len(self.memory.all())   # 这批已归纳，不再重复
+        self.save()
+        log.info("npc_reflected", npc=self.persona["id"])
+        return reflection
+
+    def _reflect_with_llm(self, llm, facts: str) -> str:
+        """用 LLM 把给定记忆归纳成 1-2 条高层结论（只准基于给定事实）。"""
+        prompt = (
+            "你是这个角色的自我反思。下面是它最近的真实经历记录（每条都是事实）：\n"
+            f"{facts}\n"
+            "请归纳出 1-2 条更上层的结论（关于自己/他人/世界的认知），"
+            "只能基于上面的事实，禁止编造没出现的细节；每条一句话，用分号隔开。"
+        )
+        try:
+            import os
+            _reflect_re = os.environ.get("NPC_REFLECT_REASONING", "max")
+            response = SCHED.invoke(P_REFLECT, llm.chat,
+                                    [{"role": "user", "content": prompt}],
+                                    reasoning_effort=_reflect_re)
+            return response.content.strip()
+        except Exception as exc:
+            log.warning("npc_reflect_llm_fallback", npc=self.persona["id"], error=str(exc))
+            return ""
+
+    def consolidate(self) -> int:
+        """遗忘合并（阶段③）: 重复主题合并成一条 + 弱旧记忆修剪。返回处理掉的条目数。
+
+        合并/修剪后所有已见条目都已处理 — 反思进度重置到末尾，避免对旧条目重复反思。
+        """
+        removed = self.memory.consolidate()
+        self._reflected_upto = len(self.memory.all())
+        if removed:
+            self.save()
+        return removed
 
     # ── 感知 ─────────────────────────────────────────
 
@@ -247,13 +405,16 @@ class NPC:
         接地指令（可靠性防线）: 要求 NPC 只讲记忆/世界状态里真实存在的事，
         禁止编造没发生过的细节 — Day 2 实测发现 LLM 会即兴发挥（confabulation）。
         """
+        mem_block = self.memory.format_for_context(self.memory.retrieve(player_input, top_k=5))
+        if _safety.enabled():                 # §22: 记忆段前置红线句（卡片头注）
+            mem_block = f"{_safety.REDLINE_LINE}\n{mem_block}"
         parts = [
             "【世界状态】",
             self.observe(),
             "【行为日志】（以下是你自己最近干过的事，不是玩家的）",
             self._behavior_log(),
             "【记忆】",
-            self.memory.format_for_context(self.memory.retrieve(player_input, top_k=5)),
+            mem_block,
             "【规则】回答只能基于上面【世界状态】【行为日志】和【记忆】中的内容，"
             "没在日志/记忆里发生过的事一律不许说；不知道就说不知道。"
             "若玩家问起刚才的对话（我说过什么/聊了什么/我的名字这类），"
@@ -279,13 +440,32 @@ class NPC:
         lines = [ln for ln in self.world.get("log", []) if ln.startswith(self.actor_id + " ")][-6:]
         return "\n".join(f"- {ln}" for ln in lines) if lines else "（最近没干什么）"
 
-    def talk(self, player_input: str) -> str:
+    def talk(self, player_input: str, reasoning=None) -> str:
         """玩家交互 — 小模型对话（DeepSeek Flash）+ 规则回退。
 
         LLM 挂了或无 key 时自动回退规则回复（Day 1 行为保留）。
         回忆类问题走规则快路径（记忆卡逐字回答）— 防 confabulation 的确定性解法。
         对话下指令（"给我两根木材"）走规则快路径接单 — 派活 > 自主日常。
+
+        §22(2026-08-25) 入站安检门: L1 命中 → 零网关罐头拒绝 + 三不清除
+        （历史只存占位对，原文永不落盘）；GATE 关闭时与本函数旧行为一致。
         """
+        # ── §22 入站安检门（默认 OFF — NPC_SAFETY_GATE 未设时 scan 直通）──
+        v = _safety.scan(player_input)
+        if v.level == "L1":
+            import hashlib
+            digest = hashlib.sha1(player_input.encode("utf-8")).hexdigest()[:8]
+            log.warning("npc_safety_blocked", npc=self.persona["id"],
+                        level=v.level, category=v.category, digest=digest)   # 只记哈希不记原文
+            refusal = v.refusal or _safety.refusal()
+            self.dialogue_history.extend([          # 三不清除: 占位对替代原文
+                {"role": "user", "content": _safety.PLACEHOLDER_USER},
+                {"role": "assistant", "content": refusal},
+            ])
+            del self.dialogue_history[:-DIALOGUE_HISTORY_TURNS * 2]
+            self.save()
+            return refusal
+
         recall = self._try_recall(player_input)
         if recall is not None:
             return recall
@@ -298,17 +478,25 @@ class NPC:
         if llm is None:
             return self._talk_rules(player_input)
 
+        sys_content = self.system_prompt + "\n" + self._build_context(player_input)
+        if _safety.enabled():                 # §22: 宪法注入 + L2 软旗提示
+            const = _safety.constitution_text()
+            if const:
+                sys_content = const + "\n\n" + sys_content
+            if v.level == "L2":
+                sys_content += "\n" + _safety.soft_hint(v.category)
         messages = [
-            {"role": "system", "content": self.system_prompt + "\n" + self._build_context(player_input)},
+            {"role": "system", "content": sys_content},
             *self.dialogue_history,   # 短期对话历史（最近 N 轮，上下文定期重置）
             {"role": "user", "content": player_input},
         ]
+        self._last_thinking = ""
         try:
-            response = llm.chat(messages)
-            reply = response.content.strip()
+            reply, self._last_thinking = self._chat_with_review(llm, messages, player_input, reasoning)
         except Exception as exc:  # 任何 API 故障 → 规则回退
             log.warning("npc_llm_fallback", npc=self.persona["id"], error=str(exc))
             reply = self._talk_rules(player_input)
+            self._last_thinking = ""
 
         # 对话不自动入记忆 — Day 2 实测: 逐字记录对话会污染检索（编造内容也进卡）。
         # 记忆只由任务事件和显式 remember() 写入（记忆 = 重要的事，不是聊天记录）。
@@ -318,6 +506,44 @@ class NPC:
         del self.dialogue_history[:-DIALOGUE_HISTORY_TURNS * 2]   # 截断: 只留最近 N 轮
         self.save()
         return reply
+
+    def _chat_with_review(self, llm, messages, player_input: str, reasoning=None):
+        """B1 生成回复 → B2 落账尝试 → 出站规则核查 → 违诺重生成一次 → 仍违回退规则。
+
+        §22(2026-08-25): A 语义审查退役 —— 分支整体移除，规则层放行即终审；
+        `_a_semantic_block` 按"乙案"封存保留（无人调用）。入站安全由安检门负责。
+        焊死"口是心非"不变: LLM 答应去办事但任务未落账 → 规则拦截重说。
+        返回 (回复文本, 思考内容) — 思考内容供游戏端可视化。
+        """
+        thinking = ""
+        for attempt in range(2):   # 原始 + 1 次重生成（仅由出站违诺触发）
+            response = llm.chat(messages, reasoning_effort=reasoning)
+            reply = response.content.strip()
+            thinking = getattr(response, "reasoning", "") or ""
+            self._maybe_book_via_b2(player_input, reply)   # §17: 先给承诺一个落账机会
+            if not should_review("dialogue", reply, player_input, self.approval_policy):
+                return reply, thinking
+            ok, reason = review_dialogue(self, reply, player_input)
+            if ok:
+                return reply, thinking         # 规则层放行即终审（A 已退役）
+            log.warning("npc_review_blocked", npc=self.persona["id"], attempt=attempt, reason=reason)
+            messages = [*messages,
+                        {"role": "assistant", "content": reply},
+                        {"role": "user", "content": REVIEW_RETRY_HINT}]
+        return self._talk_rules(player_input), thinking
+
+    def set_approval(self, action: str, decision: str) -> bool:
+        """按 NPC 粒度调整审批策略（Codex /approvals 对照）。"""
+        return reviewer_set_approval(action, decision, self.approval_overrides)
+
+    def book(self, task: Dict) -> None:
+        """落账口 — 唯一允许创建 pending_task 的入口（B2 编译 + A 审查通过后调用）。
+
+        承诺成立 = 这一步被执行，不是嘴上那番话（AI Town / Executive 共识）。
+        """
+        self.pending_task = task
+        self.activity = None          # 打断自主日常，听玩家的
+        self.state = "idle"
 
     def _try_recall(self, player_input: str) -> Optional[str]:
         """回忆快路径: 问过去的事 → 记忆卡逐字回答（不经过 LLM，不会编）。
@@ -336,42 +562,115 @@ class NPC:
         return f"我想想啊……{items}"
 
     def _try_task_command(self, player_input: str) -> Optional[str]:
-        """对话下指令: "给我2根木材/去砍柴" → 接单（挂 pending_task，tick 循环去执行）。
+        """对话下指令: "给我2根木材" → B2 编译 → A 审查可行性 → 落账（唯一入口）。
 
         规则快路径（零 LLM）— 玩家指令 > 自主日常（接单即打断当前活动）。
-        只识别"意图词 + 资源词"双命中，避免误接（"我要去散步"不触发）。
+        承诺成立 = 指令被推进活动队列（book），不是嘴上那番话。
         """
-        import re
-
-        resources = {
-            "木材": ("木材", "木头", "柴", "木", "树"),
-            "浆果": ("浆果", "果"),
-            "石头": ("石头", "石"),
-        }
-        intent_words = ("给我", "给", "要", "需要", "帮我", "弄点", "去砍", "去采")
-        if not any(w in player_input for w in intent_words):
+        task = compile_task(player_input)          # B2: 编译任务单
+        if task is None:
             return None
-        for resource, aliases in resources.items():
-            if not any(a in player_input for a in aliases):
-                continue
-            # 数量: "两根"/"2个" → 数字；默认 1
-            count = 1
-            m = re.search(r"([0-9]+|[一二两三四五六七八九十]+)\s*个?", player_input)
-            if m:
-                raw = m.group(1)
-                cn = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
-                      "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-                count = cn.get(raw, int(raw) if raw.isdigit() else 1)
-            # 诚实应答: 全世界采空了就明说,不空口答应（不然接了单却不动,玩家以为坏了）
-            from npc.scheduler import resource_site
+        # Approval 三态 (Codex /approvals 对照): deny → 直接拒绝, 不审查不落账
+        if approve_action(task["action"], self.approval_policy, self.approval_overrides) == APPROVE_DENY:
+            return f"……这个我不能做（{task['action']} 被禁止）。"
+        ok, reason = review_task(self, task)       # A: 审查可行性(白名单+分级)
+        if not ok:
+            return reason                           # 诚实拒绝，不空口答应
+        # L3 高影响动作(deliver)在 auto 策略下仍需深度审查 ——
+        # 深度审查由对话层的承诺落账保证, 这里标记任务来源为"已审"后落账
+        self.book(task)                             # 落账口: 唯一入口
+        return f"好，我这就去弄{task['count']}个{task['resource']}给你。"
 
-            if resource_site(self.world, self.actor_pos, resource) is None:
-                return f"……{resource}现在弄不到了，采空了，等它长回来吧。"
-            self.pending_task = {"action": "gather", "resource": resource, "count": max(1, count)}
-            self.activity = None          # 打断自主日常，听玩家的
-            self.state = "idle"
-            return f"好，我这就去弄{count}个{resource}给你。"
-        return None
+    # ── §17 子代理: B2 编译 / A 语义审查（LLM 外壳, 规则层护栏不变）──
+
+    def _maybe_book_via_b2(self, player_input: str, reply: str) -> None:
+        """B2 编译子代理: 承诺语境 → LLM 编译任务单 → 过审落账。
+
+        触发闸门（成本控制 — 闲聊零调用）:
+          - B1 回复承诺/高风险（与 A 审查同一触发信号）, 或
+          - 玩家输入像派活但规则词典没接住（长尾意图 — GTA 类纯对话世界的主路径:
+            世界没声明资源词典时规则版 compile_task 永远接不了单, 这里补上）
+        纪律: 只在 pending_task 为空时编译; 产物必须过与规则路径完全相同的
+        三道门（deny 档 / review_task 白名单+可行性 / 落账口 book）——
+        LLM 只提议、代码决定执行（防篡改铁律不变）。
+        失败语义: 子代理任何失败 → 不落账（承诺成立=已落账, 铁律天然兜底）。
+        """
+        if self.pending_task is not None:
+            return   # 已有账, 不重复编译
+        triggered = (should_review("dialogue", reply, player_input, self.approval_policy)
+                     or looks_like_intent(player_input))
+        if not triggered or not _sub.subagent_enabled("B2"):
+            return
+        res = _sub.run_subagent(
+            self,
+            _sub.SubagentSpec(name="b2_compiler", tag="B2",
+                              system=_sub.B2_SYSTEM, role="review"),
+            brief=_sub.b2_brief(player_input, reply, get_manifest(),
+                                list(get_resource_aliases().keys())))
+        task = self._task_from_b2(res)
+        if task is None:
+            return
+        if approve_action(task["action"], self.approval_policy,
+                          self.approval_overrides) == APPROVE_DENY:
+            return   # 被禁动作不落账; 若回复已许诺, review_dialogue 会拦下逼它重说
+        ok, _reason = review_task(self, task)
+        if ok:
+            self.book(task)                         # 落账口: 唯一入口
+
+    @staticmethod
+    def _task_from_b2(res) -> Optional[Dict]:
+        """B2 结果 → 合法任务单（清单白名单 + 参数收敛）。任何不合规 → None。"""
+        if not res.ok or not isinstance(res.data, dict):
+            return None
+        action = res.data.get("action")
+        if not action:
+            return None                              # null = 无任务（合法的"没承诺"）
+        spec = get_manifest().get(str(action))
+        if spec is None:
+            return None                              # 清单外动作不认（防篡改第一道）
+        task: Dict = {"action": str(action)}
+        for p in spec.get("params", []):
+            v = res.data.get(p)
+            if v is None:
+                continue
+            if p == "count":
+                try:
+                    v = max(1, int(v))
+                except (TypeError, ValueError):
+                    v = 1
+            else:
+                v = str(v)[:40]
+            task[p] = v
+        if "count" in spec.get("params", []) and "count" not in task:
+            task["count"] = 1                        # 数量缺省 = 1（与规则版一致）
+        return task
+
+    def _a_semantic_block(self, player_input: str, reply: str) -> tuple[bool, str]:
+        """A 审查子代理: 规则层放行后的语义深审。返回 (是否拦截, 原因)。
+
+        【已退役 · 乙案封存】(§22 · 2026-08-25) 调用点已从 _chat_with_review 移除，
+        本方法保留供日后 A/B 对照实验，生产流水线不再经过此处。
+        铁律: 失败/超时/schema 不合规 → 放行（绝不卡对话 — 与规则层同款语义:
+        硬约束已由规则层兜住, 语义审查是增益不是闸门）。
+        """
+        if not _sub.subagent_enabled("A"):
+            return False, ""
+        booked = self.pending_task
+        booked_desc = (f"{booked['action']}×{booked.get('count', 1)}"
+                       if isinstance(booked, dict) else "")
+        res = _sub.run_subagent(
+            self,
+            _sub.SubagentSpec(name="a_reviewer", tag="A",
+                              system=_sub.A_SYSTEM, role="review"),
+            brief=_sub.a_brief(str(self.persona.get("identity", "")),
+                               list(self.persona.get("taboos", [])),
+                               player_input, reply, booked_desc))
+        if not res.ok or not isinstance(res.data, dict):
+            return False, ""                         # 响亮失败在 stats 里, 放行在行为里
+        block = res.data.get("block")
+        if not isinstance(block, bool):
+            return False, ""
+        return block, str(res.data.get("reason", ""))[:80]
 
     def _talk_rules(self, player_input: str) -> str:
         """规则模式回复 — 从人设 rules 配置读取（制作者自己配，不用写代码）。

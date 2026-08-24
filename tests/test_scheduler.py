@@ -255,3 +255,187 @@ class TestTickLoop:
         assert far.world["actors"]["yuanjia"]["inventory"] == {}
         # 远者同 tick 规划时资源已被采空 → 规划期放弃（优雅，不白跑一趟）
         assert any("没找到地方" in e["content"] for e in far.memory.all())
+# ── LLM 调度队列（任务书 #01，NPC_SCHEDULER=1 下过）────────────────────
+import asyncio
+import threading
+import time
+
+import pytest
+
+from npc.scheduler import (
+    P_COMPILE,
+    P_REFLECT,
+    P_REVIEW,
+    P_TALK,
+    SCHED,
+    SchedulerTimeout,
+)
+
+
+class TestLLMScheduler:
+    """验收：kill-switch / 优先级 / 串行性 / 嵌套直通 / 超时兜底 / 指标。
+
+    用 pytest-asyncio（asyncio_mode=auto）跑 async 测试；autouse fixture 保证
+    每个测试前后 start / stop 调度 worker，避免模块级单例状态跨测试污染。
+    """
+
+    @pytest.fixture(autouse=True)
+    async def _sched(self):
+        SCHED.reset_metrics()
+        SCHED.start()
+        try:
+            yield
+        finally:
+            await SCHED.stop()
+
+    async def test_kill_switch_default_off(self, monkeypatch):
+        """验收 1：不设 NPC_SCHEDULER → 走旧路径，run 直接执行（零排队）。"""
+        monkeypatch.delenv("NPC_SCHEDULER", raising=False)
+        assert SCHED.enabled is False
+        calls = []
+        assert await SCHED.run(P_TALK, lambda: calls.append("x") or "direct") == "direct"
+        assert calls == ["x"]
+
+    async def test_priority_talk_before_reflect(self, monkeypatch):
+        """验收 2：先入 REFLECT 再入 TALK → TALK 先执行完（优先级低值先出）。"""
+        monkeypatch.setenv("NPC_SCHEDULER", "1")
+        finished = []
+        blocker = asyncio.ensure_future(
+            SCHED.run(P_COMPILE, lambda: (time.sleep(0.4), "blocker")[1]))
+        await asyncio.sleep(0.15)      # worker 已取 blocker 开始 sleep
+        r = asyncio.ensure_future(
+            SCHED.run(P_REFLECT, lambda: finished.append("reflect") or "reflect"))
+        await asyncio.sleep(0.03)      # reflect 已入队
+        t = asyncio.ensure_future(
+            SCHED.run(P_TALK, lambda: finished.append("talk") or "talk"))
+        await asyncio.gather(blocker, r, t)
+        assert finished == ["talk", "reflect"]
+
+    async def test_serial_execution_no_overlap(self, monkeypatch):
+        """验收 3：并发入队 10 个记录起止时间的任务 → 执行区间不重叠。"""
+        monkeypatch.setenv("NPC_SCHEDULER", "1")
+        intervals = []
+        lock = threading.Lock()
+
+        def make(i):
+            def fn():
+                start = time.monotonic()
+                time.sleep(0.02)
+                end = time.monotonic()
+                with lock:
+                    intervals.append((i, start, end))
+                return i
+            return fn
+
+        await asyncio.gather(*[SCHED.run(P_REVIEW, make(i)) for i in range(10)])
+        intervals.sort(key=lambda x: x[1])
+        for a, b in zip(intervals, intervals[1:]):
+            assert a[2] <= b[1]
+
+    async def test_nested_passthrough_no_deadlock(self, monkeypatch):
+        """验收 4：worker 内任务再 invoke() → 直通执行，3 秒内完成（不死锁）。"""
+        monkeypatch.setenv("NPC_SCHEDULER", "1")
+        calls = []
+
+        def inner():
+            calls.append("inner")
+            return "inner-result"
+
+        def outer():
+            calls.append("outer")
+            r = SCHED.invoke(P_REVIEW, inner)      # worker 内嵌套 → 直通
+            assert r == "inner-result"
+            return "outer-result"
+
+        t0 = time.monotonic()
+        result = await SCHED.run(P_TALK, outer)
+        assert result == "outer-result"
+        assert time.monotonic() - t0 < 3.0
+        assert calls == ["outer", "inner"]
+
+    async def test_timeout_fallback(self, monkeypatch):
+        """验收 5：sleep(2) 占住 worker，timeout=0.5 提交 → SchedulerTimeout（落兜底）。"""
+        monkeypatch.setenv("NPC_SCHEDULER", "1")
+        slow = asyncio.ensure_future(
+            SCHED.run(P_REFLECT, lambda: (time.sleep(2), "slow")[1]))
+        await asyncio.sleep(0.1)                   # worker 已取 slow 开始 sleep
+        with pytest.raises(SchedulerTimeout):
+            await SCHED.run(P_TALK, lambda: "talk", timeout=0.5)
+        await slow
+
+    async def test_metrics_grow(self, monkeypatch):
+        """验收 6：若干次运行后 stats 的 scheduler 桶数值正确增长。"""
+        monkeypatch.setenv("NPC_SCHEDULER", "1")
+        for _ in range(3):
+            await SCHED.run(P_TALK, lambda: "ok")
+        slow = asyncio.ensure_future(
+            SCHED.run(P_REFLECT, lambda: (time.sleep(1), "slow")[1]))
+        await asyncio.sleep(0.05)
+        try:
+            await SCHED.run(P_REVIEW, lambda: "y", timeout=0.1)
+        except SchedulerTimeout:
+            pass
+        await slow
+        snap = SCHED.snapshot()
+        assert snap["enabled"] is True
+        assert snap["waits"] == 5          # 3 talk + 1 slow + 1 超时
+        assert snap["timeouts"] == 1
+        assert snap["avg_wait_ms"] >= 0
+
+    async def test_reflect_and_talk_mutual_exclusion(self, monkeypatch):
+        """返工①：反思路径（sync invoke）与对话任务（executor）互斥——invoke 等占用者结束。"""
+        monkeypatch.setenv("NPC_SCHEDULER", "1")
+        occupied_end = []
+        invoke_start = []
+
+        def occupy():
+            time.sleep(0.3)
+            occupied_end.append(time.monotonic())
+            return "occupied"
+
+        def reflect():
+            invoke_start.append(time.monotonic())
+            return "reflect"
+
+        task = asyncio.ensure_future(SCHED.run(P_TALK, occupy))
+        await asyncio.sleep(0.05)   # 等 worker 取到 occupy 并持锁开始 sleep
+        assert SCHED.invoke(P_REFLECT, reflect) == "reflect"   # 阻塞等锁，直到 occupy 结束
+        await task
+        assert occupied_end and invoke_start
+        assert invoke_start[0] >= occupied_end[0]   # invoke 开始晚于占用者结束 → 互斥生效
+
+    async def test_loop_invoke_not_long_blocking(self, monkeypatch):
+        """返工①：loop 线程 sync invoke 直接执行（不排队），假慢 fn 耗时 < 1s。"""
+        monkeypatch.setenv("NPC_SCHEDULER", "1")
+        t0 = time.monotonic()
+        result = SCHED.invoke(P_REFLECT, lambda: (time.sleep(0.2), "x")[1])
+        elapsed = time.monotonic() - t0
+        assert result == "x"
+        assert elapsed < 1.0
+
+    async def test_loop_stays_alive_while_lock_busy(self, monkeypatch):
+        """实弹教训(2026-08-24)：executor 被长任务占住时，反思经 to_thread 等锁，
+        事件循环必须继续心跳（间隔亚秒级）——loop 一旦被同步等锁冻住 = 全服冻结。"""
+        monkeypatch.setenv("NPC_SCHEDULER", "1")
+        beats: list = []
+
+        async def heartbeat():
+            for _ in range(12):
+                await asyncio.sleep(0.05)
+                beats.append(time.monotonic())
+
+        hb = asyncio.ensure_future(heartbeat())
+        slow = asyncio.ensure_future(
+            SCHED.run(P_TALK, lambda: (time.sleep(0.8), "slow")[1]))
+        await asyncio.sleep(0.1)   # worker 已持锁进入慢任务
+
+        def blocked_invoke():
+            # 与 server._tick_loop 同构：反思在 to_thread 工作线程里 invoke 等锁
+            SCHED.invoke(P_REFLECT, lambda: "reflect")
+
+        t = asyncio.ensure_future(asyncio.to_thread(blocked_invoke))
+        await asyncio.gather(hb, slow, t)
+        gaps = [b - a for a, b in zip(beats, beats[1:])]
+        assert len(beats) >= 10
+        assert max(gaps) < 0.5   # 若 loop 被冻，心跳间隔会炸到秒级
+

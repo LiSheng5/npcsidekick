@@ -8,3 +8,4 @@ agent/memory/store/
 npc/store/
 .claude/
 npc/store_test/
+api_key_zen.txt

@@ -238,7 +238,7 @@ class TestDialogueHistory:
         def __init__(self):
             self.captured = []
 
-        def chat(self, messages):
+        def chat(self, messages, **kwargs):
             self.captured.append(messages)
             return type("R", (), {"content": "嗯，记下了。"})()
 
