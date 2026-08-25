@@ -143,6 +143,25 @@ def test_chain_failure_cancels_remaining_and_notifies():
     assert len(tl.LEDGER.discussions("amanda")) == 1      # 商议只记失败源一次
 
 
+def test_fight_is_continuous_verb():
+    """fight 属持续型: 新落账会 supersede 旧在岗斗殴, 且不需要显式完成回报。"""
+    assert "fight" in tl.CONTINUOUS_VERBS
+    t1 = tl.LEDGER.book("amanda", "fight", {"target": "红衣服混混"})
+    tl.LEDGER.dispatch_view()
+    t2 = tl.LEDGER.book("amanda", "goto", {"place": "酒吧"})
+    tl.LEDGER.dispatch_view()
+    assert tl.LEDGER._tasks[t1["task_id"]]["state"] == "cancelled"
+    assert tl.LEDGER._tasks[t1["task_id"]]["error"] == "superseded"
+
+
+def test_fight_booked_through_gate_when_consumer_declares():
+    """消费者声明了 fight 才能过能力门; 没声明则拒之门外。"""
+    manifest = {"fight": {"tier": 3, "approval": "ask"}}
+    assert tl.action_allowed("fight", manifest) is False     # 无人报到
+    tl.REGISTRY.hello("gta_mod", "1.7", ["follow_player", "goto", "fight"])
+    assert tl.action_allowed("fight", manifest) is True
+
+
 def test_stats_snapshot_shape():
     tl.LEDGER.book("a", "goto")
     s = tl.LEDGER.stats()
