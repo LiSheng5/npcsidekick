@@ -46,6 +46,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent.logging_config import log
+from npc import taskloop as _taskloop
 from npc.npc import NPC
 from npc.reviewer import (approval_table, set_approval, get_manifest,
                           load_manifest, manifest_is_default,
@@ -158,6 +159,11 @@ async def _tick_loop(world, npcs: Dict[str, NPC]) -> None:
                 for npc in npcs.values():
                     if not getattr(npc, "ephemeral", False):
                         npc.consolidate()
+            # 协议 v1: 僵尸账回收(dispatched 超 NPC_TASK_TIMEOUT 未销账 → failed+商议)
+            try:
+                _taskloop.LEDGER.reap_zombies()
+            except Exception as exc:
+                log.warning("task_zombie_reap_failed", error=str(exc))
         except Exception as exc:
             log.warning("npc_tick_error", error=str(exc))
 
@@ -405,13 +411,16 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         }
 
     @app.get("/api/state", dependencies=[Depends(_verify_origin)])
-    async def get_state() -> Dict:
+    async def get_state(request: Request) -> Dict:
         """世界状态: 全部 NPC 的位置/背包/状态 + 已交付 + tick 计数 + 事件日志尾部。
 
         panels(§16 数据驱动界面): 本游戏该显示哪些状态面板 — 世界 JSON 的
         "_hud": {"panels": [...]} 声明, 不声明 = 默认全开(向后兼容)。
         调试台等界面照单渲染, 换游戏不再出现"阿曼达没有耐力/背包"的错位。
         """
+        _consumer = request.query_params.get("consumer")
+        if _consumer:
+            _taskloop.REGISTRY.touch(_consumer)   # 轮询即心跳(可选 query 参数)
         first = next(iter(npcs.values()))
         _hud = first.world.get("_hud") or {}
         return {
@@ -430,6 +439,8 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
             "delivered": first.world["delivered"],
             "tick": first.world.get("_tick", 0),
             "log_tail": first.world["log"][-10:],        # 气泡差分用（碰面说话）
+            # 协议 v1·任务下发(booked→dispatched 首派标记) — mod 认领执行后 POST /api/task_done
+            "pending_tasks": _taskloop.LEDGER.dispatch_view(),
         }
 
     # ── §18 冷层归档: 事件收集统一收口（轮询/SSE 共用）────────────────
@@ -639,6 +650,46 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         _stat("memory_save")
         return {"ok": True, "count": len(cleaned)}
 
+    @app.post("/api/consumer/hello", dependencies=[Depends(_verify_origin)])
+    async def consumer_hello(request: Request) -> Dict:
+        """协议v1·能力协商(M1): 消费者启动报到+心跳, 声明可执行动词表。
+
+        mod 每 ≤30s 重发一次即心跳(NPC_CONSUMER_TTL 默认60s判死);
+        B2 白名单 = manifest ∩ 活跃消费者并集, 空集时 Task 类请求拒绝编译(诚实回话)。
+        """
+        body = await request.json()
+        guard_world(body)
+        return _taskloop.REGISTRY.hello(str(body.get("name", "")),
+                                        str(body.get("version", "")),
+                                        body.get("verbs"))
+
+    @app.post("/api/task_done", dependencies=[Depends(_verify_origin)])
+    async def task_done(request: Request) -> Dict:
+        """协议v1·销账(M1): mod 干完活回报。
+
+        completed → 清 pending_task + 记忆卡("完成: …", imp=8);
+        failed → 整链取消(账本内) + 记忆卡("没做成: …") + say 字幕推玩家商议。
+        """
+        body = await request.json()
+        guard_world(body)
+        t = _taskloop.LEDGER.settle(str(body.get("task_id", "")),
+                                    str(body.get("status", "")),
+                                    str(body.get("detail", "") or body.get("error", "") or ""))
+        if t is None:
+            return {"ok": False, "error": "unknown_or_terminal_task"}
+        npc = npcs.get(t["npc_id"])
+        if npc is not None:
+            pt = getattr(npc, "pending_task", None)
+            if isinstance(pt, dict) and pt.get("action") == t["action"]:
+                npc.pending_task = None
+            if t["state"] == "completed":
+                npc.remember(f"完成: {t['desc']}", importance=8)
+            elif t["state"] == "failed":
+                npc.remember(f"没做成: {t['desc']}（{t['error']}）", importance=6)
+                for d in _taskloop.LEDGER.discussions(t["npc_id"])[-1:]:
+                    npc.world["log"].append(f"{t['npc_id']} 说: {d['text']}")
+        return {"ok": True, "task": t}
+
     @app.get("/api/version", dependencies=[Depends(_verify_origin)])
     async def version() -> Dict:
         """版本/特性握手（2026-08-23 §15）: 客户端启动探测一次按特性降级。
@@ -670,6 +721,8 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                 "log_archive": True,
                 # 任务书 #01：LLM 调度队列开关（NPC_SCHEDULER，默认 OFF）
                 "scheduler": SCHED.enabled,
+                # 协议 v1·任务执行面(M1): hello 能力协商 + 任务账本 + 链式派发销账
+                "task_loop": True,
             },
         }
 
@@ -693,6 +746,8 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
             "log_offset": int(first.world.get("_log_offset", 0)),
             # 任务书 #01：LLM 调度队列观测（enabled/depth/waits/timeouts/avg_wait_ms）
             "scheduler": SCHED.snapshot(),
+            # 协议 v1·任务账本观测(total/by_state/pending_discussions)
+            "task_loop": _taskloop.LEDGER.stats(),
         })
         return payload
 

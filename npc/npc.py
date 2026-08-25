@@ -22,6 +22,7 @@ from agent.llm.client import LLMClient
 from agent.providers.factory import create_provider
 from npc import safety as _safety
 from npc import subagent as _sub
+from npc import taskloop as _taskloop
 from npc.scheduler import P_REFLECT, SCHED
 from npc.memory import NPCMemory
 from npc.persona import SAMPLE_NPC, build_system_prompt
@@ -572,14 +573,41 @@ class NPC:
         """按 NPC 粒度调整审批策略（Codex /approvals 对照）。"""
         return reviewer_set_approval(action, decision, self.approval_overrides)
 
-    def book(self, task: Dict) -> None:
+    def book(self, task: Dict) -> bool:
         """落账口 — 唯一允许创建 pending_task 的入口（B2 编译 + A 审查通过后调用）。
 
         承诺成立 = 这一步被执行，不是嘴上那番话（AI Town / Executive 共识）。
+        协议 v1(M1·2026-08-25): NPC_TASK_LOOP=1 时落账前过能力协商门 ——
+        动词 ∈ manifest ∩ 活跃消费者能力才接单；没人接盘的活不落账(返回 False)，
+        回复层的承诺↔账本一致性核对(review_dialogue)会逼出诚实改口，空头支票发不出去。
+        同步镜像进任务账本(task_id/链式/派发销账)；门/账本任何故障降级旧语义不卡对话。
         """
+        if _taskloop.gate_enabled():
+            try:
+                _manifest_actions = set((get_manifest() or {}).keys())
+                if not _taskloop.action_allowed(str(task.get("action", "")),
+                                                _manifest_actions):
+                    log.info("npc_book_rejected_no_consumer",
+                             npc=self.actor_id, action=str(task.get("action", "")))
+                    return False
+            except Exception as exc:
+                log.warning("npc_capability_gate_error", error=str(exc))   # 门坏→放行旧语义
+            self.pending_task = task
+            self.activity = None      # 打断自主日常，听玩家的
+            self.state = "idle"
+            try:
+                _taskloop.LEDGER.book(self.actor_id, str(task.get("action", "")),
+                                      params={k: v for k, v in task.items()
+                                              if k != "action"},
+                                      desc=str(task.get("task") or task.get("action", "")))
+            except Exception as exc:
+                log.warning("npc_ledger_book_failed", npc=self.actor_id, error=str(exc))
+            return True
+        # 开关关(默认): 行为与 v3.2 完全一致(零回归锚)
         self.pending_task = task
         self.activity = None          # 打断自主日常，听玩家的
         self.state = "idle"
+        return True
 
     def _try_recall(self, player_input: str) -> Optional[str]:
         """回忆快路径: 问过去的事 → 记忆卡逐字回答（不经过 LLM，不会编）。
@@ -614,7 +642,8 @@ class NPC:
             return reason                           # 诚实拒绝，不空口答应
         # L3 高影响动作(deliver)在 auto 策略下仍需深度审查 ——
         # 深度审查由对话层的承诺落账保证, 这里标记任务来源为"已审"后落账
-        self.book(task)                             # 落账口: 唯一入口
+        if not self.book(task):                     # 落账口: 唯一入口
+            return None   # 协议v1: 无消费者接盘 → 不承诺, 对话自然继续(诚实沉默)
         return f"好，我这就去弄{task['count']}个{task['resource']}给你。"
 
     # ── §17 子代理: B2 编译 / A 语义审查（LLM 外壳, 规则层护栏不变）──
