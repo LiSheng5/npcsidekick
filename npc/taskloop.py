@@ -26,7 +26,7 @@ from typing import Dict, List, Optional
 _TERMINAL_STATES = ("completed", "failed", "cancelled")
 
 # 持续型动词集合（GTA 方言; 其他方言后续经 actions.json 声明, v1 硬编码此二者）
-CONTINUOUS_VERBS = frozenset({"follow_player", "wander"})
+CONTINUOUS_VERBS = frozenset({"follow_player", "wander", "fight"})
 
 
 def consumer_ttl_sec() -> float:
