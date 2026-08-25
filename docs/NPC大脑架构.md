@@ -612,7 +612,10 @@ avg_wait_ms}`；`/api/version.features.scheduler`（bool）。OFF 时也有该�
 4. **B2/A 提示词**：用户拟自写。A(审查) 即可换；B2(编译) 建议等 §10
    GTA 方言清单定稿再写，避免二次返工。路由关键词("任务编译器"/"审查员")
    与测试联动，更换时需同步
-5. **§10 任务回路**未开工（follow_player/goto 最小闭环起步）
+5. ~~§10 任务回路~~ **M1 脑侧已落地（2026-08-25，升格协议 v1）**：消费者 hello 能力协商 +
+   任务账本状态机(booked→dispatched→completed/failed/cancelled) + 链式派发 + 僵尸回收 +
+   失败商议(字幕+记忆卡)；开关 NPC_TASK_LOOP(GTA bat 已开)。回归 680 passed。
+   详见 docs/协议v1_方案稿.md §十一。**待 M2**：mod 消费循环(goto/follow/say 三动词起步)
 6. 温层向量锚点(P1)、Godot 清理包 —— 可继续出 Trae 任务书
 
 ### 运行状态备注
