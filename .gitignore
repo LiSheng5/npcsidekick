@@ -10,3 +10,9 @@ npc/store/
 npc/store_test/
 api_key_zen.txt
 npc/store_backup_*/
+
+# ── GTA5 专属(本地保留, 不入库 — 法务隔离) ──
+npc/personas/gta/
+npc/adapters/gta*
+tests/test_gta_adapter.py
+*_GTA.bat
