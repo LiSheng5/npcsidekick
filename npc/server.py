@@ -33,7 +33,6 @@ import os
 import random
 import re
 import time
-import webbrowser
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -49,15 +48,15 @@ from agent.logging_config import log
 from agent.llm.client import llm_retry_enabled
 from npc import safety as _safety
 from npc import taskloop as _taskloop
+from npc import events_archive
 from npc.memory import EV_DONE, EV_FAIL
 from npc.npc import NPC, memory_dedup_enabled
 from npc.reviewer import (approval_table, set_approval, get_manifest,
                           load_manifest, manifest_is_default,
                           parse_manifest_doc, set_manifest_resources,
-                          get_manifest_resources,
-                          load_resource_lexicon_from_world)
+                          get_manifest_resources )
 from npc.scheduler import SCHED, P_TALK, SchedulerTimeout, tick_round
-from npc.world import LOG_TAIL_DEFAULT, rotate_world_log
+
 from npc.tts import available as tts_available
 from npc.tts import synthesize as tts_synthesize
 from npc.tts import to_base64 as tts_to_base64
@@ -446,64 +445,6 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
             "pending_tasks": _taskloop.LEDGER.dispatch_view(),
         }
 
-    # ── §18 冷层归档: 事件收集统一收口（轮询/SSE 共用）────────────────
-    def _log_tail_cfg() -> int:
-        """NPC_LOG_TAIL 环境变量（0=关闭轮转）; 非法值回退默认。每次现读可热切。"""
-        try:
-            return max(0, int(os.environ.get("NPC_LOG_TAIL", str(LOG_TAIL_DEFAULT))))
-        except ValueError:
-            return LOG_TAIL_DEFAULT
-
-    def _archive_dir() -> str:
-        return os.environ.get("NPC_LOG_ARCHIVE_DIR", "npc/store/log_archive")
-
-    def _archived_events(world, since: int, offset: int) -> List[Dict]:
-        """冷回放: since < offset 的段落从归档 jsonl 读回（游标契约跨轮转不破）。"""
-        path = Path(_archive_dir()) / "log_archive.jsonl"
-        if not path.exists():
-            return []
-        out: List[Dict] = []
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                for ln in fh:
-                    try:
-                        rec = json.loads(ln)
-                    except Exception:
-                        continue
-                    i = rec.get("i")
-                    if isinstance(i, int) and since <= i < offset:
-                        ev = _parse_log_line(str(rec.get("text", "")))
-                        if ev is not None:
-                            out.append(ev)
-        except Exception as exc:
-            log.warning("log_archive_read_failed", error=str(exc))
-        return out
-
-    def _events_since(first, since: int):
-        """先冷层轮转（超阈值搬头部进归档），再做偏移感知的增量收集。
-
-        返回 (events[], log_count) — log_count = offset + len(log) 是**绝对流位置**,
-        客户端游标语义与旧版完全一致（旧游标是绝对索引, 轮转后依然有效）。
-        """
-        tail = _log_tail_cfg()
-        if tail > 0:
-            try:
-                rotate_world_log(first.world, tail=tail, archive_dir=_archive_dir())
-            except Exception as exc:
-                # 写失败 → 放弃本轮轮转, 内存照旧增长 — 绝不因归档丢事件
-                log.warning("world_log_rotate_failed", error=str(exc))
-        log_list = first.world["log"]
-        offset = int(first.world.get("_log_offset", 0))
-        total = offset + len(log_list)
-        since = max(0, min(since, total))   # 游标边界: 负数/超界都收拢到合法区间
-        events: List[Dict] = []
-        if since < offset:
-            events.extend(_archived_events(first.world, since, offset))
-        for line in log_list[max(0, since - offset):]:
-            ev = _parse_log_line(line)
-            if ev is not None:
-                events.append(ev)
-        return events, total
 
     @app.get("/api/events", dependencies=[Depends(_verify_origin)])
     async def get_events(since: int = 0) -> Dict:
@@ -524,7 +465,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
           subagent= B2/A 子代理生命周期 (§17)
         """
         first = next(iter(npcs.values()))
-        events, total = _events_since(first, since)
+        events, total = events_archive.events_since(first, since)
         return {
             "events": events,
             "log_count": total,
@@ -568,28 +509,6 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    def _parse_log_line(line: str) -> Optional[Dict]:
-        """把一条 world.log 文本解析成结构化事件。解析不到 → None。"""
-        m = re.match(r"^(\S+)\s+说:\s*(.+)$", line)          # "cang 说: 你好"
-        if m:
-            return {"type": "say", "npc": m.group(1), "text": m.group(2)}
-        m = re.match(r"^(\S+)\s+前往\s+(.+)$", line)          # "cang 前往 森林"
-        if m:
-            return {"type": "move", "npc": m.group(1), "dest": m.group(2)}
-        m = re.match(r"^(\S+)\s+采集了\s+1\s+个(.+)$", line)  # "cang 采集了 1 个木材"
-        if m:
-            return {"type": "gather", "npc": m.group(1), "resource": m.group(2)}
-        m = re.match(r"^(\S+)\s+制作了\s+(.+)$", line)          # "cang 制作了 木石工具"
-        if m:
-            return {"type": "craft", "npc": m.group(1), "product": m.group(2)}
-        m = re.match(r"^(\S+)\s+将\s+(.+?)\s+交给了\s+(.+)$", line)  # "cang 将 木材 交给了 主角"
-        if m:
-            return {"type": "deliver", "npc": m.group(1), "resource": m.group(2), "to": m.group(3)}
-        m = re.match(r"^\[(B2|A)\]\s+(\S+)\s+(.+)$", line)   # "[B2] cang b2_compiler ✓ ..."（§17）
-        if m:
-            return {"type": "subagent", "agent": m.group(1).lower(),
-                    "npc": m.group(2), "text": m.group(3)}
-        return None
 
     @app.post("/api/tick", dependencies=[Depends(_verify_origin)])
     async def manual_tick(request: Request) -> Dict:
@@ -926,95 +845,10 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
 
 
 def main() -> None:
-    import argparse
-
-    import uvicorn
-
-    parser = argparse.ArgumentParser(description="NPCSidekick Web 服务")
-    parser.add_argument("--adapter", type=str, default="",
-                        help="加载游戏适配器角色表，如 paleolithic（旧石器游戏村民）")
-    parser.add_argument("--persona-dir", type=str, default="",
-                        help="从目录加载人格 JSON 文件（制作者放文件即用，覆盖默认/适配器角色表）")
-    parser.add_argument("--no-browser", action="store_true",
-                        help="启动时不自动打开浏览器（游戏运行时用）")
-    parser.add_argument("--manifest", type=str, default="",
-                        help="游戏动作清单 JSON 路径(每游戏一份; 缺省=内置默认动作)")
-    parser.add_argument("--port", type=int, default=8765,
-                        help="监听端口(默认 8765; 多世界同开时各占一个端口)")
-    parser.add_argument("--world-id", dest="world_id", default="",
-                        help="世界命名空间(如 godot/gta): 独立 store 目录 + 请求 world_id 守卫")
-    parser.add_argument("--store-dir", dest="store_dir", default="",
-                        help="记忆卡目录(缺省: 有 world-id 用 npc/store_<id>, 否则 npc/store)")
-    args = parser.parse_args()
-
-    personas = None
-    adapter_world = None   # 适配器自定义世界(有则全局共用)
-    if args.persona_dir:
-        from npc.persona_loader import load_personas_from_dir
-
-        # 相对路径锚定代码位置（游戏从任意目录拉起时也能找到）
-        p = Path(args.persona_dir)
-        if not p.is_absolute():
-            p = _BASE_DIR / p
-        personas = load_personas_from_dir(str(p))
-        print(f"已从 {args.persona_dir} 加载人格: {list(personas.keys())}")
-        if not personas:
-            print("警告: 目录没有有效 JSON，回退默认角色表")
-    elif args.adapter:
-        from importlib import import_module
-
-        mod = import_module(f"npc.adapters.{args.adapter}")
-        personas = mod.VILLAGERS
-        print(f"已加载适配器角色表: {args.adapter}（{list(personas.keys())}）")
-        # 适配器自定义世界(2026-08-22 GTA): 有 WORLD 属性就用 — 换游戏换世界,零代码
-        if hasattr(mod, "WORLD"):
-            adapter_world = mod.WORLD   # type: ignore[attr-defined]
-            print(f"已加载适配器世界: {args.adapter}（{list(adapter_world['locations'].keys())}）")
-
-    # 动作清单: 游戏接入点 — env NPC_MANIFEST 或 --manifest <json>, 缺省=默认动作
-    # v2026-08-23 修: 正确拆 {"actions":...,"resources":...} 外壳(此前整包塞给
-    # load_manifest 会校验失败静默退回默认清单); resources 段暂存待并入资源词典。
-    _manifest_path = args.manifest or os.environ.get("NPC_MANIFEST", "")
-    if _manifest_path:
-        import json as _json
-        _p = Path(_manifest_path)
-        if not _p.is_absolute():
-            _p = _BASE_DIR / _p
-        try:
-            with open(_p, "r", encoding="utf-8") as _f:
-                _parsed = parse_manifest_doc(_json.load(_f))
-            load_manifest(_parsed["actions"])
-            set_manifest_resources(_parsed.get("resources"))
-            print(f"已加载动作清单: {_p}"
-                  + (f"（含资源词典 {len(_parsed['resources'])} 项）" if _parsed.get("resources") else ""))
-        except (OSError, ValueError) as _e:
-            print(f"警告: 动作清单加载失败({_e}), 使用默认动作")
-
-    port = args.port
-    # 多世界隔离: 独立端口 + 独立记忆卡目录（GTA 和 Godot 同开互不打架）
-    if args.store_dir:
-        _store = Path(args.store_dir)
-    elif args.world_id:
-        _store = Path(f"npc/store_{args.world_id}")
-    else:
-        _store = Path("npc/store")
-    if not _store.is_absolute():
-        _store = _BASE_DIR / _store
-
-    world, npcs = load_village(store_dir=str(_store), personas=personas,
-                                world=adapter_world)
-    # 动态资源词典(2026-08-23): 世界就绪后从 locations 收集 + 清单 resources 并名 —
-    # 游戏加新资源改世界 JSON/清单表即可, 对话接单立刻认识, 零代码。
-    lex = load_resource_lexicon_from_world(world, extra=get_manifest_resources())
-    print(f"资源词典已就绪: {sorted(lex.keys())}")
-
-    app = create_npc_server(npcs, world_id=args.world_id)
-    log.info("npc_server_started", url=f"http://127.0.0.1:{port}/npc.html")
-    print(f"NPCSidekick[{args.world_id or 'default'}]: http://127.0.0.1:{port}/npc.html"
-          f"  (store={_store})")
-    if not args.no_browser:
-        webbrowser.open(f"http://127.0.0.1:{port}/npc.html")
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    """入口(P2 拆分序③): 实现迁 npc/bootstrap.py —— 本壳保住
+    pyproject 脚本 npc-server = npc.server:main 与 python -m npc.server 契约。"""
+    from npc.bootstrap import main as _bootstrap_main
+    _bootstrap_main()
 
 
 if __name__ == "__main__":

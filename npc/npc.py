@@ -19,10 +19,11 @@ from typing import Dict, List, Optional
 
 from agent.logging_config import log
 from agent.llm.client import LLMClient
-from agent.providers.factory import create_provider
+
 from npc import safety as _safety
 from npc import subagent as _sub
 from npc import taskloop as _taskloop
+from npc import llm_wiring
 from agent.config_flags import env_flag
 from npc.scheduler import P_REFLECT, SCHED
 from npc.memory import EV_DONE, EV_FAIL, NPCMemory
@@ -132,21 +133,10 @@ class NPC:
             return ""
         return f"{self.activity['desc']}（剩 {len(self.activity['steps'])} 步）"
 
-    @staticmethod
-    def _read_api_key_file() -> str:
-        """直接从项目根 api_key.txt 读 key (不受环境变量污染)。"""
-        import pathlib
-        f = pathlib.Path(__file__).resolve().parent.parent / "api_key.txt"
-        if f.exists():
-            k = f.read_text(encoding="utf-8").strip()
-            if k:
-                return k
-        return ""
-
     def _get_llm(self, role: str = "dialogue") -> Optional[LLMClient]:
         """惰性创建 LLM 客户端（可插拔 — 每角色一个模型，默认云端小模型）。
 
-        role: "dialogue"（B1 对话）/ "review"（A 审查 + 反思归纳）。
+        role: "dialogue"（B1 对话）/ "review"（审查 + 反思归纳）。
         模型名/端点由环境变量配置（NPC_DIALOGUE_MODEL / NPC_REVIEW_MODEL），
         切本地小模型只改环境变量不写代码（见 docs/本地模型.md）。
         无 key 时返回 None → 规则回退。
@@ -154,21 +144,15 @@ class NPC:
         v2026-08-23 分槽规则: 两角色配了**不同**模型 → 各自一部电话；
         同款/未配 review → 共用对话槽（单模型场景与旧行为完全一致，
         测试注入 npc._llm 即对全角色生效）。
+        P2 拆分序①(2026-08-25): 装配细节(key 解析/provider 工厂)迁
+        npc/llm_wiring.py —— 本方法只保留槽位缓存职责。
         """
         if not self.use_llm:
             return None
-        import os
-
-        def _model_of(r: str) -> str:
-            return {
-                "dialogue": os.environ.get("NPC_DIALOGUE_MODEL", "deepseek-v4-flash"),
-                "review": os.environ.get("NPC_REVIEW_MODEL", "deepseek-v4-flash"),
-            }.get(r, os.environ.get("NPC_DIALOGUE_MODEL", "deepseek-v4-flash"))
-
-        dname = _model_of("dialogue")
+        dname = llm_wiring.model_of("dialogue")
         slot, model_name = "_llm", dname
         if role == "review":
-            rname = _model_of("review")
+            rname = llm_wiring.model_of("review")
             if rname != dname:
                 if self._llm_review is not None:
                     return self._llm_review      # 异款已建 → 直接用
@@ -177,27 +161,13 @@ class NPC:
         cached = getattr(self, slot)
         if cached is not None:
             return cached
-        # key 按模型 provider 匹配对应 env; LLM_API_KEY 是显式通道 key(OpenRouter/自定义/本地);
-        # 均未设置则直接读 api_key.txt(绕过被污染的 config)
-        lower = model_name.lower()
-        env_key = os.environ.get("LLM_API_KEY", "")   # 显式通道优先
-        if not env_key:
-            if "deepseek" in lower:
-                env_key = os.environ.get("DEEPSEEK_API_KEY", "")
-            elif "glm" in lower or "zhipu" in lower or "chatglm" in lower:
-                env_key = os.environ.get("ZHIPU_API_KEY", "")
-            else:
-                env_key = os.environ.get("OPENAI_API_KEY", "")
-        api_key = env_key or self._read_api_key_file()
+        api_key = llm_wiring.resolve_api_key(model_name)
         if not api_key:
             log.warning("npc_llm_no_key", npc=self.persona["id"])
             return None
-        # base_url: LLM_BASE_URL 显式通道端点优先; 空 → create_provider 按模型名推断(deepseek 等)
-        # (不能用 config.BASE_URL 兜底 — 它默认 deepseek,会把 OpenRouter/本地模型发错地方)
-        provider = create_provider(
+        client = llm_wiring.build_client(
             api_key=api_key, model_name=model_name,
             base_url=os.environ.get("LLM_BASE_URL", ""))
-        client = LLMClient(provider=provider)
         setattr(self, slot, client)
         return client
 
