@@ -619,6 +619,8 @@ avg_wait_ms}`；`/api/version.features.scheduler`（bool）。OFF 时也有该�
 6. ~~温层向量锚点~~ **已完成(2026-08-25 小项池)**：NPC_VECTOR_ANCHOR 开关(默认关) +
    chromadb ONNX 可选依赖, 语义命中相关度+2.0 加权、写入镜像、consolidate 出索引联动、
    旧卡自愈回填; 测试 6 例全 mock 零模型下载。剩余: Godot 清理包 —— 可继续出 Trae 任务书
+7. **M2 mod 消费循环**（协议 v1·M2，下一优先级）：SHVDN 认领 pending_tasks →
+   goto/follow/say 三动词执行 → task_done 销账接线；hello 心跳由 mod 启动时发起
 
 ### 运行状态备注
 - 会话内脑服(pwsh-4)带全开关在跑；会话结束即停，日常自启用 bat
@@ -653,3 +655,60 @@ avg_wait_ms}`；`/api/version.features.scheduler`（bool）。OFF 时也有该�
   宪法与红线句注入、写卡口过滤、A 开关废弃告警；bat 删 `NPC_SUBAGENT_A`、增 `NPC_SAFETY_GATE=1`。
   测试：旧 A 流水线用例改为退役断言（TestARetired×3），新增 `tests/test_safety_gate.py` 11 例；
   全套 **657 passed**（基线 646，净增 11）。GTA5 mod / Godot 消费者零改动——拒绝话术对消费者透明。
+
+## 23. v3.2-dev 冲刺（2026-08-25 夜）：协议M1 + 评审整改 + P2架构手术 + 温层锚点
+
+> 五连提交(db2c046→9a61c51)+收尾(42448e8), 全程测试 682→695 passed 零波动。
+> 法务隔离同期完成: GTA 专属八文件经 filter-branch 从待推历史整体剥离,
+> .gitignore 隔离段永久拦截; 完整史备份于本地分支 backup-gta-full-history。
+
+### 23.1 线上 BattlEye 循环排障（详见 gta_bridge.md 附录）
+游戏根目录 `args.txt`(内容 -nobattleye -noBE) 强制禁反作弊 + 无签名 `xinput1_4.dll`
+被 BE 拦截 —— 双文件双症状, 改名处置可逆。单机/线上切换双 bat 上线并自动联动改名。
+
+### 23.2 协议 v1·M1 脑侧全量（未决#5 前半）
+- `npc/taskloop.py`：ConsumerRegistry(hello 报到/60s心跳判死) + TaskLedger
+  (booked→dispatched→completed|failed|cancelled, 链式顺序派发, 整链取消,
+  僵尸回收300s, 失败商议队列) + action_allowed 能力门(NPC_TASK_LOOP, 默认关)
+- server 八处：POST /api/consumer/hello、POST /api/task_done、state 挂
+  pending_tasks[]、version features.task_loop、stats.task_loop、tick 僵尸回收
+- GTA 方言七动词 `npc/adapters/gta_actions.json`（fight 战斗动词含内,
+  tier3+ask, 目标描述式解析失败自动进商议）
+
+### 23.3 三评审员联合体检 → 整改（报告归档 docs/评审/）
+架构12条(F1-F12)/代码卫生12条/运维友好(I·O·T·R四系)。整改:
+- P0×4: 双记账竞态划界(gate开时 pending_task 归 mod, scheduler 不抢跑)、
+  EV_DONE/EV_FAIL 事件文案单一来源(三种写法收敛, 迁移脚本签名联动)、
+  CONTINUOUS_VERBS 死常量删除("新命令打断"拍板)、pyproject 补服务器依赖
+- P1×5: version flags 观测段(开关生效态一屏可见)、agent/config_flags.py
+  统一读取器(env_flag 词表修"false当ON"+安全开关防拼错; env_num 容错)、
+  商议队列 talk 前置接线(pop 即消费防泄漏)、幽灵 A 开关三连清、conftest
+  死 fixture×5+FakeToolResult 剜除(CLAUDE 文档同步)
+
+### 23.4 P2 架构六步拆分（npc.py 770→373 行）
+| 新模块 | 行数 | 职责 |
+|---|---|---|
+| llm_wiring.py | 44 | key 解析/模型名/provider 工厂 |
+| events_archive.py | 87 | §18 冷层归档纯函数化 |
+| bootstrap.py | 94 | main() 迁出(server.main 留薄壳) |
+| book.py | 28 | guarded_book 三道门单入口(两路拷贝合流) |
+| talk_pipeline.py | 169 | TalkPipelineMixin 对话管线六方法 |
+| memory_card.py | 152 | MemoryCardMixin 记忆卡生命周期+反思+合并 |
+
+手法: Mixin 继承保调用方与测试零改动; 测试接缝随迁(create_provider→build_client);
+save() 防重复落盘(blob 比对)随⑥落地。
+
+### 23.5 温层向量锚点（未决#6 前半）
+`NPC_VECTOR_ANCHOR` 开关(默认关) + chromadb ONNX 可选依赖(未装自动降级);
+语义命中相关度+2.0 加权、写入镜像、consolidate 出索引联动、旧卡自愈回填。
+§18 分层表温层行转 ✅。测试 6 例全 mock 零模型下载。
+
+### 23.6 隐私与密钥
+- 隐私扫描: 推送内容密钥零泄露(全历史新增行扫描)/作者 noreply 邮箱/
+  无手机号QQ微信; reference.md 本机路径一处已除
+- 密钥失效事件: hy3-free 配额/抖动概率大, 用户已重置轮换(新 key 仅存
+  本地 gitignore 文件, 不入聊天不入库)
+
+### 23.7 回归与版本注记
+五连提交每步全量回归(682→695, 小项池净增13)。pyproject/BRAIN_VERSION
+版本号仍 3.1.0 —— 建议下次发布窗口统一 bump 3.2.0, 待拍板。
