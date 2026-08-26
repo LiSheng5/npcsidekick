@@ -94,7 +94,10 @@ class NPC(TalkPipelineMixin, MemoryCardMixin):
         actor_of(self.world, self.actor_id)
         self.store_path = Path(store_dir) / f"{self.actor_id}_memory.json"
         self.task_log: List[Dict] = []
-        self.memory = NPCMemory()          # 加权记忆（AI Town 公式，MIT）
+        # 温层向量锚点: 持久目录随记忆卡走(NPC_VECTOR_ANCHOR=1 时启用语义检索)
+        self.memory = NPCMemory(
+            anchor_dir=str(Path(store_dir) / "vectors" / self.actor_id)
+        )          # 加权记忆（AI Town 公式，MIT）
         # 反思进度: 已归纳到第几个记忆条目（不重复反思；随记忆卡落盘）
         self._reflected_upto = 0
         # 自主循环运行时状态（不落盘 — 重启 = 活动清零回 idle 重新规划，AI Town 同款语义）

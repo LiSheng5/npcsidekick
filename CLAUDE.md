@@ -222,16 +222,11 @@ All tests share fixtures from `tests/conftest.py`. Key fixtures:
 | Fixture | Returns |
 |---------|---------|
 | `mock_llm_client` | MagicMock with `.chat.return_value` = FakeLLMResponse |
-| `mock_llm_response` | FakeLLMResponse(content="standard response", finish_reason="stop") |
-| `mock_llm_response_with_tools` | FakeLLMResponse with `emit_task_plan` tool_call |
-| `mock_reflection_response` | FakeLLMResponse with `emit_reflection` tool_call |
 | `mock_memory_manager` | MagicMock with `.retrieve_for_planning()`, `.get_history_for_context()`, etc. |
 | `mock_tool_registry` | MagicMock with 3 schemas (read_file, write_file, web_search) |
 | `mock_tool_router` | MagicMock with `.dispatch.return_value` = success ToolResult |
 | `valid_step` | Step(step_id=1, description="读取配置文件", tool="read_file") |
 | `valid_plan` | TaskPlan with 2 steps |
-| `success_result` | ToolResult(status=SUCCESS, data={...}) |
-| `error_result` | ToolResult(status=ERROR, error="Connection timeout") |
 
 Test file naming: `tests/test_<module>.py` matches source modules one-to-one.
 

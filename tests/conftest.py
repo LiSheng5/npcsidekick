@@ -43,93 +43,7 @@ class FakeLLMResponse:
         return bool(self.tool_calls)
 
 
-@dataclass
-class FakeToolResult:
-    """Mock ToolResult for testing."""
-    call_id: str = ""
-    tool: str = "test_tool"
-    status: str = "success"
-    data: Any = None
-    error: Optional[str] = None
-    duration_ms: float = 0.0
-
-    @property
-    def ok(self) -> bool:
-        return self.status == "success"
-
-
 # ── Core Fixtures ──────────────────────────────────────────
-
-
-@pytest.fixture
-def mock_llm_response():
-    """Create a standard mock LLM response (no tool calls)."""
-    return FakeLLMResponse(
-        content="这是标准响应。",
-        tool_calls=None,
-        finish_reason="stop",
-    )
-
-
-@pytest.fixture
-def mock_llm_response_with_tools():
-    """Create a mock LLM response with tool calls."""
-    return FakeLLMResponse(
-        content=None,
-        tool_calls=[
-            FakeToolCall(
-                id="tc_1",
-                function=FakeFunctionCall(
-                    name="emit_task_plan",
-                    arguments=json.dumps({
-                        "goal": "测试目标",
-                        "steps": [
-                            {
-                                "step_id": 1,
-                                "description": "读取配置文件",
-                                "tool": "read_file",
-                                "tool_input": {"path": "config.yaml"},
-                                "depends_on": [],
-                                "success_criteria": "成功读取文件内容",
-                                "fallback": "检查路径是否正确",
-                            },
-                            {
-                                "step_id": 2,
-                                "description": "分析配置内容",
-                                "tool": "",
-                                "depends_on": [1],
-                                "success_criteria": "得出分析结论",
-                                "fallback": "",
-                            },
-                        ],
-                    }),
-                ),
-            ),
-        ],
-        finish_reason="tool_calls",
-    )
-
-
-@pytest.fixture
-def mock_reflection_response():
-    """Mock LLM response for reflector (emit_reflection tool call)."""
-    return FakeLLMResponse(
-        content=None,
-        tool_calls=[
-            FakeToolCall(
-                id="tc_ref",
-                function=FakeFunctionCall(
-                    name="emit_reflection",
-                    arguments=json.dumps({
-                        "decision": "continue",
-                        "criteria_met": True,
-                        "reason": "步骤已成功完成。",
-                    }),
-                ),
-            ),
-        ],
-        finish_reason="tool_calls",
-    )
 
 
 @pytest.fixture
@@ -286,25 +200,3 @@ def valid_plan(valid_step):
     )
 
 
-@pytest.fixture
-def success_result():
-    """A successful ToolResult."""
-    from agent.tools.schema import ToolResult, ToolResultStatus
-    return ToolResult(
-        call_id="tc_001",
-        tool="read_file",
-        status=ToolResultStatus.SUCCESS,
-        data={"content": "file content here", "path": "/test/file.py"},
-    )
-
-
-@pytest.fixture
-def error_result():
-    """A failed ToolResult."""
-    from agent.tools.schema import ToolResult, ToolResultStatus
-    return ToolResult(
-        call_id="tc_002",
-        tool="web_search",
-        status=ToolResultStatus.ERROR,
-        error="Connection timeout",
-    )

@@ -505,7 +505,7 @@ set NPC_SUBAGENT=0      REM 总闸（压过单开关）
 | 层 | 语义 | 落点 | 状态 |
 |---|---|---|---|
 | 🔥 热·画像 | 每轮必进上下文 | 人设+system_prompt+欲望/目标+行为日志直供（防编造） | 早已有 |
-| 🌡️ 温·锚点 | 按需加权召回 | 记忆卡 + jieba 检索(重要度×新近度×相关度) + 同义词一跳 | ✅（向量锚点=P1） |
+| 🌡️ 温·锚点 | 按需加权召回 | 记忆卡 + jieba 检索(重要度×新近度×相关度) + 同义词一跳 + 向量锚点(chromadb ONNX 可选, NPC_VECTOR_ANCHOR 开关, 语义命中相关度+2.0 加权) | ✅（2026-08-25 落地） |
 | ❄️ 冷·归档 | 长尾落盘 | `log_archive.jsonl` 分段归档（**本次落地**） | ✅ |
 | 📕 本体 | 只追加不删除 | world.log / task_log；记忆卡=唯一人工可编辑层（设计点#4 不改） | ✅ 语义即事件源 |
 
@@ -616,7 +616,9 @@ avg_wait_ms}`；`/api/version.features.scheduler`（bool）。OFF 时也有该�
    任务账本状态机(booked→dispatched→completed/failed/cancelled) + 链式派发 + 僵尸回收 +
    失败商议(字幕+记忆卡)；开关 NPC_TASK_LOOP(GTA bat 已开)。回归 680 passed。
    详见 docs/协议v1_方案稿.md §十一。**待 M2**：mod 消费循环(goto/follow/say 三动词起步)
-6. 温层向量锚点(P1)、Godot 清理包 —— 可继续出 Trae 任务书
+6. ~~温层向量锚点~~ **已完成(2026-08-25 小项池)**：NPC_VECTOR_ANCHOR 开关(默认关) +
+   chromadb ONNX 可选依赖, 语义命中相关度+2.0 加权、写入镜像、consolidate 出索引联动、
+   旧卡自愈回填; 测试 6 例全 mock 零模型下载。剩余: Godot 清理包 —— 可继续出 Trae 任务书
 
 ### 运行状态备注
 - 会话内脑服(pwsh-4)带全开关在跑；会话结束即停，日常自启用 bat
