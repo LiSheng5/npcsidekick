@@ -23,7 +23,7 @@ import shutil
 import time
 from pathlib import Path
 
-_ROUTINE_RE = re.compile(r"^完成：")     # 全角冒号 = scheduler 日常循环签名
+_ROUTINE_RE = re.compile(r"^(完成：|完成: )")  # 旧全角存量+新协议半角(=npc.memory.EV_DONE); 以 imp<=5 区分玩家正事(imp>=6)
 _BAD_REFLECT_KEYWORD = "休息"
 
 

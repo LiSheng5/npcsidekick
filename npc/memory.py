@@ -27,6 +27,12 @@ _GW = (0.5, 3, 2)          # (recency, relevance, importance) 权重
 _DECAY = 0.99              # 每小时衰减
 _HOUR_SECONDS = 3600
 
+# ── 记忆卡事件文案单一来源(P0-2·2026-08-25)─────────────────
+# 协议格式 = 半角冒号+空格。迁移脚本 migrate_memory_cards.R2 的垃圾签名
+# 与本常量联动(旧全角存量兼容扫描)。imp 语义: 玩家正事>=8 / 日常=5 / 失败=4或6。
+EV_DONE = "完成: "
+EV_FAIL = "没做成: "
+
 # 阶段② 轻量海马体: 规范词 → 同义词族（中文同义召回，不依赖 embedding）
 # 只收游戏世界的稳定名词（资源/地点/角色），避免过度匹配
 _ENTITY_SYNONYMS: Dict[str, frozenset] = {

@@ -42,12 +42,15 @@ from typing import Dict, List, Optional
 _BASE_DIR = Path(__file__).resolve().parents[1]
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent.logging_config import log
+from agent.llm.client import llm_retry_enabled
+from npc import safety as _safety
 from npc import taskloop as _taskloop
-from npc.npc import NPC
+from npc.memory import EV_DONE, EV_FAIL
+from npc.npc import NPC, memory_dedup_enabled
 from npc.reviewer import (approval_table, set_approval, get_manifest,
                           load_manifest, manifest_is_default,
                           parse_manifest_doc, set_manifest_resources,
@@ -683,9 +686,9 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
             if isinstance(pt, dict) and pt.get("action") == t["action"]:
                 npc.pending_task = None
             if t["state"] == "completed":
-                npc.remember(f"完成: {t['desc']}", importance=8)
+                npc.remember(f"{EV_DONE}{t['desc']}", importance=8)
             elif t["state"] == "failed":
-                npc.remember(f"没做成: {t['desc']}（{t['error']}）", importance=6)
+                npc.remember(f"{EV_FAIL}{t['desc']}（{t['error']}）", importance=6)
                 for d in _taskloop.LEDGER.discussions(t["npc_id"])[-1:]:
                     npc.world["log"].append(f"{t['npc_id']} 说: {d['text']}")
         return {"ok": True, "task": t}
@@ -715,7 +718,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                 # §17 子代理: 运行时开关状态（bat 里 NPC_SUBAGENT_B2/A=1 打开）
                 "subagent_roles": {
                     "b2": _subagent_mod.subagent_enabled("B2"),
-                    "a": _subagent_mod.subagent_enabled("A"),
+                    "a": False,   # §22 已退役(2026-08-25): 恒 False, 键保留防老客户端破坏
                 },
                 # §18 冷层归档: 事件游标跨轮转恒有效（服务端回放冷段）
                 "log_archive": True,
@@ -723,6 +726,21 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                 "scheduler": SCHED.enabled,
                 # 协议 v1·任务执行面(M1): hello 能力协商 + 任务账本 + 链式派发销账
                 "task_loop": True,
+                # P1-1 运维可观测(2026-08-25): 开关生效态一屏可见 —— bat 是否把
+                # 开关带进进程不再靠猜(家规"默认关+选择加入"的运维闭环)
+                "flags": {
+                    "safety_gate": _safety.enabled(),
+                    "scheduler_queue": SCHED.enabled,
+                    "memory_dedup": memory_dedup_enabled(),
+                    "task_loop_gate": _taskloop.gate_enabled(),
+                    "llm_retry": llm_retry_enabled(),
+                    "approval_policy": os.environ.get("NPC_APPROVAL_POLICY", "auto"),
+                    "dialogue_model": os.environ.get("NPC_DIALOGUE_MODEL",
+                                                     "deepseek-v4-flash"),
+                    "review_model": os.environ.get("NPC_REVIEW_MODEL",
+                                                   "deepseek-v4-flash"),
+                    "tick_interval_sec": _tick_interval(),
+                },
             },
         }
 

@@ -23,11 +23,12 @@ from agent.providers.factory import create_provider
 from npc import safety as _safety
 from npc import subagent as _sub
 from npc import taskloop as _taskloop
+from agent.config_flags import env_flag
 from npc.scheduler import P_REFLECT, SCHED
-from npc.memory import NPCMemory
+from npc.memory import EV_DONE, EV_FAIL, NPCMemory
 from npc.persona import SAMPLE_NPC, build_system_prompt
 from npc.reviewer import (REVIEW_RETRY_HINT, APPROVAL_POLICY_VALUES, APPROVE_DENY, compile_task,
-                          approve_action, get_manifest, get_resource_aliases, needs_deep_review,
+                          approve_action, get_manifest, get_resource_aliases,
                           looks_like_intent, review_dialogue, review_task,
                           set_approval as reviewer_set_approval, should_review)
 from npc.world import apply_action, default_world, find_path, observe
@@ -54,7 +55,12 @@ def _dedup_enabled() -> bool:
     闸1 写入去重聚合 —— remember() 里同文日常条目就地计数，不再新增重复行；
     闸2 反思卫生 —— 噪音批不产反思、重复反思不重写（防"总结垃圾产生垃圾"）。
     """
-    return os.environ.get("NPC_MEMORY_DEDUP", "") not in ("", "0")
+    return env_flag("NPC_MEMORY_DEDUP")
+
+
+def memory_dedup_enabled() -> bool:
+    """公共只读口(P1-1 观测用)。"""
+    return _dedup_enabled()
 
 
 def _reflect_rules(entries: List[Dict]) -> str:
@@ -429,7 +435,7 @@ class NPC:
                 return fail(f"未知步骤类型: {stype}")
 
         step("say", {"text": f"办妥了！{task['task']}"})
-        self.remember(f"完成: {task['task']}", importance=8)
+        self.remember(f"{EV_DONE}{task['task']}", importance=8)
         self.task_log.append(task)
         self.save()
         return True
@@ -522,6 +528,16 @@ class NPC:
                 sys_content = const + "\n\n" + sys_content
             if v.level == "L2":
                 sys_content += "\n" + _safety.soft_hint(v.category)
+        # P1-3 商议接线(2026-08-25): 失败任务的"找玩家商量"进入对话上下文 ——
+        # pop 即消费(防队列无界增长); 字幕提醒此前已在 task_done 推送过,
+        # 这里保证"玩家来了, NPC 嘴上也主动认账"(记忆卡兜底逐字召回)。
+        try:
+            _disc = _taskloop.LEDGER.pop_discussions(self.actor_id)
+            if _disc:
+                sys_content += "\n【未完成的事·主动提起】" + "；".join(
+                    d["text"] for d in _disc)
+        except Exception:
+            pass
         messages = [
             {"role": "system", "content": sys_content},
             *self.dialogue_history,   # 短期对话历史（最近 N 轮，上下文定期重置）

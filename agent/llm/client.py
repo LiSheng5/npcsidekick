@@ -54,8 +54,15 @@ def _is_retryable(exc: BaseException) -> bool:
     return isinstance(status, int) and (status == 429 or status >= 500)
 
 
+def llm_retry_enabled() -> bool:
+    """P1-1 观测口。"""
+    from agent.config_flags import env_flag
+    return env_flag("NPC_LLM_RETRY")
+
+
 def _chat_with_retry(provider: "ProviderProtocol", kwargs: Dict[str, Any]) -> "LLMResponse":
-    delays = _retry_delays() if __import__("os").environ.get("NPC_LLM_RETRY") == "1" else []
+    from agent.config_flags import env_flag
+    delays = _retry_delays() if env_flag("NPC_LLM_RETRY") else []
     attempt = 0
     while True:
         try:

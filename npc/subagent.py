@@ -25,7 +25,7 @@ NPCSidekick — 子代理运行器（§17, 2026-08-24）: B2 编译 / A 审查�
 开关（代码默认关，bat/环境变量逐个打开 — 保住存量行为零回归）:
   NPC_SUBAGENT=0        总闸（杀全部子代理）
   NPC_SUBAGENT_B2=1     打开 B2 编译子代理
-  NPC_SUBAGENT_A=1      打开 A 语义审查子代理
+  NPC_SUBAGENT_A=1      【已退役·§22】读到仅告警忽略; A 机封存于 _a_semantic_block
 """
 from __future__ import annotations
 

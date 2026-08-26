@@ -14,8 +14,9 @@
   服务层负责 ①写记忆卡("没做成: …") ②world log 追加 say 字幕推给 mod 显示;
   玩家之后问起时 _try_recall 能从记忆卡逐字召回（不编造）
 - 僵尸账: dispatched 超 NPC_TASK_TIMEOUT(默认300s) 未销账 → failed(timeout) 进商议
-- 持续型动词(follow_player/wander): dispatched 即视为在岗; 同 NPC 新落账时
-  旧的非链上活动任务自动 cancelled(superseded)
+- 打断语义(2026-08-25 用户拍板"新命令打断"): 同 NPC 新落账时, 旧的非链上
+  活动任务(含 follow_player/fight 等长时任务)自动 cancelled(superseded) ——
+  玩家意志最高, 无"持续型豁免"
 """
 from __future__ import annotations
 
@@ -23,24 +24,17 @@ import os
 import time
 from typing import Dict, List, Optional
 
-_TERMINAL_STATES = ("completed", "failed", "cancelled")
+from agent.config_flags import env_flag, env_num
 
-# 持续型动词集合（GTA 方言; 其他方言后续经 actions.json 声明, v1 硬编码此二者）
-CONTINUOUS_VERBS = frozenset({"follow_player", "wander", "fight"})
+_TERMINAL_STATES = ("completed", "failed", "cancelled")
 
 
 def consumer_ttl_sec() -> float:
-    try:
-        return float(os.environ.get("NPC_CONSUMER_TTL", "60"))
-    except ValueError:
-        return 60.0
+    return env_num("NPC_CONSUMER_TTL", 60.0)
 
 
 def task_timeout_sec() -> float:
-    try:
-        return float(os.environ.get("NPC_TASK_TIMEOUT", "300"))
-    except ValueError:
-        return 300.0
+    return env_num("NPC_TASK_TIMEOUT", 300.0)
 
 
 def gate_enabled() -> bool:
@@ -49,7 +43,7 @@ def gate_enabled() -> bool:
     关(默认): book() 行为与 v3.2 完全一致 —— 旧石器等内置执行器世界零回归;
     开(GTA bat): book() 过能力协商门 + 镜像进账本。端点本身恒在(空表惰性无副作用)。
     """
-    return os.environ.get("NPC_TASK_LOOP", "") not in ("", "0")
+    return env_flag("NPC_TASK_LOOP")
 
 
 class ConsumerRegistry:
