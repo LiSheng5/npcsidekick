@@ -17,6 +17,8 @@ import json
 import time
 from typing import Dict, List, Optional
 
+from agent.config_flags import env_flag
+
 try:   # 可选依赖: pip install jieba 后自动启用（缺失不影响启动）
     import jieba  # type: ignore
 except ImportError:   # pragma: no cover
@@ -105,8 +107,17 @@ def _relevance_score(content: str, query: str) -> float:
 class NPCMemory:
     """NPC 记忆: 条目 + 加权检索 + 持久化。"""
 
-    def __init__(self) -> None:
-        self.entries: List[Dict] = []   # [{id, content, importance, created_at}]
+    def __init__(self, anchor_dir: Optional[str] = None,
+                 vector_store: Optional[object] = None) -> None:
+        self.entries: List[Dict] = []
+        # ── 温层向量锚点(P1·2026-08-25): 可选语义检索增强 ──
+        # anchor_dir: 向量库持久目录(None=禁用真实构建); vector_store: 测试注入口。
+        # 生效需 env NPC_VECTOR_ANCHOR=1 且存储 available(chromadb 未装则永久降级)。
+        self._anchor_dir = anchor_dir
+        self._injected_vs = vector_store
+        self._anchor_vs = None
+        self._anchor_tried = False
+        self._backfilled = False   # [{id, content, importance, created_at}]
 
     # ── 写入 ─────────────────────────────────────────
 
@@ -120,10 +131,53 @@ class NPCMemory:
             "created_at": time.time(),
         }
         self.entries.append(entry)
+        # 温层向量锚点: 同步入语义索引(开关关闭/不可用时静默跳过)
+        vs = self._anchor()
+        if vs is not None:
+            try:
+                vs.add(entry["id"], content,
+                       {"category": category, "importance": importance})
+            except Exception:
+                pass
         return entry["id"]
 
     # ── 检索（AI Town 加权公式）────────────────────────
 
+    def _anchor(self):
+        """温层向量锚点存取口(NPC_VECTOR_ANCHOR=1 时启用)。
+
+        注入实例优先(测试)；否则惰性构建 ChromaDB 封装(chromadb 未安装→None)。
+        首次命中且索引为空 → 批量回填既有记忆(旧卡自愈迁移)。任何故障→None。
+        """
+        if not env_flag("NPC_VECTOR_ANCHOR"):
+            return None          # 家规开关: 默认关 —— 关闭时零接触零开销
+        if not self._anchor_tried:
+            self._anchor_tried = True
+            vs = None
+            if self._injected_vs is not None:
+                vs = self._injected_vs
+            else:
+                try:
+                    from agent.memory.vector_store import HAS_CHROMADB, VectorStore
+                    if HAS_CHROMADB and self._anchor_dir:
+                        vs = VectorStore(persist_dir=self._anchor_dir)
+                except Exception:
+                    vs = None
+            self._anchor_vs = vs
+        vs = self._anchor_vs
+        if vs is None or not getattr(vs, "available", False):
+            return None
+        if not self._backfilled:
+            self._backfilled = True
+            try:
+                if vs.count() == 0 and self.entries:
+                    vs.add_batch([(e.get("id"), e.get("content", ""),
+                                   {"category": e.get("category", "general"),
+                                    "importance": e.get("importance", 5)})
+                                  for e in self.entries])
+            except Exception:
+                pass
+        return vs
     def retrieve(self, query: str = "", top_k: int = 5) -> List[Dict]:
         """加权检索 + 一跳关联（阶段② 轻量海马体）。
 
@@ -149,6 +203,18 @@ class NPCMemory:
             if assoc:
                 score += len(_canonical_terms(e["content"]) & assoc) * _ASSOCIATION_WEIGHT
             scored.append((score, e))
+        # 温层向量锚点(P1): 语义命中给相关度加权 —— "几点"能捞起"时间"类记忆
+        try:
+            vs = self._anchor()
+            if vs is not None:
+                sem = {}
+                for h in vs.search(query, top_k=8):
+                    sem[getattr(h, "text", "")] = float(getattr(h, "score", 0.0))
+                if sem:
+                    scored = [(sc + 2.0 * sem.get(e.get("content", ""), 0.0), e)
+                              for sc, e in scored]
+        except Exception:
+            pass
         scored.sort(key=lambda x: x[0], reverse=True)
         return [e for _, e in scored[:top_k]]
 
@@ -174,6 +240,7 @@ class NPCMemory:
         """
         now = time.time()
         removed = 0
+        _ids_before = [e.get("id") for e in self.entries]
         # ── 1. 同主题合并 ──
         groups: Dict[frozenset, List[int]] = {}
         for i, e in enumerate(self.entries):
@@ -216,6 +283,18 @@ class NPCMemory:
             else:
                 removed += 1
         self.entries = keep
+        # 温层向量锚点: 被合并/修剪的条目同步出索引
+        try:
+            vs = self._anchor()
+            if vs is not None:
+                gone = set(_ids_before) - {e.get("id") for e in self.entries}
+                for gid in sorted(gone):
+                    try:
+                        vs.delete(gid)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         return removed
 
     def format_for_context(self, entries: Optional[List[Dict]] = None) -> str:
