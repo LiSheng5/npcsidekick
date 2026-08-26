@@ -7,6 +7,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+import npc.llm_wiring as wiring_mod
 import npc.server as server_mod
 from npc.npc import NPC
 from npc.scheduler import tick_round
@@ -21,7 +22,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-    monkeypatch.setattr(NPC, "_read_api_key_file", staticmethod(lambda: ""))
+    monkeypatch.setattr(wiring_mod, "resolve_api_key", lambda model_name: "")
     npc = NPC(store_dir=str(tmp_path))
     npc.use_llm = False
     return {"client": TestClient(create_npc_server({"cang": npc})),
