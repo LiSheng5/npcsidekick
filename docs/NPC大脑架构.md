@@ -712,3 +712,45 @@ save() 防重复落盘(blob 比对)随⑥落地。
 ### 23.7 回归与版本注记
 五连提交每步全量回归(682→695, 小项池净增13)。pyproject/BRAIN_VERSION
 版本号仍 3.1.0 —— 建议下次发布窗口统一 bump 3.2.0, 待拍板。
+
+## 24. TDAM 借鉴三件套（2026-08-26 已实施）
+
+> 调研对象: 腾讯云开源 TencentDB-Agent-Memory（MIT, TypeScript/OpenClaw 插件,
+> L0→L3 分层记忆金字塔 + 符号化短期记忆）。结论: 只借思想不借代码——
+> Mermaid 任务画布/腾讯云 VDB/OpenClaw 绑定与游戏 NPC 场景不合, 弃。
+> 三开关全默认关, bat 选择加入; 全套 **722 passed**（基线 695, 净增 27）零回归。
+
+### 24.1 ① 记忆三分类 `NPC_MEMORY_TYPED`
+- 内容维度 `mtype`（persona=稳定特质 / episodic=客观事件 / instruction=玩家长期要求）
+  与 category 生命周期维度（general/reflection/consolidated）正交; 旧卡无字段
+  视作 episodic 向下兼容。
+- 任务事件卡（EV_DONE/EV_FAIL 前缀）确定性归 episodic —— 构造性证据不劳 LLM。
+- 反思升级三分类结构化产出：LLM 每批提炼 ≤3 条 JSON（宁缺毋滥/独立完整/
+  importance 打分），容错解析链（剥围栏→截取 []→白名单校验→夹取 0-9）；
+  解析失败**无痕落回**旧单条路径；产出全撞车沿用闸2b 静默翻篇语义。
+- `memory.add` 尾参 mtype 默认空串不写键 —— 开关关时落盘与旧版字节一致（回归锚 T1）。
+
+### 24.2 ② NPC 画像层 `NPC_PERSONA`
+- 对玩家画像 `npc/store/{id}_persona.md`（≤2000 字, 整目录已 gitignore）,
+  consolidate 低频顺路增量更新。
+- LLM 四层扫描（基础锚点/兴趣图谱/交互协议/认知内核），prompt 喂回旧画像做
+  增量修订；无 LLM → 规则兜底只统计与摘录（规范词频次+反思逐字），不发明。
+- 防御齐全：超长截断 / 无变化免 IO（mtime 缓存）/ 文件故障只告警不炸主循环。
+- talk 注入【你对玩家的了解】于【记忆】之前 —— 渐进式披露：高层画像常驻上下文,
+  细节仍由记忆卡按需召回；低层原始卡永不删（"低层保留证据, 高层保留结构"理念,
+  同时印证 R 系清洗未来不可做成物理删除式）。
+
+### 24.3 ④ BM25-IDF 关键词兜底 `NPC_BM25_RECALL`
+- retrieve 相关度取 max(旧公式, IDF 加权命中)：稀有词 log(1+N/df) 权重大于
+  高频词，修正"我/的"与"矿洞"同权问题；纯 Python 零依赖零 IO（df 每次 retrieve 现算）。
+- max 融合只升不降 —— 开关关时排序与旧版完全一致（回归锚 B1）；与温层向量锚点
+  正交可叠加（一个管词频稀有度, 一个管语义）。
+
+### 24.4 测试与运维注记
+- 新增 `tests/test_memory_typed.py` 16 例 / `test_npc_persona.py` 7 例 /
+  `test_bm25_recall.py` 4 例；语料用空格分隔 ASCII 词保证 jieba 有无不影响确定性。
+- 选入方式：bat 或环境变量加 `NPC_MEMORY_TYPED=1` / `NPC_PERSONA=1` /
+  `NPC_BM25_RECALL=1`（可单独选, 彼此独立, 现读可热切）。
+- 调研副产品（本机排障速查）：Schannel 凭证全灭（curl.exe 与 Invoke-WebRequest
+  同报 SEC_E_NO_CREDENTIALS）→ Node.js OpenSSL 拉 codeload ZIP 是可靠下载姿势；
+  git 直调 clone 撞沙箱命名管道边界（remote-https stdin pipe EPERM）。

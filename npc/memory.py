@@ -14,6 +14,7 @@ v2026-08-23 中文分词: _relevance_score 切词从"按空格"升级为 jieba�
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Dict, List, Optional
 
@@ -34,6 +35,12 @@ _HOUR_SECONDS = 3600
 # 与本常量联动(旧全角存量兼容扫描)。imp 语义: 玩家正事>=8 / 日常=5 / 失败=4或6。
 EV_DONE = "完成: "
 EV_FAIL = "没做成: "
+
+# ── TDAM 借鉴①(2026-08-26): 记忆三分类（内容维度, 与 category 生命周期维度正交）──
+# persona=稳定特质偏好 / episodic=客观事件 / instruction=玩家长期要求。
+# 旧卡无 mtype 字段 → 视作 episodic(读取方用 e.get("mtype") 兜底), 向下兼容。
+MTYPES = ("persona", "episodic", "instruction")
+MTYPE_DEFAULT = "episodic"
 
 # 阶段② 轻量海马体: 规范词 → 同义词族（中文同义召回，不依赖 embedding）
 # 只收游戏世界的稳定名词（资源/地点/角色），避免过度匹配
@@ -104,6 +111,26 @@ def _relevance_score(content: str, query: str) -> float:
     return min(1.0, raw * 0.6 + syn * 0.8)
 
 
+def _idf_relevance(entry_tokens: set, query_tokens: List[str], df: Dict[str, int],
+                   total: int) -> float:
+    """TDAM 借鉴④(2026-08-26): BM25 思想的 IDF 加权命中(归一 0-1)。
+
+    稀有词权重高(log(1+N/df))、常见词权重低 —— 修正"我/的"这类
+    高频词与"矿洞"这类稀有词在旧 raw 命中比里同权的问题。
+    纯 Python 零依赖; 与温层向量锚点正交(一个管词频稀有度, 一个管语义)。
+    """
+    if not query_tokens or total <= 0:
+        return 0.0
+    hit = 0.0
+    cap = 0.0
+    for t in query_tokens:
+        w = math.log(1.0 + total / max(1, df.get(t, 0)))
+        cap += w
+        if t in entry_tokens:
+            hit += w
+    return min(1.0, hit / cap) if cap > 0 else 0.0
+
+
 class NPCMemory:
     """NPC 记忆: 条目 + 加权检索 + 持久化。"""
 
@@ -121,8 +148,13 @@ class NPCMemory:
 
     # ── 写入 ─────────────────────────────────────────
 
-    def add(self, content: str, importance: int = 5, category: str = "general") -> str:
-        """记一条记忆。importance 0-9（可由 LLM 评分，Day 2 起默认手动/规则）。"""
+    def add(self, content: str, importance: int = 5, category: str = "general",
+            mtype: str = "") -> str:
+        """记一条记忆。importance 0-9（可由 LLM 评分，Day 2 起默认手动/规则）。
+
+        TDAM 借鉴①(2026-08-26): mtype 三分类标记(persona/episodic/instruction)。
+        默认空串 → 完全不写该字段，落盘与旧版字节一致（零回归锚）。
+        """
         entry = {
             "id": f"mem_{len(self.entries) + 1}_{int(time.time())}",
             "content": content,
@@ -130,6 +162,8 @@ class NPCMemory:
             "category": category,
             "created_at": time.time(),
         }
+        if mtype:
+            entry["mtype"] = mtype
         self.entries.append(entry)
         # 温层向量锚点: 同步入语义索引(开关关闭/不可用时静默跳过)
         vs = self._anchor()
@@ -183,6 +217,8 @@ class NPCMemory:
 
         score = recency×0.5 + relevance×3 + importance×2 + 关联加分。
         关联: 与 query 实体共现的实体所链接的记忆 +0.8/实体（拐弯找相关）。
+        TDAM 借鉴④(NPC_BM25_RECALL=1): 相关度取 max(旧公式, IDF 加权命中) —
+        只升不降, 开关关时与旧版逐字节同分。
         """
         now = time.time()
         q_canon = _canonical_terms(query)
@@ -193,11 +229,25 @@ class NPCMemory:
                 if q_canon & e_canon:
                     assoc |= e_canon
             assoc -= q_canon
+        # BM25-IDF 兜底(默认关): 一次 retrieve 算一遍词档频, 零依赖零 IO
+        use_idf = env_flag("NPC_BM25_RECALL")
+        df: Dict[str, int] = {}
+        q_tokens: List[str] = []
+        if use_idf and self.entries:
+            q_tokens = _tokenize(query)
+            for e in self.entries:
+                for t in set(_tokenize(e.get("content", ""))):
+                    df[t] = df.get(t, 0) + 1
         scored = []
         for e in self.entries:
+            rel = _relevance_score(e["content"], query)
+            if use_idf:
+                rel = max(rel, _idf_relevance(
+                    set(_tokenize(e.get("content", ""))), q_tokens,
+                    df, len(self.entries)))
             score = (
                 _recency_score(e["created_at"], now) * _GW[0]
-                + _relevance_score(e["content"], query) * _GW[1]
+                + rel * _GW[1]
                 + e["importance"] * _GW[2]
             )
             if assoc:
