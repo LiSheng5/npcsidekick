@@ -8,6 +8,9 @@ license = {text = "MIT"}
 
 dependencies = [
     "openai>=1.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "edge-tts>=6.1",
     "tiktoken>=0.5",
     "chromadb>=0.5",
     "structlog>=24.0",

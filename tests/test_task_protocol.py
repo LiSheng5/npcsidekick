@@ -143,9 +143,8 @@ def test_chain_failure_cancels_remaining_and_notifies():
     assert len(tl.LEDGER.discussions("amanda")) == 1      # 商议只记失败源一次
 
 
-def test_fight_is_continuous_verb():
-    """fight 属持续型: 新落账会 supersede 旧在岗斗殴, 且不需要显式完成回报。"""
-    assert "fight" in tl.CONTINUOUS_VERBS
+def test_fight_superseded_by_new_command():
+    """拍板语义"新命令打断": 斗殴中下达新指令 → 旧斗殴 cancelled(superseded)。"""
     t1 = tl.LEDGER.book("amanda", "fight", {"target": "红衣服混混"})
     tl.LEDGER.dispatch_view()
     t2 = tl.LEDGER.book("amanda", "goto", {"place": "酒吧"})

@@ -54,8 +54,10 @@ _last_refusal_idx = -1
 
 
 def enabled() -> bool:
-    """总开关（现读现判 — 测试/运行时可热切）。代码默认关，bat 选择接入。"""
-    return os.environ.get("NPC_SAFETY_GATE", "") == "1"
+    """总开关（现读现判 — 测试/运行时可热切）。代码默认关，bat 选择接入。
+    P1-2: 经统一词表解析 —— true/on/yes 也算开启(防拼错静默失效)。"""
+    from agent.config_flags import env_flag
+    return env_flag("NPC_SAFETY_GATE")
 
 
 def _normalize(text: str) -> str:

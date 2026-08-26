@@ -36,6 +36,21 @@ TICKS_PER_GAME_HOUR = 60
 DAY_START_HOUR = 8            # 服务器启动 = 早晨 8 点
 
 
+from agent.config_flags import env_flag
+from npc.memory import EV_DONE, EV_FAIL
+
+
+def _protocol_owns_pending() -> bool:
+    """协议 v1(M2 划界·2026-08-25): NPC_TASK_LOOP 开启时 pending_task 归外部
+    消费者(mod 经 /api/state 认领、/api/task_done 销账), 文本执行引擎不抢跑 ——
+    防双消费者竞态(账本把已完成的活误判僵尸/双份执行)。惰性导入防环。"""
+    try:
+        from npc import taskloop as _taskloop
+        return _taskloop.gate_enabled()
+    except Exception:
+        return False
+
+
 def game_hour(world: Dict) -> int:
     """当前游戏小时(0~23)。游戏端经 /api/talk context 同步的真实时间优先
     (天气/昼夜权重用真实数据,不再猜);无同步时按 tick 自推(60 tick=1小时,同构近似)。"""
@@ -233,7 +248,8 @@ def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
 
     if npc.activity is None:
         # 对话下的指令（"给我两根木材"）优先于自主日常 — 玩家 > 日常
-        if npc.pending_task is not None:
+        # 协议模式(NPC_TASK_LOOP=1)例外: 玩家单归外部消费者执行, 引擎不抢跑
+        if npc.pending_task is not None and not _protocol_owns_pending():
             item = npc.pending_task
             npc.pending_task = None   # 接单后只执行一次（失败会进冷却）
         else:
@@ -248,7 +264,7 @@ def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
             return ev
         desc = _describe(item)
         if not steps:   # 防御: 空步骤（如 count 非法归 0）— 直接视为完成
-            npc.remember(f"完成：{desc}", importance=5)
+            npc.remember(f"{EV_DONE}{desc}", importance=5)
             return ev
         npc.activity = {"item": item, "steps": steps, "desc": desc}
         npc.state = "walking"
@@ -259,7 +275,7 @@ def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
         item = npc.activity["item"]
         npc._blocked[(item.get("action"), item.get("resource"))] = world["_tick"] + BLOCK_AFTER_FAIL_TICKS
         desc = npc.activity["desc"]
-        npc.remember(f"{desc}没做成", importance=4)
+        npc.remember(f"{EV_FAIL}{desc}", importance=4)
         npc.state = "idle"
         npc.activity = None
         ev["failed"] = desc
@@ -269,7 +285,7 @@ def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
                  "rest": "resting", "say": "idle"}[step["kind"]]
     if not npc.activity["steps"]:
         desc = npc.activity["desc"]
-        npc.remember(f"完成：{desc}", importance=5)
+        npc.remember(f"{EV_DONE}{desc}", importance=5)
         npc.state = "idle"
         npc.activity = None
         ev["completed"] = desc
@@ -339,7 +355,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional as _Opt
+
 
 # 优先级常量（数值越小越优先）
 P_TALK = 0       # 对话 (B1)
@@ -356,7 +372,7 @@ class SchedulerTimeout(Exception):
 
 def _scheduler_enabled() -> bool:
     """开关读取：不设 / 空 / "0" = OFF；其余（如 "1"）= ON。每次现读，可热切。"""
-    return os.environ.get("NPC_SCHEDULER", "") not in ("", "0")
+    return env_flag("NPC_SCHEDULER")
 
 
 class LLMScheduler:
@@ -430,7 +446,7 @@ class LLMScheduler:
             self._executor = None
 
     # ── 核心：异步优先级入队（server talk 端点用）──
-    async def run(self, priority: int, fn, /, *args, timeout: _Opt[float] = None, **kwargs):
+    async def run(self, priority: int, fn, /, *args, timeout: Optional[float] = None, **kwargs):
         if self._in_worker():
             return fn(*args, **kwargs)   # 嵌套直通：已在 worker 内，直接执行防死锁
         if not self.enabled:
@@ -456,7 +472,7 @@ class LLMScheduler:
             self._depth[name] -= 1
             self._wait_ms_total += int((time.monotonic() - t0) * 1000)
 
-    def invoke(self, priority: int, fn, /, *args, timeout: _Opt[float] = None, **kwargs):
+    def invoke(self, priority: int, fn, /, *args, timeout: Optional[float] = None, **kwargs):
         """同步入口（npc.py / subagent.py 内部 LLM 调用点）。
 
         - worker 线程内 → 嵌套直通，直接执行（防自我死锁：worker 已持锁）

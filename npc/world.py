@@ -12,7 +12,7 @@ NPCSidekick — 世界契约 + 文本世界参考实现。
 from __future__ import annotations
 
 import json
-from copy import deepcopy
+
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
