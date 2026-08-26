@@ -29,11 +29,21 @@ class TalkPipelineMixin:
         mem_block = self.memory.format_for_context(self.memory.retrieve(player_input, top_k=5))
         if _safety.enabled():                 # §22: 记忆段前置红线句（卡片头注）
             mem_block = f"{_safety.REDLINE_LINE}\n{mem_block}"
+        # TDAM 借鉴②(2026-08-26, NPC_PERSONA=1): 高层画像渐进式披露 ——
+        # 画像段排在原始记忆卡之前, 细节仍由【记忆】按需召回; 开关关 → ""零差异。
+        try:
+            _profile = self.read_persona_profile()
+        except Exception:
+            _profile = ""
         parts = [
             "【世界状态】",
             self.observe(),
             "【行为日志】（以下是你自己最近干过的事，不是玩家的）",
             self._behavior_log(),
+        ]
+        if _profile:
+            parts += ["【你对玩家的了解】", _profile]
+        parts += [
             "【记忆】",
             mem_block,
             "【规则】回答只能基于上面【世界状态】【行为日志】和【记忆】中的内容，"
