@@ -24,13 +24,14 @@ from npc import safety as _safety
 from npc import subagent as _sub
 from npc import taskloop as _taskloop
 from npc import llm_wiring
+from npc import book as _booking
 from agent.config_flags import env_flag
 from npc.scheduler import P_REFLECT, SCHED
 from npc.memory import EV_DONE, EV_FAIL, NPCMemory
 from npc.persona import SAMPLE_NPC, build_system_prompt
-from npc.reviewer import (REVIEW_RETRY_HINT, APPROVAL_POLICY_VALUES, APPROVE_DENY, compile_task,
-                          approve_action, get_manifest, get_resource_aliases,
-                          looks_like_intent, review_dialogue, review_task,
+from npc.reviewer import (REVIEW_RETRY_HINT, APPROVAL_POLICY_VALUES, compile_task,
+                          get_manifest, get_resource_aliases,
+                          looks_like_intent, review_dialogue,
                           set_approval as reviewer_set_approval, should_review)
 from npc.world import apply_action, default_world, find_path, observe
 
@@ -568,7 +569,8 @@ class NPC:
         回复层的承诺↔账本一致性核对(review_dialogue)会逼出诚实改口，空头支票发不出去。
         同步镜像进任务账本(task_id/链式/派发销账)；门/账本任何故障降级旧语义不卡对话。
         """
-        if _taskloop.gate_enabled():
+        gate_open = _taskloop.gate_enabled()
+        if gate_open:
             try:
                 _manifest_actions = set((get_manifest() or {}).keys())
                 if not _taskloop.action_allowed(str(task.get("action", "")),
@@ -578,9 +580,11 @@ class NPC:
                     return False
             except Exception as exc:
                 log.warning("npc_capability_gate_error", error=str(exc))   # 门坏→放行旧语义
-            self.pending_task = task
-            self.activity = None      # 打断自主日常，听玩家的
-            self.state = "idle"
+        # 提交段两分支共用(消除 P2④ 指出的三连赋值重复)
+        self.pending_task = task
+        self.activity = None          # 打断自主日常，听玩家的
+        self.state = "idle"
+        if gate_open:
             try:
                 _taskloop.LEDGER.book(self.actor_id, str(task.get("action", "")),
                                       params={k: v for k, v in task.items()
@@ -588,11 +592,6 @@ class NPC:
                                       desc=str(task.get("task") or task.get("action", "")))
             except Exception as exc:
                 log.warning("npc_ledger_book_failed", npc=self.actor_id, error=str(exc))
-            return True
-        # 开关关(默认): 行为与 v3.2 完全一致(零回归锚)
-        self.pending_task = task
-        self.activity = None          # 打断自主日常，听玩家的
-        self.state = "idle"
         return True
 
     def _try_recall(self, player_input: str) -> Optional[str]:
@@ -620,15 +619,13 @@ class NPC:
         task = compile_task(player_input)          # B2: 编译任务单
         if task is None:
             return None
-        # Approval 三态 (Codex /approvals 对照): deny → 直接拒绝, 不审查不落账
-        if approve_action(task["action"], self.approval_policy, self.approval_overrides) == APPROVE_DENY:
-            return f"……这个我不能做（{task['action']} 被禁止）。"
-        ok, reason = review_task(self, task)       # A: 审查可行性(白名单+分级)
-        if not ok:
+        # P2④(2026-08-25): 三道门序列已合流 npc/book.py guarded_book —— 单点维护
+        status, reason = _booking.guarded_book(self, task)
+        if status == "denied":
+            return f"……这个我不能做（{reason}）。"
+        if status == "unfeasible":
             return reason                           # 诚实拒绝，不空口答应
-        # L3 高影响动作(deliver)在 auto 策略下仍需深度审查 ——
-        # 深度审查由对话层的承诺落账保证, 这里标记任务来源为"已审"后落账
-        if not self.book(task):                     # 落账口: 唯一入口
+        if status == "no_consumer":
             return None   # 协议v1: 无消费者接盘 → 不承诺, 对话自然继续(诚实沉默)
         return f"好，我这就去弄{task['count']}个{task['resource']}给你。"
 
@@ -661,12 +658,9 @@ class NPC:
         task = self._task_from_b2(res)
         if task is None:
             return
-        if approve_action(task["action"], self.approval_policy,
-                          self.approval_overrides) == APPROVE_DENY:
-            return   # 被禁动作不落账; 若回复已许诺, review_dialogue 会拦下逼它重说
-        ok, _reason = review_task(self, task)
-        if ok:
-            self.book(task)                         # 落账口: 唯一入口
+        status, _reason = _booking.guarded_book(self, task)
+        if status != "booked":
+            return   # 被禁/不可行/无人接盘均不落账; 若回复已许诺, review_dialogue 会拦下逼它重说
 
     @staticmethod
     def _task_from_b2(res) -> Optional[Dict]:
