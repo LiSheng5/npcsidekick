@@ -65,7 +65,8 @@ def main(argv=None) -> None:
     _manifest_path = args.manifest or os.environ.get("NPC_MANIFEST", "")
     if _manifest_path:
         import json as _json
-        from npc.reviewer import load_manifest, parse_manifest_doc, set_manifest_resources
+        from npc.reviewer import (load_manifest, parse_manifest_doc,
+                                  set_manifest_places, set_manifest_resources)
         _p = Path(_manifest_path)
         if not _p.is_absolute():
             _p = _BASE_DIR / _p
@@ -74,8 +75,10 @@ def main(argv=None) -> None:
                 _parsed = parse_manifest_doc(_json.load(_f))
             load_manifest(_parsed["actions"])
             set_manifest_resources(_parsed.get("resources"))
+            set_manifest_places(_parsed.get("places"))   # 任务书#05·C 地点词典
             print(f"已加载动作清单: {_p}"
-                  + (f"（含资源词典 {len(_parsed['resources'])} 项）" if _parsed.get("resources") else ""))
+                  + (f"（含资源词典 {len(_parsed['resources'])} 项）" if _parsed.get("resources") else "")
+                  + (f"（含地点词典 {len(_parsed['places'])} 项）" if _parsed.get("places") else ""))
         except (OSError, ValueError) as _e:
             print(f"警告: 动作清单加载失败({_e}), 使用默认动作")
 
@@ -91,13 +94,19 @@ def main(argv=None) -> None:
         _store = _BASE_DIR / _store
 
     from npc.server import create_npc_server, load_village
-    from npc.reviewer import get_manifest_resources, load_resource_lexicon_from_world
+    from npc.reviewer import (get_manifest_places, get_manifest_resources,
+                              load_place_lexicon_from_world,
+                              load_resource_lexicon_from_world)
     world, npcs = load_village(store_dir=str(_store), personas=personas,
                                 world=adapter_world)
     # 动态资源词典(2026-08-23): 世界就绪后从 locations 收集 + 清单 resources 并名 —
     # 游戏加新资源改世界 JSON/清单表即可, 对话接单立刻认识, 零代码。
     lex = load_resource_lexicon_from_world(world, extra=get_manifest_resources())
     print(f"资源词典已就绪: {sorted(lex.keys())}")
+    # 动态地点词典(任务书#05·C): 地标表 = world["locations"] 的 key + 清单 places 别名;
+    # goto 接单走最长匹配归一, 长地名不再被截断成别的地名。
+    places = load_place_lexicon_from_world(world, extra=get_manifest_places())
+    print(f"地点词典已就绪: {sorted(places.keys())}" if places else "地点词典: 无(回退尾词清洗)")
 
     app = create_npc_server(npcs, world_id=args.world_id)
     log.info("npc_server_started", url=f"http://127.0.0.1:{port}/npc.html")

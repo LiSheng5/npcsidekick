@@ -122,5 +122,6 @@ class TestStaticConsole:
     def test_npc_html_is_new_console(self, client):
         r = client.get("/npc.html")
         assert r.status_code == 200
-        assert "调试台" in r.text          # 新版标题
+        assert "NPC关系网" in r.text       # 关系网标题（2026-08-27 替换调试台）
+        assert "新建 NPC" in r.text        # 新建按钮 + /api/personas 表单
         assert "USE_MOCK" not in r.text    # mock 开关已移除

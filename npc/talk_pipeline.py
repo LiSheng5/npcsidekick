@@ -12,6 +12,8 @@ from agent.logging_config import log
 from npc import safety as _safety
 from npc import taskloop as _taskloop
 from npc.reviewer import REVIEW_RETRY_HINT, review_dialogue, should_review
+from npc.world import (LOG_TIER_AUTONOMOUS, LOG_TIER_INTERACTIVE,
+                       log_tier, summarize_autonomous)
 
 # 短期对话历史轮数（只记最近 N 轮 — 上下文定期重置；对话不进长期记忆卡防污染，Day 2 铁律）
 DIALOGUE_HISTORY_TURNS = 5
@@ -67,9 +69,29 @@ class TalkPipelineMixin:
 
         Day 2 实测: 提示词接地指令只能压制不能根除 confabulation —
         把"事实"从记忆检索换成世界日志直供，LLM 只准复述。
+        2026-08-28 日志分档(读侧, 用户 D1 保守裁决): 🌟互动逐条(最近至多 6 条,
+        尾向上扫满 6 即停) + 🌗自主活动语言化摘要一行 —— NPC 被问"刚才在干嘛/
+        采了多少"照样有整一手事实, 且比连读 6 条流水省 token 且更人话。
         """
-        lines = [ln for ln in self.world.get("log", []) if ln.startswith(self.actor_id + " ")][-6:]
-        return "\n".join(f"- {ln}" for ln in lines) if lines else "（最近没干什么）"
+        recent: list = []
+        got_interactive = 0
+        for ln in reversed(self.world.get("log", [])):
+            if not ln.startswith(self.actor_id + " "):
+                continue
+            recent.append(ln)
+            if log_tier(ln) == LOG_TIER_INTERACTIVE:
+                got_interactive += 1
+                if got_interactive >= 6:
+                    break
+            elif len(recent) >= 120:        # 互动少时兜底窗口(≈6 分钟行为)
+                break
+        recent.reverse()
+        parts = [f"- {ln}" for ln in recent if log_tier(ln) == LOG_TIER_INTERACTIVE]
+        auton = summarize_autonomous([ln for ln in recent
+                                      if log_tier(ln) == LOG_TIER_AUTONOMOUS])
+        if auton:
+            parts.append(f"- （自主活动）{auton}")
+        return "\n".join(parts) if parts else "（最近没干什么）"
 
     def talk(self, player_input: str, reasoning=None) -> str:
         """玩家交互 — 小模型对话（DeepSeek Flash）+ 规则回退。
@@ -84,37 +106,38 @@ class TalkPipelineMixin:
         # ── §22 入站安检门（默认 OFF — NPC_SAFETY_GATE 未设时 scan 直通）──
         v = _safety.scan(player_input)
         if v.level == "L1":
+            # 2026-08-27 重构（用户拍板）: 罐头拒绝退役 → LLM 以人设口吻婉拒。
+            # 安全靠三层: 模型自对齐 + 宪法红线 + hard_hint; 玩家不再"被消失"。
             import hashlib
             digest = hashlib.sha1(player_input.encode("utf-8")).hexdigest()[:8]
             log.warning("npc_safety_blocked", npc=self.persona["id"],
                         level=v.level, category=v.category, digest=digest)   # 只记哈希不记原文
-            refusal = v.refusal or _safety.refusal()
-            self.dialogue_history.extend([          # 三不清除: 占位对替代原文
-                {"role": "user", "content": _safety.PLACEHOLDER_USER},
-                {"role": "assistant", "content": refusal},
-            ])
-            del self.dialogue_history[:-DIALOGUE_HISTORY_TURNS * 2]
-            self.save()
-            return refusal
+            # 三不清除原理不变: 本函数全程只见占位符（下方 safe_input 一致替换）
+            safe_input = _safety.PLACEHOLDER_USER
+        else:
+            safe_input = player_input
 
-        recall = self._try_recall(player_input)
-        if recall is not None:
-            return recall
+        if v.level != "L1":        # 违规轮跳过快路径 — 不许引用记忆卡/接单/回忆
+            recall = self._try_recall(player_input)
+            if recall is not None:
+                return recall
 
-        command = self._try_task_command(player_input)
-        if command is not None:
-            return command
+            command = self._try_task_command(player_input)
+            if command is not None:
+                return command
 
         llm = self._get_llm()
         if llm is None:
-            return self._talk_rules(player_input)
+            return self._talk_rules(safe_input)   # L1 时 = 占位符（兜底话术不触原文）
 
         sys_content = self.system_prompt + "\n" + self._build_context(player_input)
-        if _safety.enabled():                 # §22: 宪法注入 + L2 软旗提示
+        if _safety.enabled():                 # §22: 宪法注入 + L1/L2 提示
             const = _safety.constitution_text()
             if const:
                 sys_content = const + "\n\n" + sys_content
-            if v.level == "L2":
+            if v.level == "L1":
+                sys_content += "\n" + _safety.hard_hint(v.category)   # 模型人设口吻婉拒
+            elif v.level == "L2":
                 sys_content += "\n" + _safety.soft_hint(v.category)
         # P1-3 商议接线(2026-08-25): 失败任务的"找玩家商量"进入对话上下文 ——
         # pop 即消费(防队列无界增长); 字幕提醒此前已在 task_done 推送过,
@@ -129,20 +152,20 @@ class TalkPipelineMixin:
         messages = [
             {"role": "system", "content": sys_content},
             *self.dialogue_history,   # 短期对话历史（最近 N 轮，上下文定期重置）
-            {"role": "user", "content": player_input},
+            {"role": "user", "content": safe_input},   # L1 时 = 占位符（原文不进上下文）
         ]
         self._last_thinking = ""
         try:
-            reply, self._last_thinking = self._chat_with_review(llm, messages, player_input, reasoning)
+            reply, self._last_thinking = self._chat_with_review(llm, messages, safe_input, reasoning)
         except Exception as exc:  # 任何 API 故障 → 规则回退
             log.warning("npc_llm_fallback", npc=self.persona["id"], error=str(exc))
-            reply = self._talk_rules(player_input)
+            reply = self._talk_rules(safe_input)
             self._last_thinking = ""
 
         # 对话不自动入记忆 — Day 2 实测: 逐字记录对话会污染检索（编造内容也进卡）。
         # 记忆只由任务事件和显式 remember() 写入（记忆 = 重要的事，不是聊天记录）。
         # 短期历史只留最近 N 轮（内存态），让村民记得"上一条聊了什么"。
-        self.dialogue_history.append({"role": "user", "content": player_input})
+        self.dialogue_history.append({"role": "user", "content": safe_input})
         self.dialogue_history.append({"role": "assistant", "content": reply})
         del self.dialogue_history[:-DIALOGUE_HISTORY_TURNS * 2]   # 截断: 只留最近 N 轮
         self.save()

@@ -19,6 +19,15 @@ from typing import Dict, List, Optional
 # ── B2 编译: 玩家意图词表 ─────────────────────────────
 _INTENT_WORDS = ("给我", "给", "要", "需要", "帮我", "弄点", "去砍", "去采")
 
+# 任务回路动作词表（任务书#02·2026-08-28）: 跟随/前往类不依赖资源词典,
+# 单独识别; 仅当当前生效清单含对应动作时才接单(默认清单不含 → 向后兼容零变化)。
+_FOLLOW_PHRASES = ("跟我走", "跟我来", "跟紧我", "跟着我", "陪我走", "和我走")
+_GOTO_LEAD_RE = re.compile(r"^(?:陪我去|跟我去|带我去|同我去)(.+)$")
+_GOTO_WEAVE_RE = re.compile(r"^到(.+?)去$")
+# 地点短语尾部语气/虚词（"陪我去河边吧" → "河边"）
+_PLACE_TAIL = ("好不好", "成么", "成不成", "一趟", "一下", "走走", "玩玩",
+               "吧", "呗", "啊", "呀", "呢", "哈", "嘛", "哦")
+
 # 内置资源词典（默认兜底 = 本游戏动作; 有世界/清单声明时被动态词典替换）
 DEFAULT_RESOURCE_ALIASES: Dict[str, tuple] = {
     "木材": ("木材", "木头", "柴", "木", "树"),
@@ -88,6 +97,69 @@ def get_resource_aliases() -> Dict[str, tuple]:
     return _ACTIVE_RESOURCE_ALIASES if _ACTIVE_RESOURCE_ALIASES else dict(DEFAULT_RESOURCE_ALIASES)
 
 
+# ── 任务书#05·C 动态地点词典（与资源词典同款, 由 world/manifest 声明驱动）────
+#   None = 未加载 → goto 走旧尾词清洗(_clean_place), 行为与旧版逐字节一致;
+#   非 None = 规范地名 → 同义词族, 匹配用最长命中, 归一成规范名(mod 地标表查得到)。
+#   深度版(用户拍板): 长地名不再被 10 字截断成别的地名 → 玩家不再莫名收到失败商议。
+_ACTIVE_PLACE_ALIASES: Optional[Dict[str, tuple]] = None
+
+
+def load_place_lexicon_from_world(world: Optional[Dict],
+                                  extra: Optional[Dict[str, list]] = None) -> Dict[str, tuple]:
+    """从世界状态动态收集地点词典（规范地名 → 同义词族），并设为当前生效。
+
+    收集规则（与 load_resource_lexicon_from_world 同款）:
+      - world["locations"] 的 key 即规范地名（地标表的真相）;
+      - 别名来源: 每 location 可选 aliases 列表 + 世界扩展键
+        world["_place_aliases"] = {规范名: [别名...]} + 清单 places 段(经 extra 合并)
+    语义:
+      - 收集到 ≥1 个地点 → 生效（整表, 游戏声明自己的真相）; 零地点 → 未加载
+        （纯对话世界没有地标表 → 回退旧尾词清洗, 行为零变化）
+      - world=None 且 extra 空 → 复位为未加载（测试复位用）
+    返回生效词典（未加载 → {}）。
+    """
+    global _ACTIVE_PLACE_ALIASES
+    if world is None and not extra:
+        _ACTIVE_PLACE_ALIASES = None
+        return {}
+    lex: Dict[str, List[str]] = {}
+    locations = (world or {}).get("locations") or {}
+    if isinstance(locations, dict):
+        for name, loc in locations.items():
+            if not isinstance(name, str) or not name:
+                continue
+            bucket = lex.setdefault(name, [name])
+            if isinstance(loc, dict):
+                for a in (loc.get("aliases") or []):
+                    a = str(a)
+                    if a and a not in bucket:
+                        bucket.append(a)
+    # 清单 places 段: {规范地名: [别名...]} — 清单即真相, 世界里没有也收
+    for canon, aliases in (extra or {}).items():
+        canon = str(canon)
+        bucket = lex.setdefault(canon, [canon])
+        for a in (aliases or []):
+            a = str(a)
+            if a and a not in bucket:
+                bucket.append(a)
+    # 世界显式别名: 只给已收集到的规范地名补别名, 不凭空造地点
+    for canon, aliases in (((world or {}).get("_place_aliases")) or {}).items():
+        canon = str(canon)
+        if canon in lex:
+            for a in (aliases or []):
+                a = str(a)
+                if a and a not in lex[canon]:
+                    lex[canon].append(a)
+    active = {k: tuple(v) for k, v in lex.items()}
+    _ACTIVE_PLACE_ALIASES = active if active else None
+    return dict(_ACTIVE_PLACE_ALIASES or {})
+
+
+def get_place_aliases() -> Optional[Dict[str, tuple]]:
+    """当前生效的地点词典; 未加载 → None（调用方据此回退旧清洗路径）。"""
+    return _ACTIVE_PLACE_ALIASES
+
+
 # ── A 审查: 对话承诺词 / 高风险话题 ─────────────────────
 # "我去/我这就…" = 答应去做某事 → 必须已落账（否则 = 口是心非）
 _PROMISE_WORDS = ("我去", "我这就", "这就去", "马上", "就给你", "给你弄",
@@ -115,6 +187,11 @@ REVIEW_SCENES = ("command", "dialogue")
 #   · load_manifest(None) 恢复默认, 保证向后兼容。
 # 清单字段: tier(1低/2中/3高影响 ~ Codex read-only/workspace-write/danger-full-access)
 #           approval(allow/ask/deny) + params(参数名, 描述用)
+# 任务书#05·B 新增可选呈现字段（缺一个动作改 3+ 文件的硬编码分支 → 清单单点声明）:
+#           desc_tpl = 账本 desc 模板, 如 "去{地点}" / "采集{count}个{resource}"
+#           ack_tpl  = 承诺 ack 模板, 如 "好，我去{地点}等你。"
+#           占位符 = 任务单自身的键（goto 用 {地点}, gather 用 {resource}/{count}）;
+#           校验不强制 —— 没有模板 = 走 npc.py 内置措辞（行为零变化）。
 # 审批全局档位 (Codex approval policy 对照):
 #   "auto"       = 按动作等级自动审 (L3 必审 + 承诺必审)
 #   "on-failure" = 宽松: 只靠执行失败兜底（演示用）
@@ -162,6 +239,21 @@ def get_manifest_resources() -> Optional[Dict[str, list]]:
     return _MANIFEST_RESOURCES
 
 
+# 任务书#05·C: 清单 places 段（{规范地名: [别名...]}）暂存, 与 resources 同款
+_MANIFEST_PLACES: Optional[Dict[str, list]] = None
+
+
+def set_manifest_places(places: Optional[Dict[str, list]]) -> None:
+    """暂存动作清单文件的 places 段（{规范地名: [别名...]}），None 清空。"""
+    global _MANIFEST_PLACES
+    _MANIFEST_PLACES = dict(places) if places else None
+
+
+def get_manifest_places() -> Optional[Dict[str, list]]:
+    """动作清单声明的地名字段（世界就绪后并入地点词典）。"""
+    return _MANIFEST_PLACES
+
+
 def load_manifest(manifest: Optional[Dict]) -> None:
     """设置当前生效的动作清单（每游戏一份）。None → 恢复默认(内置清单)。
 
@@ -188,8 +280,35 @@ def load_manifest(manifest: Optional[Dict]) -> None:
             "approval": spec["approval"],
             "params": list(spec.get("params", [])),
             "desc": str(spec.get("desc", "")),
+            # 任务书#05·B: 呈现模板可选, 无校验(缺 → 空串 → 调用方回退内置措辞)
+            "desc_tpl": str(spec.get("desc_tpl", "") or ""),
+            "ack_tpl": str(spec.get("ack_tpl", "") or ""),
         }
     _ACTIVE_MANIFEST = cleaned
+
+
+class _SafeTemplateDict(dict):
+    """占位符缺失 → 空串（模板不会因为参数不全而炸）。"""
+
+    def __missing__(self, key) -> str:      # pragma: no cover - 防御分支
+        return ""
+
+
+def render_action_tpl(tpl: str, params: Optional[Dict] = None) -> str:
+    """渲染动作模板（任务书#05·B）: "{地点}" + {"地点": "河边"} → "河边"。
+
+    只 format 模板本身, 不二次解析值 —— 值里含花括号("{}/}")也安全(任务书风险表)。
+    模板为空/非法(花括号不配对等) → 返回空串, 调用方回退内置措辞, 绝不让
+    一句呈现语卡住落账链路。
+    """
+    if not tpl:
+        return ""
+    safe = _SafeTemplateDict(
+        {str(k): ("" if v is None else v) for k, v in (params or {}).items()})
+    try:
+        return str(tpl).format_map(safe)
+    except (KeyError, IndexError, ValueError, AttributeError):
+        return ""
 
 
 def parse_manifest_doc(doc: Dict) -> Dict:
@@ -209,17 +328,32 @@ def parse_manifest_doc(doc: Dict) -> Dict:
         resources = doc.get("resources")
         if resources is not None and not isinstance(resources, dict):
             raise ValueError("resources 必须是对象 {规范名: [别名...]}")
-        return {"actions": actions, "resources": resources}
+        # 任务书#05·C: places 段（地点词典别名）与 resources 同款可选
+        places = doc.get("places")
+        if places is not None and not isinstance(places, dict):
+            raise ValueError("places 必须是对象 {规范地名: [别名...]}")
+        return {"actions": actions, "resources": resources, "places": places}
     # 旧版裸动作表（启发式: 含 tier/approval 键的才像动作 spec）
     if all(isinstance(v, dict) and ("tier" in v or "approval" in v) for v in doc.values()):
-        return {"actions": doc, "resources": None}
+        return {"actions": doc, "resources": None, "places": None}
     raise ValueError("无法识别的清单格式: 需要 {'actions': {...}} 或裸动作表")
 
 
 def get_manifest() -> Dict:
-    """当前生效清单（/api/manifest GET 用）: {action: {tier, approval, params, desc}}。"""
+    """当前生效清单（/api/manifest GET 用）: {action: {tier, approval, params, desc}}。
+
+    任务书#05·B: desc_tpl/ack_tpl 只在清单真的声明了模板时才出现在响应里 ——
+    未声明模板的世界(=默认清单世界)响应与旧版逐字段一致, 协议零破坏。
+    """
     src = _ACTIVE_MANIFEST if _ACTIVE_MANIFEST is not None else DEFAULT_ACTION_MANIFEST
-    return {a: dict(m) for a, m in src.items()}
+    out: Dict[str, Dict] = {}
+    for action, meta in src.items():
+        spec = dict(meta)
+        for key in ("desc_tpl", "ack_tpl"):
+            if not spec.get(key):
+                spec.pop(key, None)
+        out[action] = spec
+    return out
 
 
 def manifest_is_default() -> bool:
@@ -228,6 +362,12 @@ def manifest_is_default() -> bool:
 
 def _current_actions() -> tuple:
     return tuple(_ACTIVE_MANIFEST.keys()) if _ACTIVE_MANIFEST else ALLOWED_TASK_ACTIONS
+
+
+def _manifest_spec(action: str) -> Dict:
+    """单动作 spec 直读（无拷贝）: 当前清单优先, 回退内置默认。审查路径用。"""
+    src = _ACTIVE_MANIFEST if _ACTIVE_MANIFEST is not None else DEFAULT_ACTION_MANIFEST
+    return src.get(action) or {}
 
 
 def _current_approval() -> Dict:
@@ -349,14 +489,77 @@ def _hit_taboo(persona: Dict, text: str) -> Optional[str]:
 
 
 # ── B2: 编译任务单（玩家诉求 → 结构化任务）──────────────
-def compile_task(player_input: str) -> Optional[Dict]:
-    """B2 编译: 玩家输入 → 任务单 {action, resource, count}。识别不到 → None。
+def _clean_place(raw: str) -> Optional[str]:
+    """地点短语清洗（旧路径, 原样保留不重构）: 去尾语气词 + 截断 10 字。空 → None。"""
+    p = raw.strip(" ，,。!！?？~~").strip()
+    while p:
+        for t in _PLACE_TAIL:
+            if p.endswith(t) and len(p) > len(t):
+                p = p[:-len(t)].strip()
+                break
+        else:
+            break
+    return p[:10] if p else None
 
-    只识别"意图词 + 资源词"双命中，避免误接（"我要去散步"不触发）。
+
+def match_place(text: str) -> Optional[str]:
+    """地点词典最长匹配（任务书#05·C）: 命中任一别名 → 归一成规范地名。
+
+    "最长匹配" = 在文本里命中的最长别名优先（"陪我去老家的河边" 命中
+    "老家的河边" 而不是 "河边"）→ 归一成地标表里的规范名, mod 才查得到。
+    未加载词典 / 未命中 → None（调用方回退 _clean_place, 行为零变化）。
+    """
+    lex = _ACTIVE_PLACE_ALIASES
+    if not lex or not text:
+        return None
+    best: Optional[str] = None
+    best_len = 0
+    for canon, aliases in lex.items():
+        for alias in aliases:
+            if alias and alias in text and len(alias) > best_len:
+                best, best_len = canon, len(alias)
+    return best
+
+
+def resolve_place(raw: str) -> Optional[str]:
+    """地点归一: 词典最长匹配优先 → 未命中走旧尾词清洗（含 10 字兜底截断）。"""
+    return match_place(raw) or _clean_place(raw)
+
+
+def _compile_move_task(player_input: str) -> Optional[Dict]:
+    """任务回路动作编译(任务书#02): 跟我走→follow_player; 陪我去X/到X去→goto。
+
+    动作不在当前生效清单 → 不识别(默认清单世界里这些话只是闲聊)。
+    """
+    actions = _current_actions()
+    text = player_input.strip()
+    if "follow_player" in actions:
+        if any(phrase in text for phrase in _FOLLOW_PHRASES):
+            return {"action": "follow_player"}
+    if "goto" in actions:
+        m = _GOTO_LEAD_RE.match(text)
+        if m is None:
+            m = _GOTO_WEAVE_RE.match(text)
+        if m is not None:
+            # 任务书#05·C: 词典最长匹配归一 → 未命中回退旧尾词清洗(默认世界零变化)
+            place = resolve_place(m.group(1))
+            if place:
+                return {"action": "goto", "地点": place}
+    return None
+
+
+def compile_task(player_input: str) -> Optional[Dict]:
+    """B2 编译: 玩家输入 → 任务单 {action, ...}。识别不到 → None。
+
+    任务回路动作(follow_player/goto)优先识别(不依赖资源词);
+    采集类只识别"意图词 + 资源词"双命中，避免误接（"我要去散步"不触发）。
     数量: "两根"/"2个" → 数字；默认 1。
     资源词典 = 动态优先（load_resource_lexicon_from_world 加载过的世界真相），
     未加载时退回内置默认表 — 游戏加新资源改世界 JSON 即生效,零代码。
     """
+    move_task = _compile_move_task(player_input)
+    if move_task is not None:
+        return move_task
     if not any(w in player_input for w in _INTENT_WORDS):
         return None
     for resource, aliases in get_resource_aliases().items():
@@ -387,6 +590,11 @@ def review_task(npc, task: Dict) -> tuple[bool, str]:
     for v in task.values():
         if isinstance(v, str) and any(t in v.lower() for t in _FORBIDDEN_TASK_TOKENS):
             return False, "……这个涉及我不该碰的东西。"
+    # 可行性: 资源枯竭检查只对"以资源为参数"的动作生效(任务书#02)——
+    # follow_player/goto 等无资源概念的动作直达放行, 不再被空 resource 误拒。
+    spec = _manifest_spec(action)
+    if "resource" not in task and "resource" not in spec.get("params", []):
+        return True, ""
     resource = task.get("resource", "")
     from npc.scheduler import resource_site
 

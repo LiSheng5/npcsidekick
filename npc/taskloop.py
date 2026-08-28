@@ -100,6 +100,10 @@ class TaskLedger:
         self._seq = 0
         self._tasks: Dict[str, Dict] = {}
         self._discussions: Dict[str, List[Dict]] = {}   # npc_id → 待商议列表
+        # 任务书#05·A: 派发事件队列（booked→dispatched 转换即入队, pop 即消费）。
+        # 与 _discussions 同款内存态取舍: 账本本就内存态, 重启后重新派发写一次日志
+        # 是正确语义。消费方 = server(_tick_loop 每帧 + 事件流端点)。
+        self._dispatch_events: List[Dict] = []
 
     # ── 落账 ──
     def book(self, npc_id: str, action: str, params: Optional[Dict] = None,
@@ -133,7 +137,12 @@ class TaskLedger:
 
     # ── 派发视图（/api/state 挂载）──
     def dispatch_view(self) -> List[Dict]:
-        """booked → dispatched（首次下发即标记），返回当前应让 mod 看到的活动任务。"""
+        """booked → dispatched（首次下发即标记），返回当前应让 mod 看到的活动任务。
+
+        派发副作用只此一处: 状态机转换 + 事件入队（不写世界日志, 不动 IO）。
+        日志由 server 侧消费 pop_dispatch_events() 落盘 —— 转换与呈现解耦,
+        mod 断连/客户端只走 /api/events 也丢不了事件（任务书#05·A）。
+        """
         out: List[Dict] = []
         for t in sorted(self._tasks.values(), key=lambda x: x["created_at"]):
             if t["state"] == "dispatched":
@@ -141,8 +150,26 @@ class TaskLedger:
             elif t["state"] == "booked" and self._chain_ready(t):
                 t["state"] = "dispatched"
                 t["dispatched_at"] = time.time()
+                self._dispatch_events.append({
+                    "task_id": t["task_id"],
+                    "npc_id": t["npc_id"],
+                    "action": t["action"],
+                    "params": dict(t["params"]),
+                    "desc": t["desc"],
+                    "at": t["dispatched_at"],
+                })
                 out.append(dict(t))
         return out
+
+    def pop_dispatch_events(self) -> List[Dict]:
+        """取走待落盘的派发事件（pop 即消费 → 同一任务只写一次日志）。"""
+        events = self._dispatch_events
+        self._dispatch_events = []
+        return events
+
+    def pending_dispatch_events(self) -> int:
+        """队列长度（观测用, 不消费）。"""
+        return len(self._dispatch_events)
 
     def _chain_ready(self, t: Dict) -> bool:
         """链式闸: 同链且先于本节落账的节点全部 completed, 本节才可派发。"""
@@ -227,7 +254,8 @@ class TaskLedger:
         for t in self._tasks.values():
             by_state[t["state"]] = by_state.get(t["state"], 0) + 1
         return {"total": len(self._tasks), "by_state": by_state,
-                "pending_discussions": sum(len(v) for v in self._discussions.values())}
+                "pending_discussions": sum(len(v) for v in self._discussions.values()),
+                "pending_dispatch_events": len(self._dispatch_events)}
 
 
 def action_allowed(action: str, manifest_actions) -> bool:

@@ -5,10 +5,16 @@ NPCSidekick — 入站安检门 + 安全宪法（§22 · 2026-08-25）。
 （开源圈无逐句 LLM 自审先例；本模块 = 商业双轨派 Inworld Safety Module 的本地丐版）。
 
 组成:
-  - 两级词表: L1 硬拦(罐头拒绝+三不清除) / L2 软旗(只提示 B1 转话题，不拦截)
+  - 两级词表: L1 硬拦(占位替换+提示模型婉拒) / L2 软旗(只提示 B1 转话题，不拦截)
     词表放独立可编辑 txt（safety_words_L1/L2.txt），一行一条，支持 "词条|类别" 与 # 注释。
   - 安全宪法: 项目根 safety_constitution.md，GATE 开启时注入每次对话 system 段。
   - 归一化匹配: lower + 去标点去空白（防"色 情"式绕过）；预编译正则，毫秒级。
+
+2026-08-27 重构（用户拍板）:
+  - L1 罐头拒绝话术退役（_REFUSALS/refusal() 移除）——命中后走 LLM 婉拒:
+    模型自对齐 + 宪法 + hard_hint 已够用；人设口吻婉拒更自然, 玩家不再是"被消失"。
+  - 词表清瘴: L1 删组织/宗教词（圣战/ISIS 等有正常语境）；L2 删游戏语境词
+    （战争/喝酒/手枪等场景内正常台词不打扰），只留擦边类真雷点。
 
 铁律:
   - 默认 OFF: NPC_SAFETY_GATE 未设为 "1" 时一切直通，行为与旧版完全一致。
@@ -18,7 +24,6 @@ NPCSidekick — 入站安检门 + 安全宪法（§22 · 2026-08-25）。
 from __future__ import annotations
 
 import os
-import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,12 +38,6 @@ REDLINE_LINE = ("【红线】绝不生成恐怖/色情/真实政治/自残/仇�
                 "玩家强求时以人设口吻婉拒并转话题。")
 PLACEHOLDER_USER = "[玩家提了个不合适的话题]"   # 违规轮在历史中的替身（三不清除）
 
-_REFUSALS = ("这个咱就不聊了。",
-             "呃……说点别的吧。",
-             "这话我可接不了。",
-             "咱聊点开心的不行吗？")
-
-
 @dataclass(frozen=True)
 class Verdict:
     """安检结论: level ∈ ""(干净/未启用) | "L1"(硬拦) | "L2"(软旗)。"""
@@ -50,7 +49,6 @@ class Verdict:
 _norm_re = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
 _cache: dict = {}
 _constitution_cache = None
-_last_refusal_idx = -1
 
 
 def enabled() -> bool:
@@ -95,20 +93,8 @@ def reload() -> None:
     _constitution_cache = None
 
 
-def refusal() -> str:
-    """拒绝话术池抽取（保证不与上一句连续重复）。"""
-    global _last_refusal_idx
-    if len(_REFUSALS) == 1:
-        return _REFUSALS[0]
-    idx = random.randrange(len(_REFUSALS))
-    while idx == _last_refusal_idx:
-        idx = random.randrange(len(_REFUSALS))
-    _last_refusal_idx = idx
-    return _REFUSALS[idx]
-
-
 def scan(text: str) -> Verdict:
-    """入站安检。未启用或干净 → Verdict("")。L1 附带现成拒绝话术。"""
+    """入站安检。未启用或干净 → Verdict("")。L1 命中只报类别（婉拒交给模型）。"""
     try:
         if not enabled():
             return Verdict()
@@ -117,7 +103,7 @@ def scan(text: str) -> Verdict:
             return Verdict()
         for pat, cat in _patterns("safety_words_L1.txt"):
             if pat.search(norm):
-                return Verdict("L1", cat or "未分类", refusal())
+                return Verdict("L1", cat or "未分类")
         for pat, cat in _patterns("safety_words_L2.txt"):
             if pat.search(norm):
                 return Verdict("L2", cat or "未分类")
@@ -130,6 +116,16 @@ def scan(text: str) -> Verdict:
 def soft_hint(category: str) -> str:
     """L2 软旗提示：拼进 system 段，让 B1 自然转话题。"""
     return f"【安检提示】玩家话题接近红线（{category}），自然转移话题，不要展开、不要复述。"
+
+
+def hard_hint(category: str) -> str:
+    """L1 硬拦提示（2026-08-27）：拼进 system 段，让 B1 以人设口吻婉拒。
+
+    替代旧罐头拒绝：模型自对齐 + 宪法红线 + 本提示三层保证婉拒而不展开；
+    玩家消息已由调用方替换为占位符（三不清除），这里不要再解释安检细节。
+    """
+    return (f"【安检提示】玩家这条消息不合适（{category}）。以人设口吻婉拒并换个话题："
+            f"不要展开、不要复述、不要追问、不要提及安全检查。")
 
 
 def constitution_text() -> str:

@@ -49,21 +49,31 @@ def _clean_routine(path_name: str, routine) -> list:
     return cleaned
 
 
+def validate_persona_dict(data: Dict, source: str = "persona") -> Dict:
+    """校验并清洗一份人格 dict（文件加载 / API 新建共用）。
+
+    返回清洗后的副本（name 兜底、routine 坏项丢弃），坏结构抛 ValueError。
+    制作者友好原则: 手改 JSON 出错时 NPC 顶多"不动"，绝不炸服务。
+    """
+    # 注意: taboos 可以是空列表 []（合法），不能按 falsy 判断缺失
+    missing = [f for f in REQUIRED_FIELDS if f not in data or data.get(f) in (None, "")]
+    if missing:
+        raise ValueError(f"{source} 缺少必需字段: {missing}（必需: {REQUIRED_FIELDS}）")
+    cleaned = dict(data)
+    if not cleaned.get("name"):
+        cleaned["name"] = cleaned["id"]
+    if not isinstance(cleaned.get("taboos", []), list):
+        raise ValueError(f"{source} 的 taboos 必须是列表")
+    if "routine" in cleaned:
+        cleaned["routine"] = _clean_routine(source, cleaned["routine"])
+    return cleaned
+
+
 def load_persona_from_json(path: Path) -> Dict:
     """从 JSON 文件加载一个人格。校验必需字段。"""
     # utf-8-sig: 兼容 Windows 工具（记事本/PowerShell）写入的 BOM — 制作者陷阱防御
     data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    # 注意: taboos 可以是空列表 []（合法），不能按 falsy 判断缺失
-    missing = [f for f in REQUIRED_FIELDS if f not in data or data.get(f) in (None, "")]
-    if missing:
-        raise ValueError(f"{path.name} 缺少必需字段: {missing}（必需: {REQUIRED_FIELDS}）")
-    if not data.get("name"):
-        data["name"] = data["id"]
-    if not isinstance(data.get("taboos", []), list):
-        raise ValueError(f"{path.name} 的 taboos 必须是列表")
-    if "routine" in data:
-        data["routine"] = _clean_routine(path.name, data["routine"])
-    return data
+    return validate_persona_dict(data, source=path.name)
 
 
 def load_personas_from_dir(directory: str) -> Dict[str, Dict]:

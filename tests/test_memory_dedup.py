@@ -74,8 +74,8 @@ def test_gate2_skips_noise_batch(tmp_path, monkeypatch):
     """唯一内容 <3 的候选批 → 不调 LLM 不写反思，但指针推进（不反复咀嚼）。"""
     monkeypatch.setenv("NPC_MEMORY_DEDUP", "1")
     npc = _npc(tmp_path)
-    npc.remember("任务甲", importance=6)
-    npc.remember("任务乙", importance=6)   # 各自同文会被闸1聚合 → 批内仅2条, sum=12 达阈值
+    npc.remember("任务甲", importance=10)
+    npc.remember("任务乙", importance=10)   # 批内 2 条唯一内容, sum=20 ≥ 反思阈值
     assert npc.maybe_reflect() is None
     cats = [e["category"] for e in npc.memory.all()]
     assert "reflection" not in cats                       # 零废话洞察
@@ -87,8 +87,8 @@ def test_gate2_off_still_reflects_same_input(tmp_path):
     """对照: 同样输入、开关关 → 旧路径正常产出反思（证明差异来自开关而非数据）。"""
     npc = _npc(tmp_path)
     for _ in range(2):
-        npc.remember("任务甲", importance=6)
-        npc.remember("任务乙", importance=6)
+        npc.remember("任务甲", importance=10)
+        npc.remember("任务乙", importance=10)
     text = npc.maybe_reflect()
     assert text is not None
     assert sum(1 for e in npc.memory.all() if e["category"] == "reflection") == 1

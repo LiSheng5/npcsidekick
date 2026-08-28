@@ -5,14 +5,13 @@
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from agent.logging_config import log
-from npc.world import LOG_TAIL_DEFAULT, rotate_world_log
+from npc.world import LOG_TAIL_DEFAULT, parse_archive_record, rotate_world_log
 
 
 def log_tail_cfg() -> int:
@@ -35,6 +34,11 @@ def parse_log_line(line: str) -> Optional[Dict]:
     m = re.match(r"^(\S+)\s+前往\s+(.+)$", line)          # "cang 前往 森林"
     if m:
         return {"type": "move", "npc": m.group(1), "dest": m.group(2)}
+    m = re.match(r"^(\S+)\s+(接下|完成)任务[:：]\s*(.+)$", line)  # 任务书#02 首派/销账
+    if m:
+        return {"type": "task", "npc": m.group(1),
+                "status": "started" if m.group(2) == "接下" else "done",
+                "desc": m.group(3)}
     m = re.match(r"^(\S+)\s+采集了\s+1\s+个(.+)$", line)  # "cang 采集了 1 个木材"
     if m:
         return {"type": "gather", "npc": m.group(1), "resource": m.group(2)}
@@ -60,13 +64,9 @@ def archived_events(world, since: int, offset: int) -> List[Dict]:
     try:
         with path.open("r", encoding="utf-8") as fh:
             for ln in fh:
-                try:
-                    rec = json.loads(ln)
-                except Exception:
-                    continue
-                i = rec.get("i")
-                if isinstance(i, int) and since <= i < offset:
-                    ev = parse_log_line(str(rec.get("text", "")))
+                rec = parse_archive_record(ln)
+                if rec is not None and since <= rec["i"] < offset:
+                    ev = parse_log_line(rec["text"])
                     if ev is not None:
                         out.append(ev)
     except Exception as exc:
