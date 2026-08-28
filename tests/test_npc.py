@@ -223,11 +223,17 @@ class TestRecallAndBehaviorLog:
         assert "送了两根木材" in reply      # 逐字回答，不是 LLM 润色
 
     def test_context_has_behavior_log(self, npc):
-        """干过的实事进 LLM 上下文（事实源），没干过的不在里面。"""
+        """干过的实事进 LLM 上下文（事实源），没干过的不在里面。
+
+        2026-08-28 日志分档(读侧): 互动行(说:…)逐条 + 自主活动语言化摘要 —
+        "采集了 1 个木材"原行不再逐条进上下文, 由"采集木材×1"摘要承接同一事实。
+        """
         npc.run_task([{"type": "gather", "resource": "木材", "count": 1}])
         ctx = npc._build_context("你最近怎么样")
         assert "【行为日志】" in ctx
-        assert "采集了 1 个木材" in ctx
+        assert "办妥了" in ctx                        # 🌟 互动逐条
+        assert "（自主活动）" in ctx                   # 🌗 摘要
+        assert "采集木材×1" in ctx
         assert "（最近没干什么）" not in ctx
 
 

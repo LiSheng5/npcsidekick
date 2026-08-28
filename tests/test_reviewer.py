@@ -161,3 +161,78 @@ class TestTaskCommandDeny:
         reply = npc.talk("给我两根木材")
         assert npc.pending_task is None
         assert "不能" in reply
+
+
+
+# ── 任务书#02: 任务回路词表(B2 编译) + 清单加载校验 ──────────
+
+class TestCompileMoveTask:
+    """词表兜底: 跟我走/跟着我 → follow_player; 陪我去X/到X去 → goto。
+
+    只在含新动作的清单下生效(默认清单零变化——向后兼容)。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _gta_manifest(self):
+        from npc.reviewer import load_manifest
+
+        load_manifest({
+            "follow_player": {"tier": 3, "approval": "ask", "params": []},
+            "goto": {"tier": 2, "approval": "ask", "params": ["地点"]},
+        })
+        yield
+        load_manifest(None)   # 恢复默认, 防污染其他用例
+
+    def test_follow_phrase_walk_with_me(self):
+        assert compile_task("跟我走") == {"action": "follow_player"}
+
+    def test_follow_phrase_follow_me(self):
+        assert compile_task("跟着我") == {"action": "follow_player"}
+
+    def test_goto_lead_phrase(self):
+        assert compile_task("陪我去河边") == {"action": "goto", "地点": "河边"}
+
+    def test_goto_weave_phrase(self):
+        assert compile_task("到河边去") == {"action": "goto", "地点": "河边"}
+
+    def test_default_manifest_keeps_old_behavior(self):
+        """默认清单(无 follow/goto) → 这些话不接单(向后兼容)。"""
+        from npc.reviewer import load_manifest
+
+        load_manifest(None)
+        assert compile_task("跟我走") is None
+        assert compile_task("陪我去河边") is None
+        # 采集类不受影响
+        assert compile_task("给我两根木材")["action"] == "gather"
+
+
+class TestLoadManifestValidation:
+    """任务书#02 验收 1: 清单新增动作 + 非法清单不半套生效。"""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        from npc.reviewer import load_manifest
+
+        yield
+        load_manifest(None)
+
+    def test_loads_follow_and_goto(self):
+        from npc.reviewer import get_manifest, load_manifest
+
+        load_manifest({
+            "follow_player": {"tier": 3, "approval": "ask", "params": []},
+            "goto": {"tier": 2, "approval": "ask", "params": ["地点"]},
+        })
+        m = get_manifest()
+        assert m["follow_player"] == {"tier": 3, "approval": "ask",
+                                      "params": [], "desc": ""}
+        assert m["goto"]["tier"] == 2 and m["goto"]["params"] == ["地点"]
+
+    def test_invalid_tier_keeps_old_manifest(self):
+        from npc.reviewer import get_manifest, load_manifest
+
+        load_manifest(None)
+        before = get_manifest()
+        with pytest.raises(ValueError):
+            load_manifest({"bad": {"tier": 9, "approval": "ask", "params": []}})
+        assert get_manifest() == before   # 原清单保持不变(不会半套生效)

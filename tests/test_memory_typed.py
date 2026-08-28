@@ -115,8 +115,8 @@ def test_typed_reflect_stores_multiple(tmp_path, monkeypatch):
     monkeypatch.setenv("NPC_MEMORY_TYPED", "1")
     npc = _npc(tmp_path, use_llm=True)
     npc._llm = _TypedLLM(_TYPED_OK)
-    npc.remember("帮主角采了 2 根木材", importance=6)
-    npc.remember("帮主角修了屋顶", importance=7)
+    npc.remember("帮主角采了 2 根木材", importance=10)
+    npc.remember("帮主角修了屋顶", importance=10)   # 和 ≥ 反思阈值(2026-08-28 上调至 18)
     text = npc.maybe_reflect()
     refl = [e for e in npc.memory.all() if e["category"] == "reflection"]
     assert len(refl) == 3                          # 第 4 条被 TYPED_REFLECT_MAX 截断
@@ -132,8 +132,8 @@ def test_typed_unparsable_falls_back_to_legacy(tmp_path, monkeypatch):
     monkeypatch.setenv("NPC_MEMORY_TYPED", "1")
     npc = _npc(tmp_path, use_llm=True)
     npc._llm = _TypedLLM("苍靠得住，总帮主角办事。")
-    npc.remember("帮主角采了 2 根木材", importance=6)
-    npc.remember("帮主角修了屋顶", importance=7)
+    npc.remember("帮主角采了 2 根木材", importance=10)
+    npc.remember("帮主角修了屋顶", importance=10)   # 和 ≥ 反思阈值
     text = npc.maybe_reflect()
     assert text == "苍靠得住，总帮主角办事。"
     refl = [e for e in npc.memory.all() if e["category"] == "reflection"]
@@ -145,8 +145,8 @@ def test_typed_all_dupes_silently_advances(tmp_path, monkeypatch):
     monkeypatch.setenv("NPC_MEMORY_TYPED", "1")
     npc = _npc(tmp_path, use_llm=True)
     npc._llm = _TypedLLM('[{"mtype": "persona", "content": "旧结论", "importance": 8}]')
-    npc.remember("帮主角采了木材", importance=6)
-    npc.remember("帮主角修了屋顶", importance=7)   # 13 >= 12 达反思阈值
+    npc.remember("帮主角采了木材", importance=10)
+    npc.remember("帮主角修了屋顶", importance=10)   # 和 ≥ 反思阈值
     npc.memory.add("旧结论", importance=8, category="reflection")
     before = len(npc.memory.all())
     assert npc.maybe_reflect() is None             # 全撞车 → 静默翻篇
@@ -159,8 +159,8 @@ def test_off_uses_legacy_single_reflection(tmp_path):
     """回归锚: 开关关 + 同样的 LLM 输出 → 走旧单条路径, 不产多条。"""
     npc = _npc(tmp_path, use_llm=True)
     npc._llm = _TypedLLM(_TYPED_OK)
-    npc.remember("帮主角采了 2 根木材", importance=6)
-    npc.remember("帮主角修了屋顶", importance=7)
+    npc.remember("帮主角采了 2 根木材", importance=10)
+    npc.remember("帮主角修了屋顶", importance=10)   # 和 ≥ 反思阈值
     text = npc.maybe_reflect()
     assert text == _TYPED_OK                       # 旧路径: LLM 原话整段入库
     refl = [e for e in npc.memory.all() if e["category"] == "reflection"]

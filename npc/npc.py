@@ -29,9 +29,9 @@ from npc.memory_card import MemoryCardMixin, _reflect_rules  # 兼容旧测试�
 from agent.config_flags import env_flag
 from npc.memory import EV_DONE, EV_FAIL, NPCMemory
 from npc.persona import SAMPLE_NPC, build_system_prompt
-from npc.reviewer import (REVIEW_RETRY_HINT, APPROVAL_POLICY_VALUES, compile_task,
-                          get_manifest, get_resource_aliases,
-                          looks_like_intent, review_dialogue,
+from npc.reviewer import (REVIEW_RETRY_HINT, APPROVAL_POLICY_VALUES, _manifest_spec,
+                          compile_task, get_manifest, get_resource_aliases,
+                          looks_like_intent, render_action_tpl, review_dialogue,
                           set_approval as reviewer_set_approval, should_review)
 from npc.world import apply_action, default_world, find_path, observe
 
@@ -284,6 +284,36 @@ class NPC(TalkPipelineMixin, MemoryCardMixin):
         """按 NPC 粒度调整审批策略（Codex /approvals 对照）。"""
         return reviewer_set_approval(action, decision, self.approval_overrides)
 
+    @staticmethod
+    def _task_desc(task: Dict) -> str:
+        """账本 desc 人类可读: 清单模板(desc_tpl)优先, 缺省回退内置措辞。
+
+        任务书#05·B: 加动作不再改这里 —— 清单里写 "去{地点}" 即可。
+        模板缺失/非法 → 回退分支（默认清单世界行为与旧版逐字一致）。
+        """
+        action = str(task.get("action", ""))
+        filled = render_action_tpl(_manifest_spec(action).get("desc_tpl", ""), task)
+        if filled:
+            return filled
+        if action == "goto":
+            return f"去{task.get('地点', '那里')}"
+        if action == "follow_player":
+            return "跟着玩家走"
+        return str(task.get("task") or action)
+
+    @staticmethod
+    def _task_ack(task: Dict) -> str:
+        """承诺 ack 措辞: 清单模板(ack_tpl)优先, 缺省回退内置分支（任务书#05·B）。"""
+        action = str(task.get("action", ""))
+        filled = render_action_tpl(_manifest_spec(action).get("ack_tpl", ""), task)
+        if filled:
+            return filled
+        if action == "follow_player":
+            return "行，我跟着你。"
+        if action == "goto":
+            return f"好，我{NPC._task_desc(task)}。"
+        return f"好，我这就去弄{task['count']}个{task['resource']}给你。"
+
     def book(self, task: Dict) -> bool:
         """落账口 — 唯一允许创建 pending_task 的入口（B2 编译 + A 审查通过后调用）。
 
@@ -313,7 +343,7 @@ class NPC(TalkPipelineMixin, MemoryCardMixin):
                 _taskloop.LEDGER.book(self.actor_id, str(task.get("action", "")),
                                       params={k: v for k, v in task.items()
                                               if k != "action"},
-                                      desc=str(task.get("task") or task.get("action", "")))
+                                      desc=self._task_desc(task))
             except Exception as exc:
                 log.warning("npc_ledger_book_failed", npc=self.actor_id, error=str(exc))
         return True
@@ -335,7 +365,7 @@ class NPC(TalkPipelineMixin, MemoryCardMixin):
             return reason                           # 诚实拒绝，不空口答应
         if status == "no_consumer":
             return None   # 协议v1: 无消费者接盘 → 不承诺, 对话自然继续(诚实沉默)
-        return f"好，我这就去弄{task['count']}个{task['resource']}给你。"
+        return self._task_ack(task)   # 措辞单一来源(任务书#05·B: 清单模板优先)
 
     # ── §17 子代理: B2 编译 / A 语义审查（LLM 外壳, 规则层护栏不变）──
 

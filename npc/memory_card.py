@@ -16,11 +16,12 @@ from typing import List, Optional
 from agent.config_flags import env_flag
 from agent.logging_config import log
 from npc import safety as _safety
-from npc.memory import EV_DONE, EV_FAIL, MTYPES, MTYPE_DEFAULT, _canonical_terms
+from npc.memory import (CATEGORY_ARCHIVED, EV_DONE, EV_FAIL, MTYPES,
+                        MTYPE_DEFAULT, _canonical_terms)
 from npc.scheduler import P_REFLECT, SCHED
 
 # ── 反思归纳参数（阶段① 海马体升级, Generative Agents 同款语义）──
-REFLECT_IMPORTANCE_THRESHOLD = 12   # 未反思记忆重要性之和达阈值 → 触发
+REFLECT_IMPORTANCE_THRESHOLD = 18   # 未反思记忆重要性之和达阈值 → 触发（2026-08-28 12→18: 闲聊不凑数, 攒够大事才总结）
 REFLECT_MAX_ENTRIES = 8             # 一次反思最多纳入的条目数（防上下文过长）
 
 # ── TDAM 借鉴①(2026-08-26): 三分类反思参数 ──
@@ -184,7 +185,13 @@ class MemoryCardMixin:
         返回生成的反思文本；未触发 → None。
         """
         entries = self.memory.all()[self._reflected_upto:]
-        entries = [e for e in entries if e.get("category") != "reflection"][:REFLECT_MAX_ENTRIES]
+        # 任务书#06: archived(管家降级层)不进反思候选 — 已降级的流水账不得借
+        # 反思重新归纳成 reflection 还魂（只排除, 绝不删除, 证据链仍在卡上）。
+        # 过滤后下面重要性求和与指针推进都跟着这批走（推进量 = 过滤后批长,
+        # 别只滤不推 → 见风险表"同一批反复检"）。
+        entries = [e for e in entries
+                   if e.get("category") not in ("reflection", CATEGORY_ARCHIVED)
+                   ][:REFLECT_MAX_ENTRIES]
         if not entries:
             return None
         if sum(e.get("importance", 5) for e in entries) < REFLECT_IMPORTANCE_THRESHOLD:
@@ -384,11 +391,11 @@ class MemoryCardMixin:
         """遗忘合并（阶段③）: 重复主题合并成一条 + 弱旧记忆修剪。返回处理掉的条目数。
 
         合并/修剪后所有已见条目都已处理 — 反思进度重置到末尾，避免对旧条目重复反思。
-        TDAM 借鉴②: 尾部顺路更新 NPC 画像（开关关时直通返回零开销）。
+        2026-08-28: 画像是 LLM 慢变层, 不再与 consolidate(60 tick 零 LLM 巡逻)顺路绑定 —
+        触发点移到黎明(一日一次)由 server 驱动; 本方法保持纯规则零 LLM。
         """
         removed = self.memory.consolidate()
         self._reflected_upto = len(self.memory.all())
         if removed:
             self.save()
-        self.update_persona_profile()
         return removed

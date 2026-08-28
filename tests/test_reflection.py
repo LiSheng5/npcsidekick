@@ -31,8 +31,8 @@ class TestMaybeReflect:
         assert len([e for e in npc.memory.all() if e.get("category") == "reflection"]) == 0
 
     def test_reflect_when_threshold_met(self, npc):
-        npc.remember("帮主角采了 2 根木材", importance=6)
-        npc.remember("帮主角修了屋顶", importance=7)   # 13 >= 12
+        npc.remember("帮主角采了 2 根木材", importance=10)
+        npc.remember("帮主角修了屋顶", importance=10)   # 和 ≥ 反思阈值(2026-08-28 12→18)
         text = npc.maybe_reflect()
         assert text is not None
         reflections = [e for e in npc.memory.all() if e.get("category") == "reflection"]
@@ -41,24 +41,24 @@ class TestMaybeReflect:
         assert "帮主角" in text
 
     def test_no_re_reflect_same_batch(self, npc):
-        npc.remember("帮主角采了 2 根木材", importance=6)
-        npc.remember("帮主角修了屋顶", importance=7)
+        npc.remember("帮主角采了 2 根木材", importance=10)
+        npc.remember("帮主角修了屋顶", importance=10)
         npc.maybe_reflect()
         npc.remember("又帮主角捡了柴", importance=3)   # 新条目权重低，不够阈值
         assert npc.maybe_reflect() is None             # 不重复反思同一批
 
     def test_reflects_new_batch_later(self, npc):
-        npc.remember("帮主角采了 2 根木材", importance=6)
-        npc.remember("帮主角修了屋顶", importance=7)
+        npc.remember("帮主角采了 2 根木材", importance=10)
+        npc.remember("帮主角修了屋顶", importance=10)
         npc.maybe_reflect()
-        npc.remember("陪主角去河边", importance=6)
-        npc.remember("给主角摘了浆果", importance=6)   # 新一批 12 >= 12
+        npc.remember("陪主角去河边", importance=9)
+        npc.remember("给主角摘了浆果", importance=9)   # 新一批 和 ≥ 阈值
         assert npc.maybe_reflect() is not None
         assert len([e for e in npc.memory.all() if e.get("category") == "reflection"]) == 2
 
     def test_reflected_upto_persists(self, npc):
-        npc.remember("帮主角采了 2 根木材", importance=6)
-        npc.remember("帮主角修了屋顶", importance=7)
+        npc.remember("帮主角采了 2 根木材", importance=10)
+        npc.remember("帮主角修了屋顶", importance=10)
         npc.maybe_reflect()
         npc.save()
         restored = NPC.load("cang", store_dir="npc/store_test")
@@ -78,8 +78,8 @@ class TestReflectWithLLM:
         npc = NPC(store_dir="npc/store_test")
         npc.use_llm = True
         npc._llm = self._FakeLLM()
-        npc.remember("帮主角采了 2 根木材", importance=6)
-        npc.remember("帮主角修了屋顶", importance=7)
+        npc.remember("帮主角采了 2 根木材", importance=10)
+        npc.remember("帮主角修了屋顶", importance=10)
         text = npc.maybe_reflect()
         assert text == "苍靠得住，总帮主角办事。"
         reflections = [e for e in npc.memory.all() if e.get("category") == "reflection"]

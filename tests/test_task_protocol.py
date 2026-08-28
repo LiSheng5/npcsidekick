@@ -166,3 +166,91 @@ def test_stats_snapshot_shape():
     s = tl.LEDGER.stats()
     assert s["total"] == 1 and s["by_state"]["booked"] == 1
     assert s["pending_discussions"] == 0
+
+
+
+# ── 任务书#02: 协议 v1 dispatch→done 端点级冒烟(hello→talk落账→state派发→销账) ──
+
+GTA_ACTIONS_DIALECT = {
+    "follow_player": {"tier": 3, "approval": "ask", "params": []},
+    "goto": {"tier": 2, "approval": "ask", "params": ["地点"]},
+    "say": {"tier": 1, "approval": "allow", "params": ["text"]},
+}
+
+
+@pytest.fixture
+def task_client(monkeypatch, tmp_path):
+    """全 app TestClient: GTA 方言清单 + 消费者报到 + NPC_TASK_LOOP 开门。"""
+    from fastapi.testclient import TestClient
+
+    from npc import reviewer
+    from npc.npc import NPC
+    from npc.server import create_npc_server
+
+    monkeypatch.setenv("NPC_TASK_LOOP", "1")
+    npc = NPC(store_dir=str(tmp_path))
+    npc.use_llm = False          # 规则模式(零 LLM, 确定性)
+    client = TestClient(create_npc_server({"cang": npc}))
+    r = client.post("/api/manifest", json={"actions": GTA_ACTIONS_DIALECT})
+    assert r.status_code == 200
+    r = client.post("/api/consumer/hello",
+                    json={"name": "gta_mod", "version": "1.9",
+                          "verbs": ["follow_player", "goto", "say"]})
+    assert r.json()["ok"] is True
+    yield client
+    reviewer.load_manifest(None)   # 还原全局清单, 防污染其他用例
+
+
+def _pending(client, action):
+    st = client.get("/api/state", params={"consumer": "gta_mod"}).json()
+    out = [t for t in st["pending_tasks"]
+           if t["npc_id"] == "cang" and t["action"] == action]
+    return out
+
+
+def test_follow_dispatch_then_done_roundtrip(task_client):
+    """跟我走 → 落账 → 派发 → completed → EV_DONE 记忆 + 事件流可见。"""
+    r = task_client.post("/api/talk", json={"npc_id": "cang", "message": "跟我走"})
+    assert r.status_code == 200
+    assert "跟着你" in r.json()["reply"]
+
+    tasks = _pending(task_client, "follow_player")
+    assert len(tasks) == 1 and tasks[0]["state"] == "dispatched"
+    tid = tasks[0]["task_id"]
+
+    d = task_client.post("/api/task_done",
+                         json={"task_id": tid, "status": "completed"})
+    assert d.status_code == 200 and d.json()["ok"] is True
+    assert _pending(task_client, "follow_player") == []   # 终态不再下发
+    # EV_DONE 记忆
+    mem = task_client.get("/api/memory", params={"npc_id": "cang"}).json()
+    assert any("完成:" in e["content"] and "跟着玩家走" in e["content"]
+               for e in mem["entries"])
+    # 事件流: 接下任务 + 完成任务
+    evs = task_client.get("/api/events", params={"since": 0}).json()["events"]
+    assert any(e["type"] == "task" and e.get("status") == "started" for e in evs)
+    assert any(e["type"] == "task" and e.get("status") == "done"
+               and "跟着玩家走" in e.get("desc", "") for e in evs)
+
+
+def test_goto_failed_creates_discussion_event(task_client):
+    """陪我去河边 → 派发 → failed → EV_FAIL 记忆 + 商议字幕(say 事件)。"""
+    r = task_client.post("/api/talk", json={"npc_id": "cang", "message": "陪我去河边"})
+    assert r.status_code == 200
+    assert "河边" in r.json()["reply"]
+
+    tasks = _pending(task_client, "goto")
+    assert len(tasks) == 1 and tasks[0]["state"] == "dispatched"
+    assert tasks[0]["params"].get("地点") == "河边"
+    tid = tasks[0]["task_id"]
+
+    d = task_client.post("/api/task_done",
+                         json={"task_id": tid, "status": "failed",
+                               "detail": "河里涨水过不去"})
+    assert d.status_code == 200 and d.json()["ok"] is True
+    # EV_FAIL 记忆 + 失败商议字幕事件(say)
+    mem = task_client.get("/api/memory", params={"npc_id": "cang"}).json()
+    assert any("没做成:" in e["content"] and "河边" in e["content"]
+               for e in mem["entries"])
+    evs = task_client.get("/api/events", params={"since": 0}).json()["events"]
+    assert any(e["type"] == "say" and "没办成" in e.get("text", "") for e in evs)

@@ -619,8 +619,8 @@ avg_wait_ms}`；`/api/version.features.scheduler`（bool）。OFF 时也有该�
 6. ~~温层向量锚点~~ **已完成(2026-08-25 小项池)**：NPC_VECTOR_ANCHOR 开关(默认关) +
    chromadb ONNX 可选依赖, 语义命中相关度+2.0 加权、写入镜像、consolidate 出索引联动、
    旧卡自愈回填; 测试 6 例全 mock 零模型下载。剩余: Godot 清理包 —— 可继续出 Trae 任务书
-7. **M2 mod 消费循环**（协议 v1·M2，下一优先级）：SHVDN 认领 pending_tasks →
-   goto/follow/say 三动词执行 → task_done 销账接线；hello 心跳由 mod 启动时发起
+7. ~~M2 mod 消费循环~~ **已完成（2026-08-28，任务书#02，详见 §24）**：SHVDN 认领
+   pending_tasks → follow_player/goto 两动词执行 → task_done 销账接线；hello 心跳由 mod 启动时发起（say 走既有对话通道，不在任务引擎内）
 
 ### 运行状态备注
 - 会话内脑服(pwsh-4)带全开关在跑；会话结束即停，日常自启用 bat
@@ -740,17 +740,195 @@ save() 防重复落盘(blob 比对)随⑥落地。
   细节仍由记忆卡按需召回；低层原始卡永不删（"低层保留证据, 高层保留结构"理念,
   同时印证 R 系清洗未来不可做成物理删除式）。
 
-### 24.3 ④ BM25-IDF 关键词兜底 `NPC_BM25_RECALL`
-- retrieve 相关度取 max(旧公式, IDF 加权命中)：稀有词 log(1+N/df) 权重大于
-  高频词，修正"我/的"与"矿洞"同权问题；纯 Python 零依赖零 IO（df 每次 retrieve 现算）。
-- max 融合只升不降 —— 开关关时排序与旧版完全一致（回归锚 B1）；与温层向量锚点
-  正交可叠加（一个管词频稀有度, 一个管语义）。
+### 24.3 ④ BM25 关键词兜底 `NPC_BM25_RECALL`（2026-08-28 任务书#03 升级为真 BM25）
+- 早期实现了"IDF 加权重合度"借名"BM25-IDF"——任务书#03 已升级为真 BM25：
+  score = Σ idf(t)·[tf·(k1+1)]/[tf + k1(1-b+b·dl/avgdl)]，k1=1.2, b=0.75，
+  idf = ln(1+(N-df+0.5)/(df+0.5))，tf 保留词频不做 set 去重。
+- retrieve 相关度取 max(旧公式, BM25)：只升不降 —— 开关关时排序与旧版完全一致
+  （回归锚 B1）；同一批记忆 query/entry 各只分词一次（分词缓存, A 项）。
+- 与温层向量锚点的融合从"+2.0×语义分"线性加分升级为 RRF 倒数秩融合(k=60)：
+  两路名次对等融合, 向量分数绝对值不再压过关键词排序。
 
 ### 24.4 测试与运维注记
 - 新增 `tests/test_memory_typed.py` 16 例 / `test_npc_persona.py` 7 例 /
-  `test_bm25_recall.py` 4 例；语料用空格分隔 ASCII 词保证 jieba 有无不影响确定性。
+  `test_bm25_recall.py` 8 例（任务书#03 增 tf 分量例 + 中文语料 3 例, 含 jieba 整句路径;
+  语料空格分隔保证 jieba 有无不影响确定性）。
 - 选入方式：bat 或环境变量加 `NPC_MEMORY_TYPED=1` / `NPC_PERSONA=1` /
   `NPC_BM25_RECALL=1`（可单独选, 彼此独立, 现读可热切）。
 - 调研副产品（本机排障速查）：Schannel 凭证全灭（curl.exe 与 Invoke-WebRequest
   同报 SEC_E_NO_CREDENTIALS）→ Node.js OpenSSL 拉 codeload ZIP 是可靠下载姿势；
   git 直调 clone 撞沙箱命名管道边界（remote-https stdin pipe EPERM）。
+## 25. 安检门重构：罐头拒绝退役，模型婉拒（2026-08-27）
+
+> 用户拍板："L1 系统提示去掉，大模型会婉拒就可以"——模型自身对齐 + 安全宪法
+> 足以兜底，词表式过度防御反而干扰模型与玩家体验（游戏语境误杀：石器打猎聊"战场"、
+> GTA 家人聊"喝酒"都会被软旗转话题，极度出戏）。
+
+**改动（§22 的 L1 行为升级，三不清除原理不变）**：
+
+| 项 | 旧（§22） | 新（§25） |
+|---|---|---|
+| L1 命中后 | 零网关 + 罐头拒绝话术池直返（"这个咱就不聊了"） | **走 LLM 婉拒**：占位符替原文 + `hard_hint` 注入 system（以人设口吻婉拒、不展开不复述不追问不提及安检），模型自对齐 + 宪法红线三道锁 |
+| 快路径 | L1 仍先过 recall/command | 违规轮**跳过** recall/command（不许引用记忆卡/接单，防诱导圈） |
+| L1 词表 | 含圣战/吉哈德/ISIS/ISIL/基地组织/塔利班（组织/宗教名，有正常语境） | 删组织/宗教词——只剩"任何语境都不该出现"：恐袭手段/制爆制毒/色情/自残教程/违法教程/政权红线 |
+| L2 词表 | 军事历史/武器/暴力/烟酒/赌博/政治讨论 6 大类（游戏语境全误杀） | 只剩擦边 3 词（黄段子/骚话/讲个荤的）——这类场景内容归还模型自对齐 + 安全宪法 |
+| 兜底 | — | LLM 不可用 → 规则话术兜底（保 transit，不崩）；原文全程只出现在哈希日志 |
+
+**文件**：`npc/safety.py`（refusal()/_REFUSALS 移除、`hard_hint()` 新增、Verdict.refusal 弃用兼容）、
+`npc/talk_pipeline.py`（L1 safe_input 全链替换 + 跳快路径）、`npc/safety_words_L1/L2.txt`（清瘴）、
+`tests/test_safety_gate.py`（L1 模型婉拒/跳快路径/LLM 兜底/语境词不命中，共 16 例）。
+全量 **732 passed**（净增 +2）。
+
+**安全边界说明**：这是"概率防线收紧"，不是解锁——L1 语义防线 = 模型自对齐（软）
++ 宪法红线句（每次 prompt 注入）+ hard_hint（语境提示）三层；违规原文仍不落盘
+（哈希日志/占位符历史/写卡口拒收/反思材料天然过滤）。
+
+## 26. 记忆整理频率分层：零 LLM 照旧, LLM 一日一次（2026-08-28）
+
+> 用户拍板："0LLM 的就按照之前的频率"。原则 = **频率跟随成本**：
+> 纯规则（零 LLM）保持原档位；花 LLM 的层降为一日一次，LLM 触发门槛收紧。
+
+**调整表**：
+
+| 项 | 频率 | 成本 | 变化 |
+|---|---|---|---|
+| 遗忘合并 `consolidate` | 60 tick（游戏 1 小时）| 纯规则 | ✅ 不变 |
+| 反思体检 `maybe_reflect` 触发位 | 20 tick | 纯检查 | ✅ 不变 |
+| **反思 LLM 触发阈值** | — | 💸 LLM | 🔧 `REFLECT_IMPORTANCE_THRESHOLD` 12→18（闲聊不凑数, 攒够大事才总结）|
+| **画像更新** | ~~60 tick 顺路 ×24/日~~ → **黎明跨点 1 次/日** | 💸 LLM | 🔧 从 consolidate() 拆出 → server `_tick_loop` 检测 `_is_dawn_boundary`(小时 5→6 边界帧) → `_dawn_persona_batch`（非流民批量, to_thread 同反思纪律）|
+
+**改动**：`npc/memory_card.py`（consolidate 不再顺路画像; 阈值常量）、
+`npc/server.py`（`_game_hour_now` 真实时钟优先/未同步 tick 自推、`_is_dawn_boundary` 纯函数、
+`_dawn_persona_batch` 每游戏日一帧触发）、`tests/test_npc_persona.py`（画像用例改直接调
+`update_persona_profile` + 黎明检测 4 例）、`tests/test_memory_typed/test_reflection/test_memory_dedup`
+（阈值对齐 18, 重要性数据上调）。全量 **738 passed**。
+
+**里程盘算**：游戏日 LLM 记忆相关调用 ≈ 24 次 → **1-2 次**（画像 1 + 反思按需 0-1）；
+次日黎明前玩家随时可看画像缓慢趋新, 不做"每小时改一遍"的重复劳动。
+
+**挂账关闭（2026-08-28 任务书#04）**："压缩日记摘要留给管家"（world.py 注释挂账）
+已关 —— 记忆管家(npc/housekeeper.py)接管归档压缩与三触发，详见 §27。
+
+
+## 24. 任务回路最小闭环（2026-08-28 已实施 · 任务书#02）
+
+> 任务回路即原 §10 诉求：M1（2026-08-25）升格协议 v1（账本/协商/链式/商议），
+> M2（本任务）补上"需要与游戏端移动联动"的 follow_player / goto 执行回路。
+> 全量回归 **757 passed**（基线 748 + 新增 9：词表编译 5 / 清单校验 2 / 端点冒烟 2）。
+
+### 24.1 最小闭环
+玩家说"跟我走" → B2 词表编译 follow_player（规则快路径零 LLM）→ guarded_book
+三道门（审批 ask / 白名单 / 能力协商）→ 账本 booked → /api/state 首派 dispatched
+（世界日志"接下任务"）→ mod TaskExecutor 认领：ped 持续跟随玩家 → 玩家下新指令
+supersede 才停。goto（"陪我去河边"→ {"action":"goto","地点":"河边"}）→ mod 地标表
+翻坐标走路 → 到达 POST /api/task_done completed（EV_DONE 记忆 + "完成任务"事件）/
+未知地点·超时 failed（EV_FAIL 记忆 + 商议字幕 say 事件）。玩家中途走远/任务超时走
+taskloop 既有僵尸回收路径，未新增回收到。
+
+### 24.2 改动面
+- 脑侧：`gta_actions.json` follow_player(tier3/ask/params=[])、goto(tier2/ask/params=["地点"])；
+  `reviewer.py` 词表(_FOLLOW_PHRASES/_GOTO 正则) + compile_task 任务回路优先 + review_task
+  非资源动作豁免资源可行性；`npc.py` 规则快路径文案 + 账本 desc；`events_archive.py` 新事件
+  类型 task(started/done)；`server.py` 首派/完成写世界日志
+- mod 侧：NPCSidekickGTA.cs v1.9 —— hello 心跳 + 1s 轮询 pending_tasks + TaskExecutor
+  (follow/goto) + 地标表 + task_done 销账；对话站定优先，回 Idle 自动重发
+- 兼容：默认清单零变化——非方言世界（旧石器）里"跟我走"只是闲聊不接单
+
+### 24.3 验收口径
+本地无法真机跑 GTA：mod 侧以代码走查交付（地标坐标为粗略估算待真机校准），
+协议全链由 TestClient 端点冒烟兜底（follow completed 全链 / goto failed 商议全链），
+主控真机复核后修 Landmarks 字典即可。
+
+
+## 27. 记忆管家：一键整理 · 三触发（2026-08-28 已实施 · 任务书#04）
+
+> 收拢散落的记忆维护动作为一个管家循环（npc/housekeeper.py），总开关
+> `NPC_HOUSEKEEPER`（默认关，家规选择加入）。全量回归 **773 passed**（761 基线 + 12 新增）。
+
+### 27.1 循环与触发器
+| 触发 | 判定 | 动作 | 成本 |
+|---|---|---|---|
+| 🌅 黎明 | `_is_dawn_boundary`（小时 5→6 边界帧，§26 同款）| 全量大整理：归档压缩 + 归纳分层 + 画像（LLM 一日一次）| 💸 |
+| 🍃 空闲 | SCHED 深度全 0 静置 ≥20 tick 且过 120 tick 冷却 | 小整理：滚窗自主日志 → 摘要压缩 | 零 LLM |
+| ⏰ 快满 | 记忆卡 token 粗估 ≥ NPC_MEMORY_TOKEN_MAX(默认 6000) | 应急：归纳分层腾空间（每 60 tick 同 consolidate 节拍巡检）| 💸 |
+
+### 27.2 三大件
+- **归档压缩**：world.py `compress_archive_log` —— 连续 autonomous 段(≥3)压成
+  `{"i": 段首绝对索引, "text": "[自主摘要]…"}` 一行；interactive 逐行不变；
+  摘要行前缀不匹配任何事件正则（events 回归钉死）；`_log_offset` 逻辑条数不变，
+  冷段 since 回放不炸，旧客户端零感知。幂等 + 原子写（.tmp → replace）。
+- **归纳分层**：`tidy_memory` —— 流水账候选（general/imp≤6/无 mtype/未 pin）
+  过 SCHED(P_REFLECT) LLM 三分类提炼（复用 `_parse_typed_reflection` 语义）：
+  精确同文补 mtype（重判定）／提炼条落 reflection（合并）／源候选降级
+  `general→archived`（退出检索上下文，证据链仍在卡上——永不物理删除）；
+  红线三件套（importance≥8 / reflection|consolidated / pinned:true）只读不动。
+- **整理报告**：`npc/store/{id}_report.jsonl` 逐次追加 trigger+actions（op/内容/原因）
+  —— 改了哪条、为什么，查得回滚得回。
+
+### 27.3 纪律与接线
+- 管家内 LLM 一律 `SCHED.invoke(P_REFLECT)`；触发批次由 server `_tick_loop`
+  整批 `asyncio.to_thread`（§19 反思冻循环教训）；流民（ephemeral）全跳过。
+- 开关关 = 零差异：黎明仍走旧 `_dawn_persona_batch`（§26 行为不变），
+  空闲/快满不接；`maybe_reflect` 20 tick 体检与 60 tick consolidate 原频率不动。
+- 测试：tests/test_housekeeper.py 12 例（触发判定/压缩段/幂等/摘要行不入事件/
+  游标契约/红线/降级/补型/报告/流民/解析失败静默）；冒烟
+  `scripts/smoke_housekeeper.py`（黎明模拟输出整理报告示例）。
+- **归档语义收口（任务书#06）**：降级层 `archived` 此前的"退出"只覆盖了检索
+  （`active()`）与上下文两条消费路径，反思与合并两条漏了 —— 已降级流水账还能被
+  `maybe_reflect` 归纳成 reflection 借尸还魂回 LLM 上下文，或被 `consolidate`
+  的同主题合并卷走、被弱旧修剪删掉。现补两条：**反思候选批排除 archived**
+  （指针推进量随过滤后批走，别只滤不推）+ **consolidate 分组与修剪候选均排除**
+  （不合并、不修剪、不触碰）。只做"不参与"，绝无删除路径 —— archived 物理留在
+  卡文件里，总量只增不减是设计内行为。测试 tests/test_archive_seal.py 6 例
+  （反思跳过/指针按过滤批推进/不合并也不修剪/摘要不引用降级条目/一轮跑完
+  逐字节不变/还魂检查）。
+
+## 28. 任务回路补强（2026-08-28 已实施 · 任务书#05）
+
+> 2026-08-28 主控简洁性 review 的三个跳过项，同属任务回路（#02）语义闭环补强：
+> **A** 派发事件从读路径搬到事件队列 / **B** 动作呈现收进 manifest 模板 /
+> **C** 地点识别升级为声明驱动的地点词典（深度版，用户拍板）。
+> 全量回归 **796 passed**（777 基线 + 19 新增）。
+
+### 28.1 A · ledger 派发事件队列
+- `taskloop.TaskLedger` 加 `_dispatch_events`（与 `_discussions` 同款 pop 即消费），
+  `dispatch_view()` 在 booked→dispatched 转换那一刻入队，新增 `pop_dispatch_events()`。
+- `server.pump_task_dispatch(world)` = 驱动转换 + `flush_task_events()`，接线在
+  `_tick_loop` 每帧与手动 `/api/tick`；`flush_task_events` 另在 `/api/events` 与
+  SSE 返回增量前补一次（零延迟可见）。`/api/events/stream` 同款。
+- 删 `_dispatch_with_log` 闭包与 `_dispatched_seen` 集合 —— `GET /api/state`
+  回归纯读，派发不再依赖客户端 poll（mod 断连/只走事件流也丢不了）。
+- 内存态取舍与 discussions 一致：账本本就内存态，重启后重新派发写一次日志即正确语义。
+
+### 28.2 B · manifest 动作模板
+- 动作 spec 新增可选 `desc_tpl` / `ack_tpl`（占位符 = 任务单自身的键，如
+  `{地点}`/`{resource}`/`{count}`）；`load_manifest` 不强制校验，缺省空串。
+- `NPC._task_desc` / 新增 `NPC._task_ack`：优先模板，回退内置分支（默认清单世界
+  逐字不变）；`render_action_tpl` 用 `format_map` + 缺失返回空串的兜底字典，
+  模板非法（花括号不配对）或值含 `{}` 都不炸（只 format 模板本身，不二次解析值）。
+- `/api/manifest` 响应只在清单真声明了模板时才带这两个字段 —— 未声明模板的世界
+  响应字段与旧版一致（协议零破坏）。
+- 默认内置清单**故意不补模板**：保留代码内置措辞作为回退路径的活样本（两条路径
+  都有测试钉住）；真使用方 `npc/adapters/gta_actions.json` 已补
+  follow_player / goto / drive_to 三套模板。新增动作从此只改清单一处。
+
+### 28.3 C · 地点词典（声明驱动）
+- `reviewer.load_place_lexicon_from_world(world, extra)`（照抄资源词典同款规则）：
+  规范地名 = `world["locations"]` 的 key；别名来自 location 可选 `aliases`、
+  `world["_place_aliases"]`、清单 `places` 段（`set_manifest_places` 暂存）。
+- `get_place_aliases()` 未加载 → `None`；`match_place()` 按**最长命中**归一
+  （“陪我去老家的河边”命中“老家的河边”而非“河边”）；未命中才回退旧尾词清洗
+  （`_clean_place` 原样保留不重构，10 字截断仅作最后兜底）。
+- 痛点修复：长地名不再被截成另一个地名 → mod 地标表查得到 → 玩家不再莫名收到
+  任务失败商议。零地点世界（纯对话）保持未加载，行为与旧版逐字节一致。
+- 接线：`bootstrap.py` 世界就绪后与资源词典并列加载；`/api/manifest` POST 暂存
+  `places` 段，`reset` 时一并清空；`parse_manifest_doc` 支持新版 `places` 段。
+
+### 28.4 测试与回归锚
+`tests/test_taskloop_reinforce.py` 19 例：A 5（转换即事件/flush 只写一次/
+队列深度观测/不 poll 也落日志/state 纯读不写日志+重复 poll 不重复）、
+B 6（默认回退逐字一致/模板填充/新动作只改清单/花括号与坏模板安全/
+gta_actions.json 端到端/manifest 响应隐藏空模板）、
+C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断/
+零地点保持未加载/places 段解析）。
+每组首例都是回归锚：未加载清单与地点词典时，行为与旧版逐字一致。

@@ -49,12 +49,13 @@ from agent.llm.client import llm_retry_enabled
 from npc import safety as _safety
 from npc import taskloop as _taskloop
 from npc import events_archive
+from npc import housekeeper as _hk
 from npc.memory import EV_DONE, EV_FAIL
 from npc.npc import NPC, memory_dedup_enabled
 from npc.reviewer import (approval_table, set_approval, get_manifest,
                           load_manifest, manifest_is_default,
-                          parse_manifest_doc, set_manifest_resources,
-                          get_manifest_resources )
+                          parse_manifest_doc, set_manifest_places,
+                          set_manifest_resources, get_manifest_resources)
 from npc.scheduler import SCHED, P_TALK, SchedulerTimeout, tick_round
 
 from npc.tts import available as tts_available
@@ -104,6 +105,40 @@ def _tick_interval() -> float:
     except ValueError:
         return TICK_INTERVAL
 
+
+def pump_task_dispatch(world_obj: Dict) -> int:
+    """世界推进一帧时的任务派发泵（任务书#05·A）: 驱动 booked→dispatched 转换,
+    并把转换事件落进世界日志。
+
+    派发不再依赖客户端 poll /api/state —— 世界推进(tick_loop 每帧 / 手动 tick)
+    自己就会派发并记账, mod 断连或只走 /api/events 也丢不了事件。
+    返回本次落盘的日志条数。
+    """
+    _taskloop.LEDGER.dispatch_view()
+    return flush_task_events(world_obj)
+
+
+def flush_task_events(world_obj: Dict) -> int:
+    """把账本派发事件队列落进世界日志（任务书#05·A）。
+
+    派发(booked→dispatched)在账本里只入队不写日志 —— 日志落盘改由消费方驱动:
+      · 主 flush 点 = _tick_loop 每帧 → mod 断连 / 客户端只走 /api/events 也不丢;
+      · 即时 flush 点 = 事件流端点(/api/events + SSE) → 事件零延迟可见。
+    pop 即消费 → 多客户端 poll / 断连重连都只写一次日志, 不重复。
+    日志行格式与 events_archive.parse_log_line 的 task 正则对齐（协议零破坏）。
+    账本故障降级: 不抛异常, 最多是这一帧少一条日志。
+    """
+    try:
+        events = _taskloop.LEDGER.pop_dispatch_events()
+    except Exception:
+        return 0
+    if not events:
+        return 0
+    log_list = world_obj.setdefault("log", [])
+    for ev in events:
+        log_list.append(f"{ev['npc_id']} 接下任务: {ev['desc']}")
+    return len(events)
+
 # 语音合成超时（秒）— 语音=锦上添花，超时就别等（文本保底）
 TTS_TIMEOUT_SEC = 5.0   # 收紧: 给游戏端 8s 超时留余量
 
@@ -138,12 +173,30 @@ def _reflect_batch(npcs: list) -> None:
         npc.maybe_reflect()
 
 
+def _game_hour_now(world: Dict) -> int:
+    """当前游戏小时（0-23）: 真实同步优先, 未同步回退 tick 自推 (8 + tick//60) % 24。"""
+    gh = world.get("_game_hour")
+    if isinstance(gh, (int, float)) and int(gh) >= 0:
+        return int(gh) % 24
+    return (8 + int(world.get("_tick", 0)) // 60) % 24
+
+
+def _is_dawn_boundary(prev_hour, now_hour) -> bool:
+    """黎明边界: 小时从 5 跨向 6 → True（每游戏日只在那一帧触发）。"""
+    return (prev_hour is not None and prev_hour != now_hour
+            and now_hour == 6 and prev_hour == 5)
+
+
 async def _tick_loop(world, npcs: Dict[str, NPC]) -> None:
     """后台自主循环（村民日常）: 每帧 tick_round + 转换点落盘。单帧异常不杀循环。"""
     tick_count = 0
+    hk_gate = _hk.TriggerState()   # 任务书#04: 管家触发器状态机(每个循环独立)
     while True:
         await asyncio.sleep(_tick_interval())
         tick_count += 1
+        hk_on = _hk.enabled()      # 每 tick 读一次(简洁性 review: 不再 3 次重复读)
+        # 任务书#05·A: 每帧驱动派发 + 落日志 — 不依赖客户端 poll, mod 断连也不丢
+        pump_task_dispatch(world)
         try:
             events = tick_round(world, npcs, rng=random.Random())
             _save_on_transitions(npcs, events)
@@ -161,6 +214,35 @@ async def _tick_loop(world, npcs: Dict[str, NPC]) -> None:
                 for npc in npcs.values():
                     if not getattr(npc, "ephemeral", False):
                         npc.consolidate()
+            # 黎明整理(§26): 画像层是 LLM 慢变层 — 一日才修订一次。触发=
+            # 游戏小时跨向 6:00 的边界帧（_is_dawn_boundary）; 管家开启时升级为
+            # 全量大整理(压缩+归纳+画像), 关闭时保持旧行为(仅画像, 同一份实现
+            # housekeeper.persona_batch)。与反思同款纪律: 含 LLM 调用必须整批
+            # 挪进 to_thread, 不得冻事件循环。
+            _gh = _game_hour_now(world)
+            if _is_dawn_boundary(world.get("_prev_hour"), _gh):
+                if hk_on:
+                    await asyncio.to_thread(_hk.dawn, world, npcs)
+                else:
+                    await asyncio.to_thread(_hk.persona_batch, npcs)
+            world["_prev_hour"] = _gh
+            # 记忆管家(任务书#04, NPC_HOUSEKEEPER=1): 🍃 空闲小整理(零 LLM) +
+            # ⏰ 快满应急(LLM 过 SCHED → 整批 to_thread, §19 冻循环教训)。
+            # 触发判定收在 housekeeper.TriggerState(简洁性 review): 本层只接线。
+            if hk_on:
+                want = hk_gate.on_tick(busy=any(SCHED.snapshot()["depth"].values()))
+                if want == "minor":
+                    try:
+                        await asyncio.to_thread(_hk.minor, world)
+                    except Exception as exc:
+                        log.warning("housekeeper_minor_failed", error=str(exc))
+                elif want == "emergency":
+                    limit = _hk.token_limit()
+                    urgent = [n for n in npcs.values()
+                              if not getattr(n, "ephemeral", False)
+                              and _hk.should_emergency(n.memory, max_tokens=limit)]
+                    if urgent:
+                        await asyncio.to_thread(_hk.emergency_batch, urgent)
             # 协议 v1: 僵尸账回收(dispatched 超 NPC_TASK_TIMEOUT 未销账 → failed+商议)
             try:
                 _taskloop.LEDGER.reap_zombies()
@@ -244,17 +326,21 @@ def _apply_context(world: Dict, context: Optional[Dict]) -> None:
 
 
 def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
-                      world_id: str = "") -> FastAPI:
+                      world_id: str = "",
+                      personas_dir: str = "") -> FastAPI:
     """构建 NPCSidekick Web 服务（工厂函数，便于测试注入）。
 
     npcs: {id: NPC} 多 NPC 共享世界。默认加载示例村庄。
     world_id: 本实例的世界命名空间（多世界隔离; 空 = 单世界模式,不校验）。
+    personas_dir: 制作者人设目录（npc/personas/<id>.json; 空 = 项目默认, 测试注入临时目录）。
     后台自主循环随 FastAPI lifespan 启动 — TestClient 不进 with 上下文则不启动（测试确定性）。
     """
     if npcs is None:
         world, npcs = load_village()
     else:
         world = next(iter(npcs.values())).world   # AI Town 模式: 共享世界
+
+    personas_path = Path(personas_dir or _BASE_DIR / "npc" / "personas")
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
@@ -398,6 +484,39 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         """NPC 列表（前端切换角色用）。"""
         return {"npcs": [{"id": n.persona["id"], "name": n.persona.get("name", n.persona["id"])} for n in npcs.values()]}
 
+    # ── 制作者人设 CRUD（2026-08-27 关系网 "新建 NPC"）─────────────────────
+
+    @app.get("/api/personas", dependencies=[Depends(_verify_origin)])
+    async def list_personas() -> Dict:
+        """人设清单（关系网画布数据源）: npc/personas/*.json → 全量 dict 列表。"""
+        from npc.persona_loader import load_personas_from_dir
+        return {"personas": list(load_personas_from_dir(str(personas_path)).values())}
+
+    @app.post("/api/personas", dependencies=[Depends(_verify_origin)])
+    async def create_persona(request: Request) -> Dict:
+        """新建人设: body = persona JSON → 校验 → 写 <personas>/<id>.json。
+
+        与 cang.json/ali.json 同格式（REQUIRED_FIELDS 缺一不可）。返回值 path 可见,
+        关系网提示"重启大脑服务器生效"。已存在 → 409（防误覆盖制作者手改的人设）。
+        """
+        body = await request.json()
+        pid = body.get("id", "") if isinstance(body, dict) else ""
+        if not isinstance(pid, str) or not _DYNAMIC_ID_RE.match(pid):
+            raise HTTPException(status_code=400,
+                                detail="id 不合法: 1~32 位字母/数字/_/-")
+        target = personas_path / f"{pid}.json"
+        if target.exists():
+            raise HTTPException(status_code=409, detail=f"人设已存在: {pid}（要改请直接编辑文件）")
+        from npc.persona_loader import validate_persona_dict
+        try:
+            cleaned = validate_persona_dict(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        personas_path.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "npc_id": pid, "path": f"npc/personas/{pid}.json",
+                "note": "重启大脑服务器后生效"}
+
     @app.get("/api/npc", dependencies=[Depends(_verify_origin)])
     async def get_npc_info(npc_id: str = "cang") -> Dict:
         """人设（页面数据驱动 — 制作者换 NPC 只需换这份数据）。"""
@@ -442,6 +561,8 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
             "tick": first.world.get("_tick", 0),
             "log_tail": first.world["log"][-10:],        # 气泡差分用（碰面说话）
             # 协议 v1·任务下发(booked→dispatched 首派标记) — mod 认领执行后 POST /api/task_done
+            # 任务书#05·A: 本端点纯读无写副作用 —— 派发事件由账本入队,
+            # _tick_loop 每帧 / 事件流端点 flush 进世界日志(断连也丢不了)。
             "pending_tasks": _taskloop.LEDGER.dispatch_view(),
         }
 
@@ -465,6 +586,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
           subagent= B2/A 子代理生命周期 (§17)
         """
         first = next(iter(npcs.values()))
+        flush_task_events(first.world)   # 任务书#05·A: 返回增量前落盘, 事件零延迟
         events, total = events_archive.events_since(first, since)
         return {
             "events": events,
@@ -493,6 +615,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                 while True:
                     if await request.is_disconnected():
                         break
+                    flush_task_events(first.world)   # 任务书#05·A
                     evs, total = _events_since(first, cursor)   # §18: 轮转+偏移+冷回放统一收口
                     for ev in evs:
                         yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
@@ -520,6 +643,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
             body = {}
         seed = body.get("seed") if isinstance(body, dict) else None
         rng = random.Random(seed) if isinstance(seed, int) else random.Random()
+        pump_task_dispatch(world)   # 任务书#05·A: 推帧即派发(与 tick_loop 同款)
         events = tick_round(world, npcs, rng=rng)
         _save_on_transitions(npcs, events)
         return {"tick": world.get("_tick", 0), "events": events}
@@ -606,6 +730,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                 npc.pending_task = None
             if t["state"] == "completed":
                 npc.remember(f"{EV_DONE}{t['desc']}", importance=8)
+                npc.world["log"].append(f"{t['npc_id']} 完成任务: {t['desc']}")
             elif t["state"] == "failed":
                 npc.remember(f"{EV_FAIL}{t['desc']}（{t['error']}）", importance=6)
                 for d in _taskloop.LEDGER.discussions(t["npc_id"])[-1:]:
@@ -818,10 +943,15 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         body = await request.json()
         if body.get("reset"):
             load_manifest(None)
+            set_manifest_resources(None)
+            set_manifest_places(None)   # 任务书#05·C
             return {"ok": True, "is_default": True, "actions": get_manifest()}
         try:
             parsed = parse_manifest_doc(body.get("actions") if "actions" in body else body)
             load_manifest(parsed["actions"])
+            # 词典段暂存: 世界就绪时由 bootstrap 并入(与 resources 同款)
+            set_manifest_resources(parsed.get("resources"))
+            set_manifest_places(parsed.get("places"))
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return {"ok": True, "is_default": manifest_is_default(), "actions": get_manifest()}

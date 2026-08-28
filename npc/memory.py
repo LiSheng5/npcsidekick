@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections import Counter
 from typing import Dict, List, Optional
 
 from agent.config_flags import env_flag
@@ -42,14 +43,19 @@ EV_FAIL = "没做成: "
 MTYPES = ("persona", "episodic", "instruction")
 MTYPE_DEFAULT = "episodic"
 
+# 管家降级层(任务书#04): 流水账 general→archived 后退出检索上下文,
+# 证据链仍在卡上永不物理删除。语义由 memory(卡 owner) 单点定义,
+# 消费方(housekeeper/retrieve/format_for_context)只认本常量。
+CATEGORY_ARCHIVED = "archived"
+
 # 阶段② 轻量海马体: 规范词 → 同义词族（中文同义召回，不依赖 embedding）
 # 只收游戏世界的稳定名词（资源/地点/角色），避免过度匹配
 _ENTITY_SYNONYMS: Dict[str, frozenset] = {
-    "木材": frozenset({"木材", "木头", "柴", "木料", "原木", "木", "树"}),
+    "木材": frozenset({"木材", "木头", "柴", "柴火", "木料", "原木", "木", "树"}),
     "浆果": frozenset({"浆果", "果子", "野果", "果实"}),
     "石头": frozenset({"石头", "岩石", "石块", "石"}),
     "工具": frozenset({"工具", "木石工具", "石器"}),
-    "麻绳": frozenset({"麻绳", "结实麻绳", "绳"}),
+    "麻绳": frozenset({"麻绳", "结实麻绳", "绳子", "绳"}),
     "村庄": frozenset({"村庄", "村子", "村里", "家"}),
     "森林": frozenset({"森林", "树林", "林子"}),
     "矿洞": frozenset({"矿洞", "矿山", "洞里"}),
@@ -58,6 +64,10 @@ _ENTITY_SYNONYMS: Dict[str, frozenset] = {
     "阿黎": frozenset({"阿黎", "采集者"}),
     "主角": frozenset({"主角", "玩家"}),
 }
+# 单字别名白名单（2026-08-28 review 修复）: 这两字语义单义、游戏语境稳定
+# （"砍柴"=木材、村边那条"河"），误伤面小。其余单字（家/木/石/绳）不参与
+# 子串匹配 —— "大家/了不起"这类无关词里的"家/木"污染过检索/合并/统计。
+_SINGLE_CHAR_TERMS = frozenset({"柴", "河"})
 # 一跳关联加分: 与 query 实体共现的实体所链接的记忆 +0.8/实体（HippoRAG 思想轻量版）
 _ASSOCIATION_WEIGHT = 0.8
 # 阶段③ 遗忘: 记忆强度半衰期（小时）— 强度 = importance × 0.5^(小时/半衰期)
@@ -81,10 +91,16 @@ def _tokenize(text: str) -> List[str]:
 
 
 def _canonical_terms(text: str) -> set:
-    """抽取文本里命中的规范词（同义词族归一到规范词）。阶段② 轻量海马体。"""
+    """抽取文本里命中的规范词（同义词族归一到规范词）。阶段② 轻量海马体。
+
+    2026-08-28 修复: 单字别名默认不参与子串匹配 — "大家/了不起"里的
+    "家/木"必误命中, 曾污染检索/关联/合并/画像统计四处（review 发现）。
+    白名单 _SINGLE_CHAR_TERMS 里的单字（柴/河）语义单义仍放行（"砍柴"→木材）。
+    """
     found = set()
     for canon, aliases in _ENTITY_SYNONYMS.items():
-        if any(a in text for a in aliases):
+        if any((len(a) >= 2 or a in _SINGLE_CHAR_TERMS) and a in text
+               for a in aliases):
             found.add(canon)
     return found
 
@@ -94,41 +110,81 @@ def _recency_score(created_at: float, now: float) -> float:
     return _DECAY ** hours
 
 
-def _relevance_score(content: str, query: str) -> float:
+def _relevance_score(content: str, query: str,
+                     query_tokens: Optional[List[str]] = None,
+                     q_canon: Optional[set] = None,
+                     content_canon: Optional[set] = None) -> float:
     """相关度: 原词命中 + 同义词召回（阶段② 轻量海马体）。
 
     原词命中比例保留（确定性基线）；叠加规范词(同义词族)命中，
     解决"柴" vs "木材"这类中文同义漏检。0-1。
     v2026-08-23: 切词经 _tokenize — 中文查询按词命中而不是整句,
     "昨天森林里的木头真粗" 能按 木头→木材 同义族+分词正常计分。
+    任务书#03-A: query_tokens 可选 — retrieve 传入缓存, 批量打分时
+    query 不再逐条重复分词(行为与旧版逐字节一致)。q_canon/content_canon
+    同款缓存(简洁性 review): retrieve 的 assoc 趟已算好两侧规范词。
     """
-    words = _tokenize(query)
+    words = query_tokens if query_tokens is not None else _tokenize(query)
     raw = sum(1 for w in words if w in content) / len(words) if words else 0.0
-    q_canon = _canonical_terms(query)
+    if q_canon is None:
+        q_canon = _canonical_terms(query)
     syn = 0.0
     if q_canon:
-        syn = len(q_canon & _canonical_terms(content)) / len(q_canon)
+        if content_canon is None:
+            content_canon = _canonical_terms(content)
+        syn = len(q_canon & content_canon) / len(q_canon)
     return min(1.0, raw * 0.6 + syn * 0.8)
 
 
-def _idf_relevance(entry_tokens: set, query_tokens: List[str], df: Dict[str, int],
-                   total: int) -> float:
-    """TDAM 借鉴④(2026-08-26): BM25 思想的 IDF 加权命中(归一 0-1)。
+def _idf_relevance(entry_tokens, query_tokens: List[str], df: Dict[str, int],
+                   total: int, avgdl: Optional[float] = None) -> float:
+    """任务书#03-B: 升级为真 BM25(与 TDAM 公式对齐, 名称保持兼容)。
 
-    稀有词权重高(log(1+N/df))、常见词权重低 —— 修正"我/的"这类
-    高频词与"矿洞"这类稀有词在旧 raw 命中比里同权的问题。
-    纯 Python 零依赖; 与温层向量锚点正交(一个管词频稀有度, 一个管语义)。
+    score = Σ_{t∈query} idf(t) × [tf(t)·(k1+1)] / [tf(t) + k1·(1-b+b·dl/avgdl)]
+    idf(t) = ln(1 + (N - df_t + 0.5) / (df_t + 0.5)); k1=1.2, b=0.75。
+    tf 保留 entry 词频(不做 set 去重 — 词频是 BM25 的 tf 分量)。
+    avgdl 缺省 = dl(单文档视角, 旧单元测试 4 参调用兼容)。
+    不再归一 0-1: 与旧公式取 max 时旧公式(0-1)成为自然下限, 稀有词/多词
+    命中条目得分更高; 空 query / 空语料 / 全未命中仍返回 0。
     """
     if not query_tokens or total <= 0:
         return 0.0
-    hit = 0.0
-    cap = 0.0
-    for t in query_tokens:
-        w = math.log(1.0 + total / max(1, df.get(t, 0)))
-        cap += w
-        if t in entry_tokens:
-            hit += w
-    return min(1.0, hit / cap) if cap > 0 else 0.0
+    tf = Counter(entry_tokens)
+    dl = float(sum(tf.values())) or 1.0
+    if avgdl is None or avgdl <= 0:
+        avgdl = dl
+    k1, b = 1.2, 0.75
+    score = 0.0
+    for t in set(query_tokens):
+        f = tf.get(t, 0)
+        if f <= 0:
+            continue
+        dft = max(0, df.get(t, 0))
+        idf = math.log(1.0 + (total - dft + 0.5) / (dft + 0.5))
+        denom = f + k1 * (1.0 - b + b * dl / avgdl)
+        score += idf * (f * (k1 + 1.0)) / denom
+    return score
+
+
+def _rrf_fuse(scored: List[tuple], sem: Dict[str, float]) -> List[tuple]:
+    """任务书#03-B: RRF 倒数秩融合(k=60, 对齐 TDAM)。
+
+    关键词路(加权总分+BM25)与向量语义路各自排名, 融合分 =
+    1/(k+rank_kw) + 1/(k+rank_sem); 语义未命中的条目取最末秩(len+1)。
+    替换旧的 "+2.0×语义分" 线性加分 —— 两条路的名次对等融合,
+    不再让向量分数绝对值压过关键词排序。rank 均 1-based。
+    """
+    k = 60.0
+    kw_order = sorted(scored, key=lambda x: x[0], reverse=True)
+    kw_rank = {e["id"]: i for i, (_, e) in enumerate(kw_order, 1)}
+    worst = len(scored) + 1
+    sem_sorted = [e for _, e in sorted(
+        scored, key=lambda p: sem.get(p[1].get("content", ""), 0.0),
+        reverse=True)]
+    sem_rank = {e["id"]: i for i, e in enumerate(sem_sorted, 1)
+                if sem.get(e.get("content", ""), 0.0) > 0}
+    return [(1.0 / (k + kw_rank[e["id"]]) + 1.0 / (k + sem_rank.get(e["id"], worst)), e)
+            for _, e in scored]
 
 
 class NPCMemory:
@@ -212,48 +268,73 @@ class NPCMemory:
             except Exception:
                 pass
         return vs
+    def active(self) -> List[Dict]:
+        """可见条目(管家的 archived 降级层除外) — 检索/上下文/量算的唯一口径。
+
+        无 archived 时直接返回内部列表(零拷贝快路径, 管家关时的默认状态)。
+        """
+        if any(e.get("category") == CATEGORY_ARCHIVED for e in self.entries):
+            return [e for e in self.entries
+                    if e.get("category") != CATEGORY_ARCHIVED]
+        return self.entries
+
     def retrieve(self, query: str = "", top_k: int = 5) -> List[Dict]:
         """加权检索 + 一跳关联（阶段② 轻量海马体）。
 
         score = recency×0.5 + relevance×3 + importance×2 + 关联加分。
         关联: 与 query 实体共现的实体所链接的记忆 +0.8/实体（拐弯找相关）。
-        TDAM 借鉴④(NPC_BM25_RECALL=1): 相关度取 max(旧公式, IDF 加权命中) —
-        只升不降, 开关关时与旧版逐字节同分。
+        TDAM 借鉴④(NPC_BM25_RECALL=1): 相关度取 max(旧公式, BM25) — 开关关时
+        与旧版逐字节同分(回归锚)。向量锚点(NPC_VECTOR_ANCHOR)开启时以 RRF
+        倒数秩融合替换旧线性加分(任务书#03-B)。
         """
         now = time.time()
+        # 任务书#04: archived(管家降级层)不参与检索 — 腾上下文空间, 证据链仍在卡上
+        active = self.active()
         q_canon = _canonical_terms(query)
         assoc: set = set()
+        # 简洁性 review: entry 规范词只算一遍 — assoc 趟顺手缓存, 打分趟复用
+        canon_by_id: Dict[str, set] = {}
         if q_canon:
-            for e in self.entries:
+            for e in active:
                 e_canon = _canonical_terms(e["content"])
+                canon_by_id[e["id"]] = e_canon
                 if q_canon & e_canon:
                     assoc |= e_canon
             assoc -= q_canon
-        # BM25-IDF 兜底(默认关): 一次 retrieve 算一遍词档频, 零依赖零 IO
+        # BM25 兜底(默认关): 一次 retrieve 一遍分词与词档频, 零依赖零 IO。
+        # 任务书#03-A: query 与每条 entry 各只分词一次 —— q_tokens 供
+        # _relevance_score 复用; tok_by_id 缓存供 df 统计与逐条打分共享
+        # (旧版 jieba 共跑 1 + 1 + N 遍)。
         use_idf = env_flag("NPC_BM25_RECALL")
         df: Dict[str, int] = {}
-        q_tokens: List[str] = []
-        if use_idf and self.entries:
-            q_tokens = _tokenize(query)
-            for e in self.entries:
-                for t in set(_tokenize(e.get("content", ""))):
+        tok_by_id: Dict[str, List[str]] = {}
+        q_tokens: List[str] = _tokenize(query)
+        total = len(active)
+        avgdl = 1.0
+        if use_idf and active:
+            for e in active:
+                toks = _tokenize(e.get("content", ""))
+                tok_by_id[e["id"]] = toks
+                for t in set(toks):
                     df[t] = df.get(t, 0) + 1
+            avgdl = sum(len(v) for v in tok_by_id.values()) / total
         scored = []
-        for e in self.entries:
-            rel = _relevance_score(e["content"], query)
+        for e in active:
+            rel = _relevance_score(e["content"], query, q_tokens, q_canon,
+                                   canon_by_id.get(e["id"]))
             if use_idf:
-                rel = max(rel, _idf_relevance(
-                    set(_tokenize(e.get("content", ""))), q_tokens,
-                    df, len(self.entries)))
+                rel = max(rel, _idf_relevance(tok_by_id.get(e["id"], []),
+                                              q_tokens, df, total, avgdl))
             score = (
                 _recency_score(e["created_at"], now) * _GW[0]
                 + rel * _GW[1]
                 + e["importance"] * _GW[2]
             )
             if assoc:
-                score += len(_canonical_terms(e["content"]) & assoc) * _ASSOCIATION_WEIGHT
+                score += len(canon_by_id.get(e["id"], set()) & assoc) * _ASSOCIATION_WEIGHT
             scored.append((score, e))
-        # 温层向量锚点(P1): 语义命中给相关度加权 —— "几点"能捞起"时间"类记忆
+        # 温层向量锚点(P1, 任务书#03-B): 语义路与关键词路 RRF 倒数秩融合
+        # (替换旧 "+2.0×语义分" 线性加分) —— "几点"能捞起"时间"类记忆
         try:
             vs = self._anchor()
             if vs is not None:
@@ -261,8 +342,7 @@ class NPCMemory:
                 for h in vs.search(query, top_k=8):
                     sem[getattr(h, "text", "")] = float(getattr(h, "score", 0.0))
                 if sem:
-                    scored = [(sc + 2.0 * sem.get(e.get("content", ""), 0.0), e)
-                              for sc, e in scored]
+                    scored = _rrf_fuse(scored, sem)
         except Exception:
             pass
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -294,6 +374,10 @@ class NPCMemory:
         # ── 1. 同主题合并 ──
         groups: Dict[frozenset, List[int]] = {}
         for i, e in enumerate(self.entries):
+            # 任务书#06: archived(管家降级层)不进分组 → 不被合并, 也不会被
+            # 同主题的合并顺手卷走(证据链永存红线)。只跳过, 不删除。
+            if e.get("category") == CATEGORY_ARCHIVED:
+                continue
             key = frozenset(_canonical_terms(e["content"]))
             if key:
                 groups.setdefault(key, []).append(i)
@@ -320,7 +404,9 @@ class NPCMemory:
         # ── 2. 弱旧修剪 ──
         keep = []
         for e in self.entries:
-            if e.get("category") in ("reflection", "consolidated"):
+            # 任务书#06: archived 与反思/合并条目同款免修剪 —— 降级层只增不减,
+            # 强度衰减再低也不动它(管家降级时已判定过, 此处不二次裁决)。
+            if e.get("category") in ("reflection", "consolidated", CATEGORY_ARCHIVED):
                 keep.append(e)
                 continue
             if e.get("importance", 5) >= 8:
@@ -349,7 +435,8 @@ class NPCMemory:
 
     def format_for_context(self, entries: Optional[List[Dict]] = None) -> str:
         """把记忆条目格式化成模型上下文文本。"""
-        items = entries if entries is not None else self.entries[-5:]
+        items = [e for e in (entries if entries is not None else self.entries[-5:])
+                 if e.get("category") != CATEGORY_ARCHIVED]
         if not items:
             return "（还没有记忆）"
         return "\n".join(f"- {e['content']}" for e in items)

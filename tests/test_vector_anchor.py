@@ -72,26 +72,32 @@ def test_anchor_on_mirrors_writes(monkeypatch):
 # ── 语义加分: 确定性翻转 ──────────────────────────────────────
 
 def test_anchor_flips_ranking_via_semantics(monkeypatch):
-    """查询与两条记忆零字面重叠 → 基线按插入序；开启后语义命中者翻到第一。"""
+    """查询与三条记忆零字面重叠 → 基线按插入序; 开后语义命中者经 RRF 翻到第一。
+
+    任务书#03-B: 融合从线性加分改 RRF —— 两条目对称场景在 RRF(k=60) 下
+    数学上恒平局, 故语料扩为三条(两条语义命中), 翻盘断言保持原语义。
+    """
     # 先关: 插入序 B(浆果) 在前
     monkeypatch.delenv("NPC_VECTOR_ANCHOR", raising=False)
     base = NPCMemory(anchor_dir="x", vector_store=FakeVS())
     base.add("浆果真甜", importance=5)
     base.add("我学会了时间管理", importance=5)
+    base.add("我学会用打火机", importance=5)
     for e in base.all():
         e["created_at"] = 1000.0           # 冻结时戳: 消除新近度抖动, 排序全凭锚点
-    q = "今天天气怎么样"                   # 与两条内容零字符重叠 → 相关度全 0
-    assert [e["content"] for e in base.retrieve(q, top_k=2)][0] == "浆果真甜"
-    # 后开: 同数据同查询, 语义命中(时间管理)翻到第一
+    q = "今天天气怎么样"                   # 与内容零字符重叠 → 相关度全 0
+    assert [e["content"] for e in base.retrieve(q, top_k=3)][0] == "浆果真甜"
+    # 后开: 同数据同查询, 语义命中(时间管理第一、打火机第二) → RRF 翻盘
     monkeypatch.setenv("NPC_VECTOR_ANCHOR", "1")
-    fake = FakeVS(hits=[_hit("我学会了时间管理", 0.9)])
+    fake = FakeVS(hits=[_hit("我学会了时间管理", 0.9), _hit("我学会用打火机", 0.7)])
     mem = NPCMemory(anchor_dir="x", vector_store=fake)
     mem.add("浆果真甜", importance=5)
     mem.add("我学会了时间管理", importance=5)
+    mem.add("我学会用打火机", importance=5)
     for e in mem.all():
-        e["created_at"] = 1000.0           # 同样冻结: 差异只可能来自锚点加权
-    got = [e["content"] for e in mem.retrieve(q, top_k=2)]
-    assert got[0] == "我学会了时间管理"     # 锚点加权翻转排序
+        e["created_at"] = 1000.0           # 同样冻结: 差异只可能来自锚点融合
+    got = [e["content"] for e in mem.retrieve(q, top_k=3)]
+    assert got[0] == "我学会了时间管理"     # RRF 融合翻转排序
 
 
 # ── 回填与生命周期联动 ────────────────────────────────────────
@@ -136,3 +142,25 @@ def test_consolidate_removals_sync_out_of_index(monkeypatch):
     removed = mem.consolidate()
     assert removed >= 2
     assert ids <= set(fake.deleted)        # 索引同步出清
+
+
+# ── 任务书#03-B: BM25 关键词路 + 向量语义路 RRF 组合 ──────────
+
+def test_rrf_combines_keyword_and_semantic_paths(monkeypatch):
+    """两路同开: 关键词路命中的条目与语义命中条目经 RRF 融合, 语义第一翻盘。
+
+    三条避免两条目 RRF 对称平局; 冻结时戳/同重要度, 差异只来自融合本身。
+    jieba 装与不装(语料带空格)切词一致, 两态断言同结果。
+    """
+    monkeypatch.setenv("NPC_BM25_RECALL", "1")
+    monkeypatch.setenv("NPC_VECTOR_ANCHOR", "1")
+    fake = FakeVS(hits=[_hit("我学会了时间管理", 0.9),
+                        _hit("河边的石头又多又圆", 0.5)])
+    mem = NPCMemory(anchor_dir="x", vector_store=fake)
+    mem.add("矿洞里有稀有石头", importance=5)   # 关键词路命中(query 矿洞/石头)
+    mem.add("我学会了时间管理", importance=5)   # 语义路第一命中
+    mem.add("河边的石头又多又圆", importance=5) # 语义路次命中(兼关键词)
+    for e in mem.all():
+        e["created_at"] = 1000.0
+    got = [e["content"] for e in mem.retrieve("矿洞 石头", top_k=3)]
+    assert got[0] == "我学会了时间管理"   # 语义第一: RRF 下两路名次对等融合

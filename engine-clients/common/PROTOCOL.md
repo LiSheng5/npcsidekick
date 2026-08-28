@@ -81,7 +81,7 @@ python -m npc.server --adapter gta         --port 8766 --world-id gta   --no-bro
 ### 2.3 GET /api/events?since=N — 增量事件（轮询版）
 
 游标 = `world.log` 索引。响应 `events[]`（结构化事件）+ `log_count`（下轮 since）。
-事件类型：`say / move / gather / craft / deliver / subagent`（字段见服务端 `_parse_log_line`）。
+事件类型：`say / move / gather / craft / deliver / task / subagent`（字段见服务端 `_parse_log_line`）。`task`（任务书#02）：`{"type":"task","npc":…,"status":"started"|"done","desc":…}` —— 任务首派/完成的执行过程事件。
 `subagent`（2026-08-24 §17）：`{"type":"subagent","agent":"b2"|"a","npc":…,"text":…}`
 — B2 编译 / A 审查子代理的生命周期（开始/✓完成/✗失败原因）。客户端不认识的事件类型一律忽略。
 
@@ -115,6 +115,35 @@ python -m npc.server --adapter gta         --port 8766 --world-id gta   --no-bro
 ### 2.7 管理面：/api/mode · /api/approval(GET+POST) · /api/manifest(GET+POST) · /api/task · /api/tick · /api/memory(GET)
 
 调试与运营用；游戏客户端一般只碰 `mode`（规则/LLM 切换）。
+
+### 2.7.1 任务回路（协议 v1·M2 任务书#02 已实施）
+
+启动开关 `NPC_TASK_LOOP=1`（GTA bat 已开）+ `--manifest <gta_actions.json>`。三个端点：
+
+| 端点 | 载荷 → 语义 |
+|---|---|
+| POST `/api/consumer/hello` | `{"name":"shvdn_gta","version":"1.9","verbs":["follow_player","goto","say"]}` → 能力报到; 每 ≤30s 重发即心跳(60s 未心跳判死) |
+| GET `/api/state?consumer=<name>` | 响应 `pending_tasks[]`（当前在岗任务；**纯读，不写日志**） |
+| POST `/api/task_done` | `{"task_id":"t_1","status":"completed"\|"failed"\|"cancelled","detail":"…"}` → 销账; completed 落 EV_DONE 记忆 + "完成任务"事件, failed 落 EV_FAIL 记忆 + 商议字幕(say 事件) |
+
+GTA 方言动作表（`npc/adapters/gta_actions.json`）：
+- `follow_player`（tier3/ask, 持续型）：mod 让 ped 持续跟随玩家；无完成条件——玩家下新指令
+  由账本 supersede 自动取消，mod 见 pending_tasks 消失即停
+- `goto`（tier2/ask, params=[地点]）：mod 按内置中文地标表翻坐标走路；到达(6m) 报 completed，
+  未知地点/超时(280s) 报 failed 进商议。地点由**地点词典**归一（world `locations` 的 key
+  为规范名，清单可选 `places` 段补别名；最长匹配优先），未加载词典时回退尾词清洗
+- 其他：`enter_car_with_player / drive_to / wander / fight / say`（say 走对话通道）
+
+**派发与事件产生机制（任务书#05·A 修订，老 mod 零改动）**：booked→dispatched 转换由
+**世界推进**驱动（tick 循环每帧 / 手动 `POST /api/tick`），不再依赖客户端轮询 ——
+mod 断连或只走 `/api/events` 也丢不了任务。转换那一刻账本入队，世界推进与事件流端点
+（`/api/events`、`/api/events/stream`）消费队列并写世界日志 `"X 接下任务: …"`；
+pop 即消费 → 多客户端 poll、断连重连、反复取事件都只写一条日志。
+`pending_tasks[]` 结构、日志行文本、`/api/task_done` 语义三项不变。
+
+**动作呈现由清单声明（任务书#05·B）**：动作 spec 可选 `desc_tpl`（账本 desc）与
+`ack_tpl`（承诺回话），占位符取任务单自身的键（如 `{地点}`/`{resource}`/`{count}`）；
+未声明模板时沿用服务端内置措辞，`/api/manifest` 也不会多出这两个字段。
 
 ### 2.8 GET /api/version — 版本/特性握手
 

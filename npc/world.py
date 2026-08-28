@@ -273,3 +273,143 @@ def rotate_world_log(world: Dict, tail: int = LOG_TAIL_DEFAULT,
     del log[:cut]
     world["_log_offset"] = offset + cut
     return cut
+
+
+# ── 日志分档（2026-08-28 读侧版, 归档留全量 — 用户 D1 保守裁决）───────────
+# 档位: interactive(🌟 玩家在场/交际, 行为日志逐条) / autonomous(🌗 自主动作, 摘要一行)。
+# 只改读侧注入口（_behavior_log 的"刚才在干嘛"事实源）; 写侧世界日志 append-only 不动,
+# rotate_world_log 归档留全量 — 事实源永不缩。任务书#04(2026-08-28): 挂账关闭 ——
+# "压缩日记摘要"已由记忆管家接管(npc/housekeeper.py → compress_archive_log)。
+LOG_TIER_INTERACTIVE = "interactive"
+LOG_TIER_AUTONOMOUS = "autonomous"
+# 自主行判定关键词: 与 _parse_log_line 的事件格式同源（scheduler/world 写入点）
+_AUTONOMOUS_HINTS = ("前往", "采集了", "制作了", "休息")
+_INTERACTIVE_HINTS = ("说:", "交给了")
+
+
+def log_tier(line: str) -> str:
+    """日志行分档（纯函数, 零 LLM）。未知行保守归 interactive（少记比漏记好）。"""
+    if any(h in line for h in _AUTONOMOUS_HINTS):
+        return LOG_TIER_AUTONOMOUS
+    if any(h in line for h in _INTERACTIVE_HINTS):
+        return LOG_TIER_INTERACTIVE
+    return LOG_TIER_INTERACTIVE
+
+
+def summarize_autonomous(lines: list) -> str:
+    """自主日志行 → 语言化计数摘要（纯规则, 零 LLM）。
+
+    例: [前往森林×2, 采集了 1 个木材×3] → "采集木材×3 · 前往森林×2"。
+    无内容 → ""（调用方不注入）。
+    """
+    counts: dict = {}
+    for line in lines:
+        if "采集了" in line:
+            res = line.split("采集了", 1)[1].split("个", 1)[-1].strip() or "资源"
+            key = f"采集{res}"
+        elif "前往" in line:
+            key = f"前往{line.split('前往', 1)[1].strip()}"
+        elif "制作了" in line:
+            key = f"制作{line.split('制作了', 1)[1].strip()}"
+        elif "休息" in line:
+            key = "休息"
+        else:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return ""
+    parts = [f"{k}×{n}" for k, n in
+             sorted(counts.items(), key=lambda kv: -kv[1])]
+    return " · ".join(parts)
+
+
+# ── 任务书#04: 归档压缩(记忆管家接管) ─────────────────────────────
+# 连续 autonomous 段(≥N 条, 索引连续)压成一行摘要; interactive 逐行保留。
+# 摘要行 text = "[自主摘要]" + 摘要(前缀与摘要间无空格) —— 不匹配任何
+# _parse_log_line 事件正则("前往"前必有"·"隔断), 旧客户端事件流零感知。
+AUTONOMOUS_COMPRESS_MIN = 3
+SUMMARY_PREFIX = "[自主摘要]"
+
+
+def parse_archive_record(line: str) -> Optional[Dict]:
+    """归档行容错解析 → {"i": int, "text": str}。坏行 → None(调用方原样保留)。
+
+    归档记录 schema 的唯一读入口(compressor + events_archive 共用) —
+    以后加字段/版本化只改这里。
+    """
+    try:
+        rec = json.loads(line)
+        return {"i": int(rec["i"]), "text": str(rec["text"])}
+    except Exception:
+        return None
+
+
+def compress_archive_log(archive_dir: Optional[str]) -> int:
+    """把归档文件里的连续自主段压成摘要行。返回压缩减少的行数。
+
+    游标契约: _log_offset 逻辑条数不变(压缩只影响盘上归档行数);
+    压缩行 {"i": 段首绝对索引, "text": SUMMARY_PREFIX+摘要} — 回放器按
+    since<=i<offset 过滤, 摘要行解析不成事件, 冷段回放不炸。
+    幂等: 已压缩行(前缀命中)不再参与分组; 坏行原样保留; 先写 .tmp 再替换。
+    """
+    if not archive_dir:
+        return 0
+    path = Path(archive_dir) / ARCHIVE_FILENAME
+    if not path.exists():
+        return 0
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return 0
+    out: List[str] = []
+    reduced = 0
+    buf: List[Tuple[int, str]] = []
+
+    def flush() -> None:
+        nonlocal reduced
+        if not buf:
+            return
+        if len(buf) >= AUTONOMOUS_COMPRESS_MIN:
+            summary = summarize_autonomous([t for _, t in buf])
+            text = SUMMARY_PREFIX + (summary or buf[0][1])
+            out.append(json.dumps({"i": buf[0][0], "text": text},
+                                  ensure_ascii=False))
+            reduced += len(buf) - 1
+        else:
+            for i, t in buf:
+                out.append(json.dumps({"i": i, "text": t}, ensure_ascii=False))
+        buf.clear()
+
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        rec = parse_archive_record(line)
+        if rec is None:
+            flush()                 # 坏行切断当前段
+            out.append(line)        # 原样保留, 不炸
+            continue
+        idx, text = rec["i"], rec["text"]
+        if text.startswith(SUMMARY_PREFIX):
+            flush()
+            out.append(line)        # 已压缩行原样传播(幂等)
+            continue
+        if log_tier(text) == LOG_TIER_AUTONOMOUS:
+            if buf and buf[-1][0] + 1 == idx:
+                buf.append((idx, text))
+            else:
+                flush()
+                buf.append((idx, text))
+        else:
+            flush()
+            out.append(line)        # 非自主行逐字保留(不重序列化, 字节保真)
+    flush()
+    if not reduced:
+        return 0
+    try:
+        tmp = path.with_name(ARCHIVE_FILENAME + ".tmp")
+        tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        return 0
+    return reduced
