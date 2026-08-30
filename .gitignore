@@ -16,3 +16,7 @@ npc/personas/gta/
 npc/adapters/gta*
 tests/test_gta_adapter.py
 *_GTA.bat
+
+# Claude 内部协作文档（给 AI 看，不进公开仓库）
+CLAUDE.md
+.claude/
