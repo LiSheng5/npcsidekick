@@ -5,7 +5,8 @@
   · 删人设: 文件消失 + 实例摘除 + **世界 actor 槽清空**（防 tick 孤儿槽 KeyError）
   · /api/npcs 扩展是 additive: 老字段 id/name 语义不变
   · 关系图: Runtime 无关系 → source="none" + 空 edges（不造假）
-  · 记忆单条 CRUD 走 NPCMemory → 记忆卡落盘
+  · 记忆单条 CRUD 走 NPCMemory → 记忆卡落盘；写入结果三态
+    added / merged（去重闸折叠计数）/ rejected（安全闸拒收）必须如实回报
   · Provider: API Key 只回 masked，明文永不出现在响应里
 """
 import json
@@ -14,6 +15,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+from npc.memory import MTYPES
 from npc.npc import NPC
 from npc.server import create_npc_server
 
@@ -236,6 +238,70 @@ class TestMemoryCrud:
         card = os.path.join(paths["store"], "hun_memory.json")
         with open(card, encoding="utf-8") as fh:
             assert any("开炉第一天" in e["content"] for e in json.load(fh)["memory"])
+
+    def test_add_reports_added_status(self, client, paths):
+        client.put("/api/personas/hun", json=OK_PERSONA)
+        body = client.post("/api/npcs/hun/memory",
+                           json={"content": "开炉第一天", "importance": 7}).json()
+        assert body["ok"] is True and body["status"] == "added"
+        assert body["entry"]["content"] == "开炉第一天" and body["total"] == 1
+
+    def test_duplicate_daily_entry_is_reported_as_merged(self, client, paths, monkeypatch):
+        """同文日常被去重闸折叠成 count+1 —— 不是"没写进去"，UI 必须分得清。"""
+        monkeypatch.setenv("NPC_MEMORY_DEDUP", "1")
+        client.put("/api/personas/hun", json=OK_PERSONA)
+        client.post("/api/npcs/hun/memory", json={"content": "在炉边打盹", "importance": 3})
+        body = client.post("/api/npcs/hun/memory",
+                           json={"content": "在炉边打盹", "importance": 3}).json()
+        assert body["ok"] is True and body["status"] == "merged"
+        assert body["entry"]["count"] == 2 and body["total"] == 1
+        assert "计数" in body["message"]
+
+    def test_safety_gate_rejection_is_reported_not_silently_ok(
+            self, client, paths, monkeypatch):
+        """安全闸拒收必须报 rejected —— 否则 UI 会把"没落盘"显示成"已保存"。
+
+        不塞真实 L1 词条进仓库，直接把安检门换成永远返回 L1 的桩。
+        """
+        class _AlwaysL1:
+            @staticmethod
+            def enabled():
+                return True
+
+            @staticmethod
+            def scan(_text):
+                from npc.safety import Verdict
+                return Verdict(level="L1", category="test")
+
+        monkeypatch.setattr("npc.memory_card._safety", _AlwaysL1)
+        client.put("/api/personas/hun", json=OK_PERSONA)
+        r = client.post("/api/npcs/hun/memory", json={"content": "不该落盘的东西"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False and body["status"] == "rejected"
+        assert body["entry"] is None and body["total"] == 0
+        assert "拒收" in body["message"]
+
+    def test_facets_come_from_data_not_hardcoded(self, client, paths):
+        """分类可选值从实际数据观察 —— Console 不替游戏规定"标准分类"。"""
+        client.put("/api/personas/hun", json=OK_PERSONA)
+        client.post("/api/npcs/hun/memory",
+                    json={"content": "玩家欠我三块铁", "category": "契约"})
+        client.post("/api/npcs/hun/memory",
+                    json={"content": "火要旺，风要匀", "category": "手艺",
+                          "mtype": "instruction"})
+        facets = client.get("/api/npcs/hun/memory").json()["facets"]
+        assert {"契约", "手艺"}.issubset(set(facets["categories"]))
+        # 框架声明的三分类（与任何具体游戏无关）也在建议里
+        assert set(MTYPES).issubset(set(facets["mtypes"]))
+
+    def test_query_recalls_top_k_not_full_list(self, client, paths):
+        """有 query 时走加权检索: entries 是召回 top-k，total 才是卡上总数。"""
+        client.put("/api/personas/hun", json=OK_PERSONA)
+        for i in range(6):
+            client.post("/api/npcs/hun/memory", json={"content": f"第{i}天开炉"})
+        data = client.get("/api/npcs/hun/memory?query=开炉&top_k=3").json()
+        assert data["total"] == 6 and len(data["entries"]) == 3
 
     def test_empty_content_400(self, client, paths):
         client.put("/api/personas/hun", json=OK_PERSONA)

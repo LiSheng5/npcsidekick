@@ -362,3 +362,37 @@ if llm is None:
 - 新增 `TestActions`（3 条）+ `test_post_creates_and_hot_reloads`；
   白名单放宽同步更新 persona_loader / personas_api 相关用例。
 - 全量 `pytest`（junitxml 解析）+ 前端 `tsc --noEmit && vite build` 通过。
+
+## §11 Step 6 — Memory（2026-09-08）
+
+### 铁律落实
+链路只有一条: `Browser → /api/npcs/{pid}/memory → NPC.remember / NPCMemory → npc.save() → 记忆卡`。
+React 不持有 JSON、不直接改文件、也不另造记忆结构。新增走 `NPC.remember`
+（因此共享安全闸 + 去重闸 + mtype 分类，与 Runtime 自动记忆完全同一入口），
+编辑走 `NPCMemory.load()` 写回同一份列表（不新建副本，保持引用一致）。
+
+### 后端改动（`npc/console_api.py`）
+1. **写入结果三态**（原来一律 `ok: true`，会把"没写进去"报成"已保存"）:
+   - `added` —— 正常追加一行；
+   - `merged` —— 同文日常被去重闸折叠成 `count+1`（`NPC_MEMORY_DEDUP` 开启时）；
+   - `rejected` —— 安全闸在写卡口拒收（L1 违规素材不入卡），`ok=false` + `entry=null` + message。
+   判定方式: 写入前后比对 `id` 集合与 `count`，不靠"最后一条是不是我加的"猜
+   （旧实现直接取 `all()[-1]`，拒收时会把别人的记忆当成刚写的返回）。
+2. **`facets`**（`_memory_facets`）: `GET` 顺带返回 `categories` / `mtypes` 可选值，
+   **一律从实际数据观察**，再并上框架声明的 `npc/memory.MTYPES`
+   （persona/episodic/instruction，与具体游戏无关）。
+   game-agnostic 红线: Console 不写死"标准分类表"——那等于替游戏规定记忆该怎么写。
+3. `total` 语义钉死: 有 `query` 时 `entries` 是加权检索的**召回 top-k**，
+   `total` 才是卡上总条数（前者 < 后者是正常的，UI 必须说清）。
+
+### 前端（`web/console/src/pages/MemoryPage.tsx`）
+- 角色下拉（`/api/npcs`，带 memory_count）→ 检索框（回车提交）→ 分类筛选 chips → 排序。
+- 条目标: `imp N` / 分类 / mtype / `×N`（折叠计数）/ 相对时间；就地编辑（PUT）与删除（DELETE，二次确认）。
+- 两个容易误读的状态都在页面上明说: 检索模式提示"显示条数少于卡上总数是正常的"；
+  流民（ephemeral）提示"改动不落盘"。
+- 分类/类型输入用 `<datalist>` 给建议（值来自 `facets`），datalist 全页只声明一次（id 不能重复）。
+
+### 测试
+`tests/test_console_api.py::TestMemoryCrud` 新增 6 条: added / merged / rejected
+（安全闸用桩替换，不把真实 L1 词条写进仓库）/ facets 来自数据 / 检索 top_k vs total。
+全量 `841 passed / 0 failed`（junitxml 解析）；前端 `tsc --noEmit && vite build` 通过（200 模块）。

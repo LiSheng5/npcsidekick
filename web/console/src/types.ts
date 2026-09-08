@@ -54,6 +54,29 @@ export interface MemoryEntry {
   count?: number
 }
 
+/** 编辑器下拉框的可选值 —— 后端从实际数据观察得出，UI 不硬编码任何分类。 */
+export interface MemoryFacets {
+  categories: string[]
+  mtypes: string[]
+}
+
+export interface MemoryListPayload {
+  npc_id: string
+  entries: MemoryEntry[]
+  /** 卡上总条数（检索时 entries 只是召回的 top-k，比 total 少） */
+  total: number
+  facets: MemoryFacets
+}
+
+/** 写入结果三态: 新增 / 折叠进同文条目 / 被安全闸拒收。 */
+export interface MemoryWriteResult {
+  ok: boolean
+  status: 'added' | 'merged' | 'rejected'
+  entry: MemoryEntry | null
+  total: number
+  message?: string
+}
+
 export interface GraphNode {
   id: string
   type: string

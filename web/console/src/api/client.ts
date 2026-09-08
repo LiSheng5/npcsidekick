@@ -1,6 +1,8 @@
 import type {
   ActionsPayload,
   MemoryEntry,
+  MemoryListPayload,
+  MemoryWriteResult,
   NpcBrief,
   Persona,
   ProvidersPayload,
@@ -69,12 +71,16 @@ export const api = {
       method: 'DELETE',
     }),
 
-  memory: (id: string, query = '') =>
-    req<{ entries: MemoryEntry[]; total: number }>(
-      `/api/npcs/${id}/memory${query ? `?query=${encodeURIComponent(query)}` : ''}`,
-    ),
+  /** 记忆列表。query 非空时走加权检索（后端返回召回 top-k，不是全量过滤）。 */
+  memory: (id: string, query = '', topK = 20) => {
+    const qs = new URLSearchParams()
+    if (query.trim()) qs.set('query', query.trim())
+    if (topK) qs.set('top_k', String(topK))
+    const suffix = qs.toString()
+    return req<MemoryListPayload>(`/api/npcs/${id}/memory${suffix ? `?${suffix}` : ''}`)
+  },
   addMemory: (id: string, body: Partial<MemoryEntry>) =>
-    post<{ ok: boolean; entry: MemoryEntry }>(`/api/npcs/${id}/memory`, body),
+    post<MemoryWriteResult>(`/api/npcs/${id}/memory`, body),
   updateMemory: (id: string, mid: string, body: Partial<MemoryEntry>) =>
     req<{ ok: boolean; entry: MemoryEntry }>(`/api/npcs/${id}/memory/${mid}`, {
       method: 'PUT',

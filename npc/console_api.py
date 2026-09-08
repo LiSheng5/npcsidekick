@@ -22,7 +22,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -222,6 +222,24 @@ def build_relationships(ctx: ConsoleContext) -> Dict:
     }
 
 
+def _memory_facets(entries: List[Dict]) -> Dict:
+    """记忆编辑器下拉框的可选值 —— 一律**从实际数据观察**得出。
+
+    game-agnostic 红线: 分类/类型都是数据里的字符串，Console 不写死一张"标准
+    分类表"（那等于替游戏规定记忆该怎么写）。mtypes 再并上框架声明的
+    npc/memory.MTYPES —— 那是通用生命周期分类（persona/episodic/instruction），
+    与任何具体游戏无关，作为输入建议给出。
+    """
+    cats = sorted({str(e.get("category") or "general") for e in entries})
+    observed_mt = sorted({str(e.get("mtype")) for e in entries if e.get("mtype")})
+    try:
+        from npc.memory import MTYPES
+        declared = [m for m in MTYPES if m not in observed_mt]
+    except Exception:      # pragma: no cover - 导入失败不该让列表接口挂掉
+        declared = []
+    return {"categories": cats, "mtypes": observed_mt + declared}
+
+
 # ══════════════════════════════════════════════════════════
 # Provider 配置（SecretStore）
 # ══════════════════════════════════════════════════════════
@@ -391,8 +409,10 @@ def mount_console_api(app: FastAPI, ctx: ConsoleContext) -> None:
     @app.get("/api/npcs/{pid}/memory")
     async def list_memory(pid: str, query: str = "", top_k: int = 5) -> Dict:
         npc = _npc(pid)
-        entries = npc.memory.retrieve(query, top_k=top_k) if query else npc.memory.all()
-        return {"npc_id": pid, "entries": list(entries), "total": len(npc.memory.all())}
+        all_entries = npc.memory.all()
+        entries = npc.memory.retrieve(query, top_k=top_k) if query else all_entries
+        return {"npc_id": pid, "entries": list(entries), "total": len(all_entries),
+                "facets": _memory_facets(all_entries)}
 
     @app.post("/api/npcs/{pid}/memory")
     async def add_memory(pid: str, request: Request) -> Dict:
@@ -409,10 +429,25 @@ def mount_console_api(app: FastAPI, ctx: ConsoleContext) -> None:
         category = str(body.get("category") or "general")
         mtype = str(body.get("mtype") or "")
         # 走 NPC.remember: 安检拒收 + 去重聚合 + mtype 分类，与 Runtime 同一入口
+        before = {e.get("id"): e.get("count", 1) for e in npc.memory.all()}
         npc.remember(content, importance=importance, category=category, mtype=mtype)
         npc.save()
-        entry = npc.memory.all()[-1] if npc.memory.all() else None
-        return {"ok": True, "entry": entry, "total": len(npc.memory.all())}
+        after = npc.memory.all()
+        new = [e for e in after if e.get("id") not in before]
+        if new:
+            status, entry, msg = "added", new[-1], ""
+        else:
+            # 没多出行只有两种可能: 去重闸把同文日常折进已有条目的 count，
+            # 或安全闸在写卡口拒收。必须区分 —— 否则 UI 会把"拒收"报成"已保存"。
+            bumped = [e for e in after if e.get("count", 1) > before.get(e.get("id"), 1)]
+            if bumped:
+                status, entry = "merged", bumped[-1]
+                msg = f"同文条目已存在，计数累加到 {entry.get('count')} 次"
+            else:
+                status, entry = "rejected", None
+                msg = "被安全闸拒收（L1 违规素材不入记忆卡）—— 记忆未改动"
+        return {"ok": status != "rejected", "status": status, "entry": entry,
+                "total": len(after), "message": msg}
 
     @app.put("/api/npcs/{pid}/memory/{mid}")
     async def update_memory(pid: str, mid: str, request: Request) -> Dict:

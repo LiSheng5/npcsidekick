@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { GraphPage } from './pages/GraphPage'
 import { CharactersPage } from './pages/CharactersPage'
+import { MemoryPage } from './pages/MemoryPage'
 import { SettingsPage } from './pages/SettingsPage'
 
 const NAV = [
@@ -43,6 +44,7 @@ export default function App() {
       <main className="main">
         {page === 'graph' ? <GraphPage /> : null}
         {page === 'characters' ? <CharactersPage /> : null}
+        {page === 'memory' ? <MemoryPage /> : null}
         {page === 'settings' ? <SettingsPage /> : null}
       </main>
     </div>
