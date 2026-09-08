@@ -128,6 +128,11 @@ class TalkPipelineMixin:
 
         llm = self._get_llm()
         if llm is None:
+            # 规则模式**故意不记历史**（见 tests/test_npc.py::test_rules_mode_no_history）:
+            # 确定性答复本就无状态，把一串雷同兜底话塞进历史只会污染上下文。
+            # 2026-09-08 曾误判此处为 bug 并改成记历史，触发该测试失败后回滚。
+            # 副作用可接受: 违规轮在规则模式下同样不入历史 —— 没存即没泄漏，
+            # "三不清除"的安全属性依然成立。
             return self._talk_rules(safe_input)   # L1 时 = 占位符（兜底话术不触原文）
 
         sys_content = self.system_prompt + "\n" + self._build_context(player_input)
@@ -165,6 +170,8 @@ class TalkPipelineMixin:
         # 对话不自动入记忆 — Day 2 实测: 逐字记录对话会污染检索（编造内容也进卡）。
         # 记忆只由任务事件和显式 remember() 写入（记忆 = 重要的事，不是聊天记录）。
         # 短期历史只留最近 N 轮（内存态），让村民记得"上一条聊了什么"。
+        # 注意: 仅 LLM 分支记历史；规则模式（无 key / API 故障 early return）不记，
+        # 见上方 llm is None 分支的注释。
         self.dialogue_history.append({"role": "user", "content": safe_input})
         self.dialogue_history.append({"role": "assistant", "content": reply})
         del self.dialogue_history[:-DIALOGUE_HISTORY_TURNS * 2]   # 截断: 只留最近 N 轮

@@ -1,4 +1,7 @@
 """NPC 运行时测试 — 任务循环、受阻处理、记忆持久化。"""
+import json
+from pathlib import Path
+
 import pytest
 
 from npc.npc import NPC
@@ -176,6 +179,26 @@ class TestPersistence:
         restored = NPC.load("cang", store_dir="npc/store_test")
         assert restored.activity is None
         assert restored.state == "idle"
+
+    def test_world_log_trimmed_in_card(self, npc):
+        """记忆卡体积护栏(2026-09-08): 卡里 world.log 只留最近 N 条。
+
+        背景: world.log 每次 tick 追加、无上限，save() 又全量快照 world。
+        实测一次短时运行就把卡从 6KB 撑到 2.3MB（47978 条 log）。
+        冷日志的正式归宿是归档层，不该由记忆卡背全量。
+        """
+        from npc.memory_card import CARD_WORLD_LOG_TAIL
+
+        npc.world["log"] = [f"第{i}条" for i in range(CARD_WORLD_LOG_TAIL + 250)]
+        npc.save()
+
+        card = json.loads(Path(npc.store_path).read_text(encoding="utf-8"))
+        saved_log = card["world"]["log"]
+        assert len(saved_log) == CARD_WORLD_LOG_TAIL          # 卡里被截断
+        assert saved_log[-1] == f"第{CARD_WORLD_LOG_TAIL + 249}条"   # 留的是最新的
+
+        # 关键: 截断只作用于"写进卡的副本"，内存里的 world 不受影响
+        assert len(npc.world["log"]) == CARD_WORLD_LOG_TAIL + 250
 
 
 class TestTickState:
