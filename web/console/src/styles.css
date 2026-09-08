@@ -671,6 +671,121 @@ select {
   margin: 2px 0;
 }
 
+/* ── Memory ── */
+.mem-compose {
+  margin: 0 32px 16px;
+  max-width: 860px;
+}
+
+.fld-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.fld-row .fld {
+  margin-bottom: 0;
+  flex: none;
+}
+
+.search-hint {
+  padding: 0 32px 10px;
+  margin: 0;
+}
+
+.filter-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 0 32px 14px;
+}
+
+.chip.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.chip .dot {
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.mem-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 32px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 980px;
+}
+
+.mem-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  transition: border-color 0.15s;
+}
+
+.mem-row.editing {
+  border-color: var(--accent);
+}
+
+.mem-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mem-content {
+  font-size: 13.5px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.mem-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.mem-meta .imp {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 11.5px;
+}
+
+.mem-meta .imp.hi {
+  color: var(--amber);
+}
+
+.mem-meta .imp.mid {
+  color: var(--text-dim);
+}
+
+.mem-meta .imp.lo {
+  color: var(--text-faint);
+}
+
+.mem-row .chip {
+  display: inline-flex;
+  align-items: center;
+}
+
+.mem-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
 /* ── 通用小按钮 / 提示条 / JSON 视图 ── */
 .btn.tiny {
   padding: 4px 8px;
