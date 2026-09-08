@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { GraphPage } from './pages/GraphPage'
+import { CharactersPage } from './pages/CharactersPage'
 import { SettingsPage } from './pages/SettingsPage'
 
 const NAV = [
   { key: 'graph', label: 'Graph', ready: true },
-  { key: 'characters', label: 'Characters', ready: false },
+  { key: 'characters', label: 'Characters', ready: true },
   { key: 'live', label: 'Live', ready: false },
   { key: 'memory', label: 'Memory', ready: false },
   { key: 'activity', label: 'Activity', ready: false },
@@ -41,6 +42,7 @@ export default function App() {
       </nav>
       <main className="main">
         {page === 'graph' ? <GraphPage /> : null}
+        {page === 'characters' ? <CharactersPage /> : null}
         {page === 'settings' ? <SettingsPage /> : null}
       </main>
     </div>

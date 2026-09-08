@@ -12,7 +12,16 @@ import json
 from pathlib import Path
 from typing import Dict, Optional
 
-# 自主日常活动允许的动作（routine 字段的 action 枚举 — 校验与调度共用）
+# 已知动作示例（**仅作 UI 建议与文档示例，不参与校验**）
+#
+# 2026-09-08 变更（Web Console Step 5）: 原先这里是**白名单**，action 不在其中就被丢弃。
+# 那等于让加载器替游戏做决定 —— 违反 game-agnostic 红线（"不假设 action"），
+# 且与 npc/world.py 的 ACTIONS 长期不一致（这边允许 world 不认识的 rest，
+# 却不允许 world 认识的 move/craft/deliver，制作者想写"巡逻"就被拒）。
+#
+# 现在: action 只要求是**非空字符串**。能不能执行由 Runtime 决定
+# （apply_action 对未知动作返回 (world, False, "未知行动: X")，不崩、有明确消息）。
+# 想要建议列表请用 console_api 的 GET /api/actions —— 从 Runtime 动态取，不写死在这。
 ROUTINE_ACTIONS = ("gather", "rest", "say")
 
 # 必需字段（缺失即报错，防制作者漏填导致 NPC 行为异常）
@@ -33,15 +42,17 @@ def _clean_routine(path_name: str, routine) -> list:
         bad = None
         if not isinstance(item, dict):
             bad = "不是对象"
-        elif item.get("action") not in ROUTINE_ACTIONS:
-            bad = f"action 无效（{item.get('action')}，可用: {'/'.join(ROUTINE_ACTIONS)}）"
-        elif item["action"] == "gather" and not item.get("resource"):
-            bad = "gather 缺少 resource"
         else:
-            for field in ("count", "ticks", "weight"):
-                if field in item and (not isinstance(item[field], (int, float)) or item[field] <= 0):
-                    bad = f"{field} 必须是正数"
-                    break
+            # action 只校验"非空字符串" —— 具体能执行什么由 Runtime 决定，
+            # 加载器不替游戏做决定（game-agnostic；见 ROUTINE_ACTIONS 注释）。
+            action = item.get("action")
+            if not isinstance(action, str) or not action.strip():
+                bad = f"action 必须是非空字符串（当前: {action!r}）"
+            else:
+                for field in ("count", "ticks", "weight"):
+                    if field in item and (not isinstance(item[field], (int, float)) or item[field] <= 0):
+                        bad = f"{field} 必须是正数"
+                        break
         if bad:
             print(f"[persona_loader] 跳过 {path_name}: routine 第 {i + 1} 项（{bad}）")
             continue

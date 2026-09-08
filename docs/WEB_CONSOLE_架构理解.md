@@ -317,3 +317,48 @@ if llm is None:
 - 清理 `npc/store/.trash/` 里 smoke test 残留的 2.3MB 记忆卡。
 - 测试 traceback 显示的 `D:\NPCSidekick\1_Dagent\...` 路径不存在 —— 是陈旧 `.pyc`
   里记录的旧编译路径（目录被重命名过），不影响运行。
+
+## §10 Step 5 — Characters（2026-09-08）
+
+### 后端
+
+1. **放宽 `routine.action` 白名单**（`npc/persona_loader.py`）
+   - 原 `ROUTINE_ACTIONS=("gather","rest","say")` 是**校验白名单**，action 不在其中就被静默丢弃。
+     这与 game-agnostic 红线（"不假设 action"）冲突，且与 `npc/world.py` 的
+     `ACTIONS=("move","gather","craft","deliver","say")` 长期不一致（这边允许 world 不认识的
+     rest，却不允许 world 认识的 move/craft/deliver）。
+   - 现在 `action` 只校验**非空字符串**；`ROUTINE_ACTIONS` 降级为"建议示例"，不参与校验。
+   - 去掉 `gather 缺少 resource` 的硬编码（那是具体游戏语义）。
+   - 能否执行由 Runtime 决定：`apply_action` 对未知动作返回 `(world, False, "未知行动: X")`，不崩。
+   - 推翻的固化测试已同步更新：`test_bad_items_skipped_with_warning`（坏项改为空/非字符串 action）、
+     `test_personas_api.test_bad_routine_item_is_cleaned`（同样）；新增
+     `test_any_action_accepted` / `test_gather_without_resource_ok` / `test_custom_action_kept` 钉住新语义。
+
+2. **POST /api/personas 热加载**（`npc/server.py`）
+   - 原 `create_persona` 返回"重启大脑服务器后生效"。现在与 PUT 口径一致：
+     写盘 → `hot_reload` → 立刻出现在 `/api/npcs` 与 `/api/state`。
+   - 写盘成功但热加载失败时**不 500**，降级返回 `hot_reloaded=false + error`（用户的编辑不能丢）。
+   - 新增局部 `_console_ctx()`：POST 与 `mount_console_api` 共用同一份运行时上下文
+     （npcs/world 会被热加载增删，每次现造比持有引用更稳）。
+
+3. **GET /api/actions**（`npc/console_api.py`）
+   - 动作名建议：`runtime`（当前世界 ACTIONS）+ `observed`（现有人设 routine 里实际用到的）。
+   - 明确"建议而非白名单"；前端 datalist 用，用户仍可自由输入。
+
+### 前端
+
+- `pages/CharactersPage.tsx`：角色清单 = 人设定义（`/api/personas`）+ 运行时快照（`/api/npcs`）
+  合并；卡片网格 + 搜索 + 新建 + 删除（`.trash` 二次确认）；状态色由字符串哈希（`stateColor`）。
+- `pages/CharacterEditor.tsx`：覆盖全字段（id/name/identity/personality/speech_style/taboos/
+  desires/goals/rules/routine/context_extra/system_prompt_override），不丢字段 ——
+  始终基于完整对象浅拷贝修改，表单没画的字段原样保留。结构化字段用 "key = value" 文本编辑，
+  值是对象时原样显示 JSON。**表单与 View JSON 是同一份 draft 的两种视图**。
+  - `system_prompt_override` 标 Advanced；留空 = 自动拼装。
+  - 新建态：id 可编辑 + 本地必填预检（与后端 REQUIRED_FIELDS 对齐）；保存统一走 PUT（后端 upsert）。
+- `components/RoutineEditor.tsx`：增删改 + 上/下移排序；action 为自由文本 + datalist 建议；
+  未知字段原样保留并提示去 JSON 模式编辑。
+
+### 测试
+- 新增 `TestActions`（3 条）+ `test_post_creates_and_hot_reloads`；
+  白名单放宽同步更新 persona_loader / personas_api 相关用例。
+- 全量 `pytest`（junitxml 解析）+ 前端 `tsc --noEmit && vite build` 通过。

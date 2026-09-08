@@ -340,6 +340,46 @@ def mount_console_api(app: FastAPI, ctx: ConsoleContext) -> None:
                 dropped = True
         return {"ok": True, "npc_id": pid, "memory_dropped": dropped, "trashed": trashed}
 
+    # ── 动作建议（routine 编辑器的下拉候选）────────────
+
+    @app.get("/api/actions")
+    async def list_actions() -> Dict:
+        """动作名建议 —— **不是白名单**，只是给编辑器的输入提示。
+
+        game-agnostic 红线: 这里不硬编码任何动作名。
+          - runtime:  当前世界确实能执行的动作（来自 npc/world.py 的 ACTIONS）
+          - observed: 现有人设 routine 里实际用到的（含制作者自定义，去重排序）
+
+        前端把两者合并成 datalist；用户仍可自由输入任意值 ——
+        persona_loader 只校验"非空字符串"，能不能跑由 Runtime 决定
+        （apply_action 对未知动作返回 ok=False + 明确消息，不崩）。
+        """
+        runtime: list = []
+        try:
+            from npc.world import ACTIONS
+            runtime = list(ACTIONS)
+        except Exception:                     # 换过 world 适配器/导入失败 → 给空建议即可
+            pass
+
+        observed = set()
+        try:
+            from npc.persona_loader import load_personas_from_dir
+            for p in load_personas_from_dir(str(ctx.personas_path)).values():
+                for item in (p.get("routine") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    a = item.get("action")
+                    if isinstance(a, str) and a.strip():
+                        observed.add(a)
+        except Exception:
+            pass
+
+        return {
+            "runtime": runtime,
+            "observed": sorted(observed),
+            "note": "建议值而非白名单；可自由输入任意动作名，能否执行由 Runtime 决定",
+        }
+
     # ── 关系图 ────────────────────────────────────────
 
     @app.get("/api/relationships")
