@@ -163,7 +163,10 @@ def create_app(token: str) -> FastAPI:
         })
 
     # 静态文件（必须最后注册，否则会拦截 API 路由）
-    static_dir = Path(__file__).parent / "static"
+    # 2026-09-07: 通用 Agent 聊天台迁到 web/agent_static/ —— 与 NPC Runtime 的
+    # web/static/ 彻底分开。两服务不再共用一份静态目录（原先 index.html 会挂着
+    # /api/chat/stream 被 NPC 服务 Serve，在 8765 上是个点不开的废页）。
+    static_dir = Path(__file__).parent / "agent_static"
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
     return app

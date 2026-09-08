@@ -112,12 +112,17 @@ class TestMemoryWriteApi:
 
 
 class TestStaticConsole:
-    """调试台页面由大脑服务器本尊托管（同源零配置）。"""
+    """调试台页面由大脑服务器本尊托管（同源零配置）。
 
-    def test_root_serves_console(self, client):
+    2026-09-07: 根路径改为重定向 —— Console 已构建进 /console/，没构建则回落
+    旧关系网页 /npc.html。旧 web/static/index.html（通用 Agent 聊天台）已迁到
+    web/agent_static/ 由 web/server.py 托管，两个服务不再共用静态目录。
+    """
+
+    def test_root_redirects_into_console(self, client):
         r = client.get("/")
         assert r.status_code == 200
-        assert "NPCSidekick" in r.text
+        assert r.url.path in ("/console/", "/npc.html")
 
     def test_npc_html_is_new_console(self, client):
         r = client.get("/npc.html")

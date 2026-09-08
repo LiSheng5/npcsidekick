@@ -20,3 +20,17 @@ tests/test_gta_adapter.py
 # Claude 内部协作文档（给 AI 看，不进公开仓库）
 CLAUDE.md
 .claude/
+
+# ── Web Console(2026-09-07) ──
+# 本地密钥/Provider 配置(含 API Key — 绝不入库)
+npc/config/
+*.enc
+# Console 的"删除"= 移进 .trash（可反悔），回收站同样不入库
+npc/personas/.trash/
+npc/store/.trash/
+npc/store*/.trash/
+# 前端工程: 依赖与构建产物不入库(dist 由 npm run build 产出)
+web/console/node_modules/
+web/console/dist/
+web/console/dist-ssr/
+*.tsbuildinfo

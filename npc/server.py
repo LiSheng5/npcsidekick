@@ -41,7 +41,7 @@ from typing import Dict, List, Optional
 _BASE_DIR = Path(__file__).resolve().parents[1]
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent.logging_config import log
@@ -62,6 +62,8 @@ from npc.tts import available as tts_available
 from npc.tts import synthesize as tts_synthesize
 from npc.tts import to_base64 as tts_to_base64
 from npc.tts import voice_for as tts_voice_for
+
+from npc.console_api import ConsoleContext, mount_console_api
 
 _ALLOWED_ORIGIN_PREFIXES = ("http://127.0.0.1", "http://localhost")
 
@@ -327,12 +329,14 @@ def _apply_context(world: Dict, context: Optional[Dict]) -> None:
 
 def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                       world_id: str = "",
-                      personas_dir: str = "") -> FastAPI:
+                      personas_dir: str = "",
+                      config_dir: str = "") -> FastAPI:
     """构建 NPCSidekick Web 服务（工厂函数，便于测试注入）。
 
     npcs: {id: NPC} 多 NPC 共享世界。默认加载示例村庄。
     world_id: 本实例的世界命名空间（多世界隔离; 空 = 单世界模式,不校验）。
     personas_dir: 制作者人设目录（npc/personas/<id>.json; 空 = 项目默认, 测试注入临时目录）。
+    config_dir: Web Console 的 provider/密钥目录（空 = npc/config; 测试注入临时目录）。
     后台自主循环随 FastAPI lifespan 启动 — TestClient 不进 with 上下文则不启动（测试确定性）。
     """
     if npcs is None:
@@ -372,6 +376,17 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                 detail=f"world_id 不匹配: 本实例服务 '{world_id}', 请求是 '{body.get('world_id')}'")
 
     _dynamic: set = set()   # 动态注册的 id(可反注册);cast 静态角色(cang/ali)不在其中
+
+    class _WorldHandle:
+        """世界句柄占位: NPC 全删光时（Console 允许）事件/状态端点仍能读世界，
+        不再 StopIteration。所有 NPC 共享同一个 world 对象，语义完全等价。"""
+
+        def __init__(self, w: Dict):
+            self.world = w
+
+    def _world_handle():
+        """取一个能拿到 .world 的句柄: 有 NPC 就用第一个，没有就用占位。"""
+        return next(iter(npcs.values()), None) or _WorldHandle(world)
 
     # ── 观测计数（2026-08-23 §15 /api/stats）: 零侵入埋点 — 只在端点收口处记一笔。
     # 调 prompt 看延迟/错误率、容量规划看调用量, 都从这里取数; 不做持久化（重启清零）。
@@ -481,8 +496,31 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
 
     @app.get("/api/npcs", dependencies=[Depends(_verify_origin)])
     async def list_npcs() -> Dict:
-        """NPC 列表（前端切换角色用）。"""
-        return {"npcs": [{"id": n.persona["id"], "name": n.persona.get("name", n.persona["id"])} for n in npcs.values()]}
+        """NPC 列表（前端切换角色用）。
+
+        Web Console 扩展（2026-09-07，纯 additive — 老客户端只读 id/name 不受影响）:
+        附带 identity/state/activity/position/memory_count，让 Character 列表
+        不用再逐个人肉拉一遍。
+        """
+        return {"npcs": [_npc_brief(nid, n) for nid, n in npcs.items()]}
+
+    def _npc_brief(nid: str, n: NPC) -> Dict:
+        """单个 NPC 的列表视图（运行时现状，随取随新）。"""
+        actor = n.world["actors"].get(nid, {})
+        return {
+            "id": n.persona["id"],
+            "name": n.persona.get("name", n.persona["id"]),
+            # ── 以下为 Console 扩展字段 ──
+            "identity": n.persona.get("identity", ""),
+            "state": n.state,
+            "activity": n.activity_desc(),
+            "position": actor.get("position", ""),
+            "stamina": actor.get("stamina", 100),
+            "memory_count": len(n.memory.all()),
+            "has_memory_card": n.store_path.exists(),
+            "ephemeral": getattr(n, "ephemeral", False),
+            "use_llm": bool(getattr(n, "use_llm", True)),
+        }
 
     # ── 制作者人设 CRUD（2026-08-27 关系网 "新建 NPC"）─────────────────────
 
@@ -542,8 +580,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         _consumer = request.query_params.get("consumer")
         if _consumer:
             _taskloop.REGISTRY.touch(_consumer)   # 轮询即心跳(可选 query 参数)
-        first = next(iter(npcs.values()))
-        _hud = first.world.get("_hud") or {}
+        _hud = world.get("_hud") or {}
         return {
             "world_id": world_id,
             "panels": list(_hud.get("panels") or _DEFAULT_HUD_PANELS),
@@ -557,9 +594,9 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                 }
                 for nid, n in npcs.items()
             },
-            "delivered": first.world["delivered"],
-            "tick": first.world.get("_tick", 0),
-            "log_tail": first.world["log"][-10:],        # 气泡差分用（碰面说话）
+            "delivered": world["delivered"],
+            "tick": world.get("_tick", 0),
+            "log_tail": world["log"][-10:],        # 气泡差分用（碰面说话）
             # 协议 v1·任务下发(booked→dispatched 首派标记) — mod 认领执行后 POST /api/task_done
             # 任务书#05·A: 本端点纯读无写副作用 —— 派发事件由账本入队,
             # _tick_loop 每帧 / 事件流端点 flush 进世界日志(断连也丢不了)。
@@ -585,14 +622,13 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
           deliver = 谁把资源交给了主角 (交付动画)
           subagent= B2/A 子代理生命周期 (§17)
         """
-        first = next(iter(npcs.values()))
-        flush_task_events(first.world)   # 任务书#05·A: 返回增量前落盘, 事件零延迟
-        events, total = events_archive.events_since(first, since)
+        flush_task_events(world)   # 任务书#05·A: 返回增量前落盘, 事件零延迟
+        events, total = events_archive.events_since(_world_handle(), since)
         return {
             "events": events,
             "log_count": total,
-            "tick": first.world.get("_tick", 0),
-            "delivered": first.world["delivered"],
+            "tick": world.get("_tick", 0),
+            "delivered": world["delivered"],
         }
 
     @app.get("/api/events/stream", dependencies=[Depends(_verify_origin)])
@@ -603,7 +639,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         每 ~15s 一条注释心跳(`: ping`)防中间层断连; 客户端断开自动收尾。
         零新依赖(uvicorn/starlette 原生); WebSocket 等真需要双向时再上。
         """
-        first = next(iter(npcs.values()))
+        world_handle = _world_handle()   # 连接期内固定（NPC 增删不影响游标语义）
 
         async def gen():
             _stats["sse_clients"] += 1
@@ -615,8 +651,10 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                 while True:
                     if await request.is_disconnected():
                         break
-                    flush_task_events(first.world)   # 任务书#05·A
-                    evs, total = _events_since(first, cursor)   # §18: 轮转+偏移+冷回放统一收口
+                    flush_task_events(world)   # 任务书#05·A
+                    # 修复(2026-09-07): 原名 _events_since 未定义 → 一连 SSE 就 NameError。
+                    # 统一走 events_archive.events_since(与 /api/events 同一实现)。
+                    evs, total = events_archive.events_since(world_handle, cursor)
                     for ev in evs:
                         yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
                     if total > cursor or evs:
@@ -795,17 +833,17 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         用途: 调 prompt 对比延迟、看 LLM vs 规则占比、容量规划。内存态, 重启清零;
         持久化/时序库等真需要时再上（先攒基线数据）。
         """
-        first = next(iter(npcs.values()))
+        first = _world_handle()
         payload: Dict = dict(_stats)
         payload.update({
             "version": BRAIN_VERSION,
             "uptime_sec": int(time.time() - _stats["started_at"]),
-            "tick": first.world.get("_tick", 0),
+            "tick": world.get("_tick", 0),
             "mode": _effective_mode(),
             "npcs": len(npcs),
             "world_id": world_id,
             # §18 冷层: 已归档的事件条数（内存 log 只留尾部）
-            "log_offset": int(first.world.get("_log_offset", 0)),
+            "log_offset": int(world.get("_log_offset", 0)),
             # 任务书 #01：LLM 调度队列观测（enabled/depth/waits/timeouts/avg_wait_ms）
             "scheduler": SCHED.snapshot(),
             # 协议 v1·任务账本观测(total/by_state/pending_discussions)
@@ -882,13 +920,17 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
 
     def _effective_mode() -> str:
         """实际生效模式: LLM 模式但无 key/初始化失败 → 退化规则。"""
-        first = next(iter(npcs.values()))
+        first = next(iter(npcs.values()), None)
+        if first is None:
+            return "rules"        # 没有 NPC 就没有 LLM 客户端可言
         return "llm" if (first.use_llm and first._get_llm() is not None) else "rules"
 
     @app.get("/api/mode", dependencies=[Depends(_verify_origin)])
     async def get_mode() -> Dict:
         """当前对话模式（规则 / LLM）— 全局设置，所有 NPC 一致。"""
-        return {"mode": _effective_mode(), "requested": "llm" if next(iter(npcs.values())).use_llm else "rules"}
+        first = next(iter(npcs.values()), None)
+        requested = "llm" if (first is not None and first.use_llm) else "rules"
+        return {"mode": _effective_mode(), "requested": requested}
 
     @app.post("/api/mode", dependencies=[Depends(_verify_origin)])
     async def set_mode(request: Request) -> Dict:
@@ -905,14 +947,15 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
     async def get_approval(npc_id: str = "") -> Dict:
         """审批策略视图（Codex /approvals 对照）: 全局档位 + 各动作生效决定。
         带 npc_id = 该 NPC 粒度; 缺省 = 全局会话级。"""
-        first = next(iter(npcs.values()))
+        first = next(iter(npcs.values()), None)
         if npc_id and npc_id in npcs:
             return {"policy": npcs[npc_id].approval_policy,
                     "actions": approval_table(npcs[npc_id].approval_policy,
                                               npcs[npc_id].approval_overrides),
                     "npc_id": npc_id}
-        return {"policy": first.approval_policy,
-                "actions": approval_table(first.approval_policy)}
+        policy = first.approval_policy if first is not None else "auto"
+        return {"policy": policy,
+                "actions": approval_table(policy)}
 
     @app.post("/api/approval", dependencies=[Depends(_verify_origin)])
     async def set_approval_api(request: Request) -> Dict:
@@ -929,8 +972,9 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         ok = set_approval(body.get("action", ""), body.get("decision", ""))
         if not ok:
             raise HTTPException(status_code=400, detail="action 或 decision 不合法")
-        first = next(iter(npcs.values()))
-        return {"ok": True, "actions": approval_table(first.approval_policy)}
+        first = next(iter(npcs.values()), None)
+        policy = first.approval_policy if first is not None else "auto"
+        return {"ok": True, "actions": approval_table(policy)}
 
     @app.get("/api/manifest", dependencies=[Depends(_verify_origin)])
     async def manifest_get() -> Dict:
@@ -969,7 +1013,34 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         steps = npc.task_log[-1]["steps"] if npc.task_log else []
         return {"ok": ok, "steps": steps}
 
+    # ── 根路径: 一条命令启动后打开 127.0.0.1:8765 就能用（不用记子路径）──
+    # Console 已构建 → 进 Console；没构建 → 回落到旧关系网页（旧页下架后需改这里）。
+    @app.get("/", include_in_schema=False)
+    async def root():
+        target = "/console/" if (_BASE_DIR / "web" / "console" / "dist").is_dir() else "/npc.html"
+        return RedirectResponse(url=target)
+
+    # ── Web Console（2026-09-07）────────────────────────
+    # 开发者工具层: 人设 CRUD + 热加载 / 关系图 / 记忆单条编辑 / Provider 配置。
+    # 游戏协议三件套一个没动；本层端点全是新增的 /api/* 路径。
+    mount_console_api(app, ConsoleContext(
+        npcs=npcs,
+        world=world,
+        personas_path=personas_path,
+        store_dir=str(next(iter(npcs.values())).store_path.parent)
+        if npcs else str(_BASE_DIR / "npc" / "store"),
+        world_id=world_id,
+        config_dir=Path(config_dir) if config_dir else (_BASE_DIR / "npc" / "config"),
+        guard_world=lambda body: guard_world(body),
+    ))
+
     # ── 静态页面（最后挂载；路径锚定代码位置）────────────────
+    # Console 构建产物（web/console/dist）挂 /console/; 未构建时静默跳过，
+    # 不影响既有页面与游戏接入（dist 由 `npm run build` 产出，不进 Git）。
+    _console_dist = _BASE_DIR / "web" / "console" / "dist"
+    if _console_dist.is_dir():
+        app.mount("/console", StaticFiles(directory=str(_console_dist), html=True),
+                  name="console")
     app.mount("/", StaticFiles(directory=str(_BASE_DIR / "web" / "static"), html=True), name="static")
     return app
 
