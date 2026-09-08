@@ -77,6 +77,13 @@ export interface RelationshipGraph {
   note?: string
 }
 
+/** GET /api/actions —— 动作名建议（**不是白名单**）。 */
+export interface ActionsPayload {
+  runtime: string[]
+  observed: string[]
+  note?: string
+}
+
 export interface ProviderView {
   id: string
   name: string

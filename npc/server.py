@@ -346,6 +346,23 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
 
     personas_path = Path(personas_dir or _BASE_DIR / "npc" / "personas")
 
+    def _console_ctx() -> ConsoleContext:
+        """Web Console 的运行时上下文（每次现造 —— npcs/world 会被热加载增删）。
+
+        供 create_persona（新建后热加载）与 mount_console_api（管理端点）共用，
+        避免两处各写一份而漂移。
+        """
+        return ConsoleContext(
+            npcs=npcs,
+            world=world,
+            personas_path=personas_path,
+            store_dir=str(next(iter(npcs.values())).store_path.parent)
+            if npcs else str(_BASE_DIR / "npc" / "store"),
+            world_id=world_id,
+            config_dir=Path(config_dir) if config_dir else (_BASE_DIR / "npc" / "config"),
+            guard_world=lambda body: guard_world(body),
+        )
+
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
         task = asyncio.create_task(_tick_loop(world, npcs))
@@ -552,8 +569,20 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
             raise HTTPException(status_code=422, detail=str(exc))
         personas_path.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 2026-09-08 (Web Console Step 5): 与 PUT /api/personas/{id} 口径一致 ——
+        # 新建完立刻热加载进运行时。旧版返回"重启大脑服务器后生效"，
+        # 对制作者工具等于"点了没反应"，Console 不该这样。
+        # 注意: 写盘已成功 —— 热加载失败也不该让请求 500（用户的编辑不能丢），
+        # 故降级为 hot_reloaded=false + 原因，让 UI 明说。
+        from npc.console_api import hot_reload
+        try:
+            action = hot_reload(_console_ctx(), pid, cleaned)
+            hot_reloaded = True
+            err = ""
+        except Exception as exc:                       # 绝不因热加载失败吞掉写盘结果
+            action, hot_reloaded, err = "failed", False, str(exc)
         return {"ok": True, "npc_id": pid, "path": f"npc/personas/{pid}.json",
-                "note": "重启大脑服务器后生效"}
+                "action": action, "hot_reloaded": hot_reloaded, "error": err}
 
     @app.get("/api/npc", dependencies=[Depends(_verify_origin)])
     async def get_npc_info(npc_id: str = "cang") -> Dict:
@@ -1023,16 +1052,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
     # ── Web Console（2026-09-07）────────────────────────
     # 开发者工具层: 人设 CRUD + 热加载 / 关系图 / 记忆单条编辑 / Provider 配置。
     # 游戏协议三件套一个没动；本层端点全是新增的 /api/* 路径。
-    mount_console_api(app, ConsoleContext(
-        npcs=npcs,
-        world=world,
-        personas_path=personas_path,
-        store_dir=str(next(iter(npcs.values())).store_path.parent)
-        if npcs else str(_BASE_DIR / "npc" / "store"),
-        world_id=world_id,
-        config_dir=Path(config_dir) if config_dir else (_BASE_DIR / "npc" / "config"),
-        guard_world=lambda body: guard_world(body),
-    ))
+    mount_console_api(app, _console_ctx())
 
     # ── 静态页面（最后挂载；路径锚定代码位置）────────────────
     # Console 构建产物（web/console/dist）挂 /console/; 未构建时静默跳过，

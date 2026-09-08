@@ -1,4 +1,5 @@
 import type {
+  ActionsPayload,
   MemoryEntry,
   NpcBrief,
   Persona,
@@ -45,9 +46,19 @@ export const api = {
 
   relationships: () => req<RelationshipGraph>('/api/relationships'),
 
+  /** 动作名建议（routine 编辑器用）。game-agnostic: 值来自 Runtime，UI 不硬编码。 */
+  actions: () => req<ActionsPayload>('/api/actions'),
+
   personas: () => req<{ personas: Persona[] }>('/api/personas'),
   persona: (id: string) => req<{ persona: Persona }>(`/api/personas/${id}`),
-  createPersona: (p: Persona) => post<{ ok: boolean }>('/api/personas', p),
+  createPersona: (p: Persona) =>
+    post<{
+      ok: boolean
+      npc_id?: string
+      hot_reloaded?: boolean
+      error?: string
+      detail?: string
+    }>('/api/personas', p),
   updatePersona: (id: string, p: Persona) =>
     req<{ ok: boolean; persona: Persona }>(`/api/personas/${id}`, {
       method: 'PUT',

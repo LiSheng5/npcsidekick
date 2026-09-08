@@ -79,13 +79,20 @@ class TestLoadDir:
             assert persona["rules"]["replies"]
 
     def test_example_files_have_routine(self):
-        """苍/阿黎配了自主日常（游戏村民要活起来）。"""
+        """苍/阿黎配了自主日常（游戏村民要活起来）。
+
+        action 只要求是**非空字符串** —— 具体动作名由游戏内容决定，
+        加载器不假设（2026-09-08 起不再校验白名单）。
+        """
         from pathlib import Path
 
         for name in ("cang.json", "ali.json"):
             persona = load_persona_from_json(Path("npc/personas") / name)
             assert persona["routine"], f"{name} 缺 routine"
-            assert all(it["action"] in ("gather", "rest", "say") for it in persona["routine"])
+            assert all(
+                isinstance(it["action"], str) and it["action"].strip()
+                for it in persona["routine"]
+            )
 
 
 class TestRoutineValidation:
@@ -121,14 +128,37 @@ class TestRoutineValidation:
     def test_bad_items_skipped_with_warning(self, tmp_path):
         data = self._valid()
         data["routine"] = [
-            {"action": "fly", "weight": 1},                    # action 非法 → 丢
-            {"action": "gather", "weight": 1},                 # gather 缺 resource → 丢
-            {"action": "rest", "ticks": 0},                    # ticks 非正 → 丢
+            {"action": "", "weight": 1},                        # action 空 → 丢
+            {"action": 123, "weight": 1},                       # action 非字符串 → 丢
+            {"action": "rest", "ticks": 0},                     # ticks 非正 → 丢
             {"action": "gather", "resource": "木材", "count": 1},  # 合法 → 留
         ]
         p = _write(tmp_path, "mixed.json", data)
         persona = load_persona_from_json(p)
         assert persona["routine"] == [{"action": "gather", "resource": "木材", "count": 1}]
+
+    def test_any_action_accepted(self, tmp_path):
+        """2026-09-08: 不假设 action —— 任意非空字符串都可写。
+
+        旧版有 ROUTINE_ACTIONS 白名单，写"巡逻/trade/chant"会被静默丢弃，
+        等于加载器替游戏做决定。能不能执行由 Runtime 说了算
+        （apply_action 对未知动作返回成功=False + 明确消息，不崩）。
+        """
+        data = self._valid()
+        data["routine"] = [
+            {"action": "patrol", "weight": 2},
+            {"action": "trade", "resource": "铁料", "count": 1},
+            {"action": "打坐", "ticks": 3},
+        ]
+        p = _write(tmp_path, "anyaction.json", data)
+        assert load_persona_from_json(p)["routine"] == data["routine"]
+
+    def test_gather_without_resource_ok(self, tmp_path):
+        """不再硬编码 'gather 必须带 resource' —— 那是具体游戏的语义。"""
+        data = self._valid()
+        data["routine"] = [{"action": "gather", "weight": 1}]
+        p = _write(tmp_path, "nores.json", data)
+        assert load_persona_from_json(p)["routine"] == data["routine"]
 
     def test_all_bad_becomes_empty_routine(self, tmp_path):
         data = self._valid()

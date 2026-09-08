@@ -88,8 +88,17 @@ class TestPersonasApi:
         assert r.status_code == 422
 
     def test_bad_routine_item_is_cleaned(self, client, personas_dir):
-        body = dict(OK_BODY, id="clean", routine=[{"action": "fly", "weight": 1}])
+        """坏项丢弃不炸，顶多"不动"。2026-09-08: 坏 = 空/非字符串 action，不再是白名单外。"""
+        body = dict(OK_BODY, id="clean", routine=[{"action": "", "weight": 1}])
         r = client.post("/api/personas", json=body)
         assert r.status_code == 200
         data = json.load(open(f"{personas_dir}/clean.json", encoding="utf-8"))
-        assert data["routine"] == []   # 坏项丢弃不炸，顶多"不动"
+        assert data["routine"] == []
+
+    def test_custom_action_kept(self, client, personas_dir):
+        """2026-09-08: 任意 action 都要保住 —— 加载器不替游戏决定动作名。"""
+        body = dict(OK_BODY, id="custom", routine=[{"action": "巡逻", "weight": 2}])
+        r = client.post("/api/personas", json=body)
+        assert r.status_code == 200
+        data = json.load(open(f"{personas_dir}/custom.json", encoding="utf-8"))
+        assert data["routine"] == [{"action": "巡逻", "weight": 2}]

@@ -72,10 +72,6 @@ def persona_file(paths, pid="hun"):
     return os.path.join(paths["personas"], f"{pid}.json")
 
 
-def persona_file(paths, pid="hun"):
-    return os.path.join(paths["personas"], f"{pid}.json")
-
-
 class TestPersonaCrud:
     def test_get_missing_persona_404(self, client):
         assert client.get("/api/personas/hun").status_code == 404
@@ -96,6 +92,18 @@ class TestPersonaCrud:
         assert "hun" in ids
         actors = client.get("/api/state").json()["actors"]
         assert "hun" in actors          # 世界 actor 槽已注册（否则 tick 会 KeyError）
+
+    def test_post_creates_and_hot_reloads(self, client):
+        """2026-09-08 (Step 5): POST 也热加载 —— 与 PUT 口径一致，不再"重启后生效"。"""
+        r = client.post("/api/personas", json=OK_PERSONA)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["hot_reloaded"] is True
+        assert body["action"] == "created"
+        ids = [n["id"] for n in client.get("/api/npcs").json()["npcs"]]
+        assert "hun" in ids
+        assert "hun" in client.get("/api/state").json()["actors"]
 
     def test_put_updates_existing_in_place(self, client, paths):
         client.put("/api/personas/hun", json=OK_PERSONA)
@@ -306,3 +314,25 @@ class TestEmptyRuntimeSafety:
         events = client.get("/api/events")
         assert events.status_code == 200
         assert events.json()["events"] == []
+
+
+class TestActions:
+    """GET /api/actions —— 动作名建议（**不是白名单**，game-agnostic）。"""
+
+    def test_returns_runtime_actions(self, client):
+        r = client.get("/api/actions")
+        assert r.status_code == 200
+        d = r.json()
+        # 当前世界能执行的动作（来自 npc/world.py ACTIONS，至少含 move/gather）
+        assert set(d["runtime"]) >= {"move", "gather"}
+
+    def test_observed_collects_custom_actions(self, client):
+        """人设 routine 里的自定义动作名会被收进 observed（不硬编码）。"""
+        body = dict(OK_PERSONA, routine=[{"action": "打铁", "weight": 1}])
+        assert client.put("/api/personas/hun", json=body).status_code == 200
+        d = client.get("/api/actions").json()
+        assert "打铁" in d["observed"]
+
+    def test_note_clarifies_not_whitelist(self, client):
+        d = client.get("/api/actions").json()
+        assert "建议" in d.get("note", "")
