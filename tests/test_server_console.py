@@ -112,21 +112,21 @@ class TestMemoryWriteApi:
 
 
 class TestStaticConsole:
-    """调试台页面由大脑服务器本尊托管（同源零配置）。
+    """根路径由大脑服务器本尊托管（同源零配置）。
 
-    2026-09-07: 根路径改为重定向 —— Console 已构建进 /console/，没构建则回落
-    旧关系网页 /npc.html。旧 web/static/index.html（通用 Agent 聊天台）已迁到
-    web/agent_static/ 由 web/server.py 托管，两个服务不再共用静态目录。
+    2026-09-08: 旧关系网页 /npc.html 与通用聊天台(web/server.py + agent_static)
+    已整套下架移到桌面归档 —— 根路径不再兜底 npc.html，只认 Console。
     """
 
-    def test_root_redirects_into_console(self, client):
+    def test_root_points_to_console_or_hint(self, client):
         r = client.get("/")
         assert r.status_code == 200
-        assert r.url.path in ("/console/", "/npc.html")
+        # Console 已构建 → 重定向到 /console/；未构建 → 返回提示 JSON（不再回落旧页）
+        if r.headers.get("content-type", "").startswith("text/html"):
+            assert r.url.path == "/console/"
+        else:
+            assert r.json()["name"] == "NPCSidekick"
 
-    def test_npc_html_is_new_console(self, client):
-        r = client.get("/npc.html")
-        assert r.status_code == 200
-        assert "NPC关系网" in r.text       # 关系网标题（2026-08-27 替换调试台）
-        assert "新建 NPC" in r.text        # 新建按钮 + /api/personas 表单
-        assert "USE_MOCK" not in r.text    # mock 开关已移除
+    def test_npc_html_is_gone(self, client):
+        """旧关系网页已下架 —— 不应再有人依赖 /npc.html。"""
+        assert client.get("/npc.html").status_code == 404

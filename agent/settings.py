@@ -13,7 +13,6 @@ AgentSettings — 可注入的配置数据类。
 from __future__ import annotations
 
 import os
-import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -111,12 +110,6 @@ class AgentSettings:
     # ── Logging ────────────────────────────────────────
     log_level: str = "INFO"
     log_mode: str = "console"  # "console" | "json" | "test"
-
-    # ── Web UI ─────────────────────────────────────────
-    web_host: str = "127.0.0.1"
-    web_port: int = 8765
-    web_token: str = field(default_factory=lambda: secrets.token_hex(16))  # 启动时随机生成
-    web_auto_open: bool = False  # 启动时自动打开浏览器
 
     # ── Streaming ──────────────────────────────────────
     streaming_enabled: bool = False

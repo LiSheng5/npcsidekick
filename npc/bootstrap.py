@@ -109,11 +109,11 @@ def main(argv=None) -> None:
     print(f"地点词典已就绪: {sorted(places.keys())}" if places else "地点词典: 无(回退尾词清洗)")
 
     app = create_npc_server(npcs, world_id=args.world_id)
-    log.info("npc_server_started", url=f"http://127.0.0.1:{port}/npc.html")
-    print(f"NPCSidekick[{args.world_id or 'default'}]: http://127.0.0.1:{port}/npc.html"
-          f"  (store={_store})")
+    url = f"http://127.0.0.1:{port}/"
+    log.info("npc_server_started", url=url)
+    print(f"NPCSidekick[{args.world_id or 'default'}]: {url}  (store={_store})")
     if not args.no_browser:
-        webbrowser.open(f"http://127.0.0.1:{port}/npc.html")
+        webbrowser.open(url)
 
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
