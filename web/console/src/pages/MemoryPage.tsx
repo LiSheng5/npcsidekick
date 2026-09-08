@@ -17,7 +17,7 @@ import type {
     · 检索模式: 有 query 时后端走加权检索，返回的是**召回 top-k**，不是全量过滤；
       所以 entries 会少于 total，页面顶部明确标注。
     · 写入三态: added / merged（同文日常被去重闸折叠计数）/ rejected（安全闸拒收）。 */
-export function MemoryPage() {
+export function MemoryPage({ focus }: { focus?: string }) {
   const [npcs, setNpcs] = useState<NpcBrief[]>([])
   const [pid, setPid] = useState('')
   const [data, setData] = useState<MemoryListPayload>()
@@ -64,6 +64,12 @@ export function MemoryPage() {
   useEffect(() => {
     loadMemory()
   }, [loadMemory])
+
+  // 从 Graph 跳过来时带上角色 id —— 只在它确实在运行中时才切换，
+  // 否则 loadNpcs 的兜底（选第一个）依然生效。
+  useEffect(() => {
+    if (focus) setPid(focus)
+  }, [focus])
 
   const entries = useMemo(() => {
     const list = [...(data?.entries ?? [])]

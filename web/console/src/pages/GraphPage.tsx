@@ -6,7 +6,11 @@ import type { RelationshipGraph as GraphData } from '../types'
 
 /** 首页: 关系图(真实数据) + 点节点出 Inspector。
  *  Runtime 没有关系数据时(source="none")明确告知，绝不用 demo 顶替。 */
-export function GraphPage() {
+export function GraphPage({
+  onNavigate,
+}: {
+  onNavigate?: (page: string, npcId: string) => void
+}) {
   const [graph, setGraph] = useState<GraphData>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
@@ -83,6 +87,7 @@ export function GraphPage() {
           edges={graph?.edges ?? []}
           nodes={graph?.nodes ?? []}
           onClose={() => setSelected(undefined)}
+          onNavigate={onNavigate}
         />
       </div>
     </div>

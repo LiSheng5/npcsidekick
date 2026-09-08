@@ -7,11 +7,14 @@ export function NpcInspector({
   edges,
   nodes,
   onClose,
+  onNavigate,
 }: {
   node?: GraphNode
   edges: GraphEdge[]
   nodes: GraphNode[]
   onClose: () => void
+  /** 跳到别的页并聚焦该角色（Console 内部导航，无路由库）。 */
+  onNavigate?: (page: string, npcId: string) => void
 }) {
   if (!node) {
     return (
@@ -102,13 +105,23 @@ export function NpcInspector({
       </div>
 
       <div className="inspector-actions">
-        <button className="btn" disabled title="Step 5 起开放">
+        <button
+          className="btn"
+          disabled={!onNavigate}
+          title={onNavigate ? '编辑这个人设' : '不可用'}
+          onClick={() => onNavigate?.('characters', node.id)}
+        >
           Character
         </button>
-        <button className="btn" disabled title="Step 6 起开放">
+        <button
+          className="btn"
+          disabled={!onNavigate}
+          title={onNavigate ? '查看这个角色的记忆卡' : '不可用'}
+          onClick={() => onNavigate?.('memory', node.id)}
+        >
           Memory
         </button>
-        <button className="btn" disabled title="Step 9 起开放">
+        <button className="btn" disabled title="Step 9 Playground 起开放">
           Start Dialogue
         </button>
       </div>
