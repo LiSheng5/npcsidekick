@@ -41,7 +41,7 @@ from typing import Dict, List, Optional
 _BASE_DIR = Path(__file__).resolve().parents[1]
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent.logging_config import log
@@ -1043,11 +1043,14 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
         return {"ok": ok, "steps": steps}
 
     # ── 根路径: 一条命令启动后打开 127.0.0.1:8765 就能用（不用记子路径）──
-    # Console 已构建 → 进 Console；没构建 → 回落到旧关系网页（旧页下架后需改这里）。
+    # Console 已构建 → 进 Console；没构建 → 返回提示（旧关系网页 npc.html 已下架，
+    # 2026-09-08 连同 web/server.py / agent_static 一起移到桌面归档，不再兜底）。
     @app.get("/", include_in_schema=False)
     async def root():
-        target = "/console/" if (_BASE_DIR / "web" / "console" / "dist").is_dir() else "/npc.html"
-        return RedirectResponse(url=target)
+        if (_BASE_DIR / "web" / "console" / "dist").is_dir():
+            return RedirectResponse(url="/console/")
+        return JSONResponse({"name": "NPCSidekick", "hint":
+                             "Console 未构建：在 web/console 下运行 npm run build 后访问 /console/"})
 
     # ── Web Console（2026-09-07）────────────────────────
     # 开发者工具层: 人设 CRUD + 热加载 / 关系图 / 记忆单条编辑 / Provider 配置。
@@ -1057,11 +1060,11 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
     # ── 静态页面（最后挂载；路径锚定代码位置）────────────────
     # Console 构建产物（web/console/dist）挂 /console/; 未构建时静默跳过，
     # 不影响既有页面与游戏接入（dist 由 `npm run build` 产出，不进 Git）。
+    # 旧 web/static（npc.html）已下架（2026-09-08 移到桌面归档），不再挂根静态目录。
     _console_dist = _BASE_DIR / "web" / "console" / "dist"
     if _console_dist.is_dir():
         app.mount("/console", StaticFiles(directory=str(_console_dist), html=True),
                   name="console")
-    app.mount("/", StaticFiles(directory=str(_BASE_DIR / "web" / "static"), html=True), name="static")
     return app
 
 

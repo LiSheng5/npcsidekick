@@ -239,9 +239,10 @@ POST   /api/llm/test
 ### 遗留 / 待办
 
 - ~~`test_safety_gate::test_three_not_placeholder_history` 失败~~ —— **已于 2026-09-08 修复**（见 §9 修复①）。
-- `npc/personas/npc.html` 旧关系网页面仍在，待 Console 功能齐备后删除。
-- `routine.action` 白名单（`gather/rest/say`）尚未放宽 —— 与字符编辑器（Step 5）一起做。
-- 前端未做路由库（当前用 state 切页），Step 5 加页面时再评估是否引入。
+- ~~旧关系网页面 npc.html 待删~~ —— **已于 2026-09-08 下架**：连同通用聊天台
+  （`web/server.py` + `web/agent_static/`）整套移到桌面归档（见 §12），不再挂 `/npc.html`。
+- ~~`routine.action` 白名单（`gather/rest/say`）尚未放宽~~ —— 已随 Step 5 完成（§10）。
+- 前端路由：已确定**不引路由库**，用 state 切页 + App 层 `focus({id, seq})` 跨页聚焦角色（2026-09-08）。
 
 ## §9 2026-09-08 核查与修复（用户要求"检查"后查出）
 
@@ -396,3 +397,29 @@ React 不持有 JSON、不直接改文件、也不另造记忆结构。新增走
 `tests/test_console_api.py::TestMemoryCrud` 新增 6 条: added / merged / rejected
 （安全闸用桩替换，不把真实 L1 词条写进仓库）/ facets 来自数据 / 检索 top_k vs total。
 全量 `841 passed / 0 failed`（junitxml 解析）；前端 `tsc --noEmit && vite build` 通过（200 模块）。
+
+## §12 下架旧 Web（2026-09-08）
+
+用户要求把"之前的 web"移到桌面（整理而非删除）。经查证后判断：
+**通用 Agent 聊天台是旧的** —— 它是项目早期"通用 Agent 框架"（`agent/orchestrator.py`）
+阶段的产物，当前主线是游戏 NPC（`npc/` + Console）。证据：README 主入口是
+`python -m npc.server` 不提聊天台；它有个一直没修的已知 bug（前端不发 token →
+`--web` 打开浏览器即 401）；`web/server.py` 的 `web_port` 甚至和 NPC Runtime 撞了 8765。
+
+### 移走的文件（→ `C:/Users/Administrator/Desktop/NPCSidekick_旧Web存档/`）
+- `web/static/npc.html` —— 旧关系网（已被 Console Graph 取代）
+- `web/agent_static/` —— 通用聊天台前端
+- `web/server.py` —— 通用聊天台后端（`/api/chat`、SSE、token 认证）
+
+### 清理的引用
+- `npc/server.py`：根路径不再兜底 `/npc.html`（没 dist → 返回提示 JSON）；删 `web/static` 挂载。
+- `npc/bootstrap.py`：自动打开 `http://127.0.0.1:{port}/`（不再写死 /npc.html）。
+- `main.py`：删 `--web` 参数与分支（`web.server` 已移走）。
+- `agent/settings.py`：删 `web_host/web_port/web_token/web_auto_open` 四个字段 + 失效的 `import secrets`。
+- `tests/test_server_console.py`：`test_npc_html_is_new_console` → `test_npc_html_is_gone`（404）；
+  `test_root_redirects_into_console` → `test_root_points_to_console_or_hint`。
+- 本文件 §8 遗留项、以及 §1/§6 里的历史叙述保留（记录的是"当时"状态）。
+
+### 影响
+- `main.py --web` 入口没了（聊天台整套下架）；`python -m npc.server` 与 Console 不受影响。
+- `web/` 目录只剩 `console/`（前端）与 `__init__.py`。
