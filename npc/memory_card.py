@@ -11,7 +11,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from agent.config_flags import env_flag
 from agent.logging_config import log
@@ -28,8 +28,15 @@ REFLECT_MAX_ENTRIES = 8             # 一次反思最多纳入的条目数（防
 TYPED_REFLECT_MAX = 3               # 一次三分类反思最多产出条数（防爆炸）
 
 # ── TDAM 借鉴②(2026-08-26): NPC 画像层参数 ──
-PERSONA_MAX_CHARS = 2000            # 画像文件上限（TDAM persona.md 同款约束）
+PERSONA_MAX_CHARS = 2000            # 画像素材/文件上限（TDAM persona.md 同款约束）
 PERSONA_MATERIAL_ENTRIES = 30       # 画像素材窗口（最近 N 条记忆）
+
+# ── 记忆卡体积护栏(2026-09-08) ──
+# 背景: world.log 每次 tick 追加、无上限，而 save() 全量快照 world。
+# 实测一次短时运行就把卡从 6KB 撑到 2.3MB（47978 条 log，_log_offset=0 从未轮转）。
+# 冷日志的正式归宿是归档层（rotate_world_log → log_archive.jsonl，带绝对索引可回放），
+# 记忆卡没必要背全量 —— 只留最近 N 条足够重启后接着跑。
+CARD_WORLD_LOG_TAIL = 500           # 与 npc/world.py LOG_TAIL_DEFAULT 对齐
 
 
 def _reflect_rules(entries: List[Dict]) -> str:
@@ -116,7 +123,7 @@ class MemoryCardMixin:
             "name": self.persona.get("name", ""),
             "saved_at": datetime.now().isoformat(),
             "persona": self.persona,
-            "world": self.world,
+            "world": self._world_for_card(),
             "task_log": self.task_log[-50:],   # 只保留最近 50 条（文档可编辑）
             "memory": self.memory.to_dict(),   # 加权记忆（可编辑文档）
             "reflected_upto": self._reflected_upto,   # 反思进度（阶段①）
@@ -128,6 +135,19 @@ class MemoryCardMixin:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         self.store_path.write_text(blob, encoding="utf-8")
         log.info("npc_memory_saved", npc=self.persona["id"], path=str(self.store_path))
+
+    def _world_for_card(self) -> Dict:
+        """写进记忆卡的 world 快照 —— log 只留最近 CARD_WORLD_LOG_TAIL 条。
+
+        只截断**写入卡里的副本**，不动内存中的 self.world（运行时语义零影响）；
+        否则共享世界里其它 NPC 看到的日志会莫名变短。
+        """
+        wlog = self.world.get("log")   # 不叫 log: 避开与模块级 logger 同名
+        if not isinstance(wlog, list) or len(wlog) <= CARD_WORLD_LOG_TAIL:
+            return self.world
+        trimmed = dict(self.world)
+        trimmed["log"] = wlog[-CARD_WORLD_LOG_TAIL:]
+        return trimmed
 
     @classmethod
     def load(cls, npc_id: str, store_dir: str = "npc/store") -> "NPC":
