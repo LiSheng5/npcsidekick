@@ -8,7 +8,7 @@ const NAV = [
   { key: 'graph', label: 'Graph', ready: true },
   { key: 'characters', label: 'Characters', ready: true },
   { key: 'live', label: 'Live', ready: false },
-  { key: 'memory', label: 'Memory', ready: false },
+  { key: 'memory', label: 'Memory', ready: true },
   { key: 'activity', label: 'Activity', ready: false },
   { key: 'playground', label: 'Playground', ready: false },
   { key: 'settings', label: 'Settings', ready: true },
@@ -16,6 +16,14 @@ const NAV = [
 
 export default function App() {
   const [page, setPage] = useState<string>('graph')
+  /** 跨页聚焦的角色 id —— Graph 里点"Memory"就带着它跳过去，不用再选一遍。
+      seq 让"连续两次点同一个角色"也能被目标页感知（值相同也要触发一次）。 */
+  const [focus, setFocus] = useState<{ id: string; seq: number }>()
+
+  const navigate = (next: string, npcId?: string) => {
+    if (npcId) setFocus({ id: npcId, seq: Date.now() })
+    setPage(next)
+  }
 
   return (
     <div className="app">
@@ -42,9 +50,9 @@ export default function App() {
         ))}
       </nav>
       <main className="main">
-        {page === 'graph' ? <GraphPage /> : null}
-        {page === 'characters' ? <CharactersPage /> : null}
-        {page === 'memory' ? <MemoryPage /> : null}
+        {page === 'graph' ? <GraphPage onNavigate={navigate} /> : null}
+        {page === 'characters' ? <CharactersPage focus={focus} /> : null}
+        {page === 'memory' ? <MemoryPage focus={focus?.id} /> : null}
         {page === 'settings' ? <SettingsPage /> : null}
       </main>
     </div>

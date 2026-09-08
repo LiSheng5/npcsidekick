@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import { stateColor } from '../lib/format'
 import type { NpcBrief, Persona } from '../types'
@@ -9,10 +9,16 @@ import { CharacterEditor } from './CharacterEditor'
   左列 = 人设定义（/api/personas，制作者写的东西）；
   卡片上的 state / 记忆数 = 运行时快照（/api/npcs）。
   点卡片进编辑器；New 进编辑器的新建态（id 可填）。 */
-export function CharactersPage() {
+export function CharactersPage({
+  focus,
+}: {
+  /** 从 Graph 点"Character"跳过来: 直接打开这个角色的编辑器。 */
+  focus?: { id: string; seq: number }
+}) {
   const [personas, setPersonas] = useState<Persona[]>([])
   const [briefs, setBriefs] = useState<Record<string, NpcBrief>>({})
   const [loading, setLoading] = useState(true)
+  const consumed = useRef<number>()
   const [error, setError] = useState<string>()
   const [query, setQuery] = useState('')
   const [editing, setEditing] = useState<{ persona: Persona; isNew: boolean }>()
@@ -33,6 +39,17 @@ export function CharactersPage() {
   useEffect(() => {
     load()
   }, [load])
+
+  // 从 Graph 跳来 → 直接开对应编辑器。seq 只消费一次:
+  // 不然 user 返回列表后任何一次 personas 刷新都会把他又拽回编辑器。
+  useEffect(() => {
+    if (!focus || consumed.current === focus.seq) return
+    const hit = personas.find((p) => p.id === focus.id)
+    if (hit) {
+      consumed.current = focus.seq
+      setEditing({ persona: hit, isNew: false })
+    }
+  }, [focus, personas])
 
   const remove = async (p: Persona) => {
     const name = p.name || p.id
