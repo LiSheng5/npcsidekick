@@ -2,12 +2,13 @@ import { useState } from 'react'
 import { GraphPage } from './pages/GraphPage'
 import { CharactersPage } from './pages/CharactersPage'
 import { MemoryPage } from './pages/MemoryPage'
+import { LivePage } from './pages/LivePage'
 import { SettingsPage } from './pages/SettingsPage'
 
 const NAV = [
   { key: 'graph', label: 'Graph', ready: true },
   { key: 'characters', label: 'Characters', ready: true },
-  { key: 'live', label: 'Live', ready: false },
+  { key: 'live', label: 'Live', ready: true },
   { key: 'memory', label: 'Memory', ready: true },
   { key: 'activity', label: 'Activity', ready: false },
   { key: 'playground', label: 'Playground', ready: false },
@@ -53,6 +54,7 @@ export default function App() {
         {page === 'graph' ? <GraphPage onNavigate={navigate} /> : null}
         {page === 'characters' ? <CharactersPage focus={focus} /> : null}
         {page === 'memory' ? <MemoryPage focus={focus?.id} /> : null}
+        {page === 'live' ? <LivePage /> : null}
         {page === 'settings' ? <SettingsPage /> : null}
       </main>
     </div>

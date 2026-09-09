@@ -1,8 +1,12 @@
 import type {
   ActionsPayload,
+  EventsPayload,
+  LiveState,
+  LiveStats,
   MemoryEntry,
   MemoryListPayload,
   MemoryWriteResult,
+  ModePayload,
   NpcBrief,
   Persona,
   ProvidersPayload,
@@ -47,6 +51,16 @@ export const api = {
   npcs: () => req<{ npcs: NpcBrief[] }>('/api/npcs'),
 
   relationships: () => req<RelationshipGraph>('/api/relationships'),
+
+  // ── Live（运行时观测，Step 7）─────────────────────
+  state: () => req<LiveState>('/api/state'),
+  /** since = 事件流游标；响应的 log_count 作为下次的 since。 */
+  events: (since = 0) => req<EventsPayload>(`/api/events?since=${since}`),
+  stats: () => req<LiveStats>('/api/stats'),
+  mode: () => req<ModePayload>('/api/mode'),
+  setMode: (mode: string) => post<ModePayload>('/api/mode', { mode }),
+  /** 手动推一帧自主循环（演示/调试用）。 */
+  tick: () => post<Record<string, unknown>>('/api/tick', {}),
 
   /** 动作名建议（routine 编辑器用）。game-agnostic: 值来自 Runtime，UI 不硬编码。 */
   actions: () => req<ActionsPayload>('/api/actions'),

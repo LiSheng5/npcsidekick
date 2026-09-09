@@ -107,6 +107,75 @@ export interface ActionsPayload {
   note?: string
 }
 
+/** GET /api/state —— 世界运行时快照。
+ *  `panels` 是世界声明"该显示哪些字段"的名单（数据驱动，UI 不假定有哪些面板）。 */
+export interface ActorState {
+  position?: string
+  inventory?: Record<string, number>
+  state?: string
+  stamina?: number
+  activity?: string
+}
+
+export interface LiveState {
+  world_id?: string
+  panels: string[]
+  actors: Record<string, ActorState>
+  delivered?: Record<string, unknown>
+  tick: number
+  log_tail?: string[]
+  pending_tasks?: unknown[]
+}
+
+/** 结构化事件（由 world.log 文本解析而来）。
+
+    ⚠ 事件**没有时间戳字段** —— 只能按到达顺序展示，别假装能排序/显示时间。
+    字段随 type 变化；未知字段原样保留，未知 type 走 fallback 渲染（换游戏不崩）。 */
+export interface LiveEvent {
+  type: string
+  npc?: string
+  text?: string
+  dest?: string
+  resource?: string
+  product?: string
+  to?: string
+  status?: string
+  desc?: string
+  agent?: string
+  [key: string]: unknown
+}
+
+export interface EventsPayload {
+  events: LiveEvent[]
+  /** 事件流游标（绝对位置），下次请求的 since */
+  log_count: number
+  tick: number
+}
+
+/** GET /api/stats —— 观测计数（内存态，重启清零）。 */
+export interface LiveStats {
+  uptime_sec: number
+  tick: number
+  mode: string
+  npcs: number
+  sse_clients: number
+  talk: {
+    total: number
+    rules: number
+    llm: number
+    errors: number
+    last_latency_ms?: number
+  }
+  task?: { total: number }
+  [key: string]: unknown
+}
+
+/** GET/POST /api/mode —— 全局对话模式（rules ↔ llm），作用于所有 NPC。 */
+export interface ModePayload {
+  mode: string
+  requested: string
+}
+
 export interface ProviderView {
   id: string
   name: string
