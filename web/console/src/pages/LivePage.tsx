@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
+import { EventLine } from '../components/EventLine'
 import { stateColor } from '../lib/format'
 import type { LiveEvent, LiveState, LiveStats, NpcBrief } from '../types'
 
@@ -239,47 +240,6 @@ export function LivePage() {
           )}
         </div>
       </div>
-    </div>
-  )
-}
-
-/** 单条事件 —— 只做"类型徽章 + 字段"的渲染，不解释语义。
-
-    未知 type 走兜底: 把非空字段原样列出来。换游戏/加新事件类型也不会显示成空白。 */
-function EventLine({ ev }: { ev: LiveEvent }) {
-  const who = ev.npc ?? ''
-  let main = ''
-  if (ev.type === 'say') main = ev.text ?? ''
-  else if (ev.type === 'move') main = ev.dest ?? ''
-  else if (ev.type === 'gather') main = ev.resource ?? ''
-  else if (ev.type === 'craft') main = ev.product ?? ''
-  else if (ev.type === 'deliver') main = [ev.resource, ev.to].filter(Boolean).join(' → ')
-  else if (ev.type === 'task') main = ev.desc ?? ''
-  else if (ev.type === 'subagent') main = ev.text ?? ''
-
-  const known = ['say', 'move', 'gather', 'craft', 'deliver', 'task', 'subagent']
-  if (!known.includes(ev.type)) {
-    // 兜底: 未知类型 —— 列出所有非空字段（不猜它是什么意思）
-    const rest = Object.entries(ev)
-      .filter(([k, v]) => k !== 'type' && v !== undefined && v !== '')
-      .map(([k, v]) => `${k}=${String(v)}`)
-      .join(' · ')
-    return (
-      <div className="feed-row">
-        <span className="ev-type unknown">{ev.type}</span>
-        <span className="ev-body">{rest || '（无字段）'}</span>
-      </div>
-    )
-  }
-
-  return (
-    <div className="feed-row">
-      <span className={`ev-type ${ev.type}`}>{ev.type}</span>
-      {who ? <span className="ev-who">{who}</span> : null}
-      <span className="ev-body">{main || '—'}</span>
-      {ev.type === 'task' && ev.status ? (
-        <span className={`chip ${ev.status}`}>{ev.status}</span>
-      ) : null}
     </div>
   )
 }
