@@ -1,13 +1,18 @@
-# NPCSidekick Web Console — 架构理解与技术设计（Step 1~3 产出）
+# NPCSidekick Web Console — 架构理解与技术设计
 
-> 状态：**已与用户逐项确认，待开写**。代码零改动。
+> **阅读指引**：§1~§7 是 2026-09-07 的**起点盘点与计划**（Step 1~3，当时代码零改动）；
+> §8 起是**实施记录**（§8 Step 4 / §10 Step 5 / §11 Step 6 / §12 下架旧 Web）。
+> **最新状态看 §12；当前进度与约定看项目 `MEMORY.md`** —— 前面的小节保留的是"当时"的判断，不再更新。
 > 目标：在**不破坏现有游戏接入协议**的前提下，为 NPCSidekick Runtime 增加一层
 > 开发者工具：Visualization + Character Editor + Runtime Monitor + LLM Playground。
 > 核心关系不变：`Game ↔ HTTP ↔ NPCSidekick Runtime`，Web 与 Game、CLI 并列消费同一个 Runtime。
 
 ---
 
-## 1. 现状盘点：两个 Web 服务 + 两套 UI
+## 1. 起点盘点：两个 Web 服务 + 两套 UI（2026-09-07 当时）
+
+> ⚠ 本节的"现状"仅指 2026-09-07 开工前。`web/server.py`、`web/agent_static/`、`web/static/npc.html`
+> 均已下架（见 §12），现在只剩 `npc/server.py` 一个服务 + `web/console/` 一个前端。
 
 | | `npc/server.py` | `web/server.py` |
 |---|---|---|
@@ -54,12 +59,17 @@
 | `GET/POST /api/mode` `GET/POST /api/approval` `GET/POST /api/manifest` | 运行时开关 |
 | `/api/npc/register` `/api/npc/unregister` `/api/consumer/hello` `/api/task_done` `/api/tick` `/api/tts` | 动态注册与协议 v1 |
 
-### 缺失（本次要加）
+### 缺失 → **Step 4~6 已全部补齐**
 
-- `GET/PUT/DELETE /api/personas/{id}` —— 读/改/删单份人设
+- `GET/PUT/DELETE /api/personas/{id}` —— 读/改/删单份人设（PUT/POST 均**热加载**，无需重启）
 - `/api/npcs/{id}/memory` 的 `POST / PUT / DELETE` —— **单条记忆**增删查改
+  - POST 结果**三态** `added` / `merged`（去重闸折叠计数）/ `rejected`（安全闸拒收）
+  - GET 带 `facets`（categories / mtypes 从**实际数据观察**得出）；有 query 时走加权检索，
+    `entries` 是召回 top-k、`total` 才是卡上总数
 - `GET /api/relationships` —— 关系图抽象接口（Runtime 目前无关系数据，返回空 edges + `source:"none"`）
 - `GET/PUT /api/settings/providers`、`POST /api/settings/providers`、`DELETE /api/settings/providers/{id}`、`POST /api/llm/test`
+- `GET /api/actions`（Step 5）—— routine action 的**建议值**（Runtime 声明 + 现有人设里观察到的），
+  **不是白名单**；`routine.action` 已放宽为任意非空字符串
 
 ---
 
@@ -114,6 +124,10 @@
 
 ## 5. 目标结构
 
+> ⚠ 下面是 2026-09-07 画的**目标**结构。实际落地有两处偏差：
+> ① `web/agent_static/` 与 `web/static/` 已整套下架移到桌面（见 §12），`web/` 只剩 `console/`；
+> ② 组件命名按实现略有调整（如 `MemoryPage` 单文件含 composer/row，未拆 `MemoryList`/`MemoryEditor`）。
+
 ```
 web/console/                  # Vite + React + TS 工程
   src/pages/                  Graph · Characters · CharacterDetail · Live · Memory · Activity · Playground · Settings
@@ -164,16 +178,19 @@ POST   /api/llm/test
 2. 新建 `npc/secrets.py` + provider 配置端点 + `/api/llm/test`（Step 7 提前，因 Settings 属"第一版全套"）。
 3. 测试：`tests/test_console_api.py`（CRUD/热加载/孤儿槽/关系空态/secret masked）。
 4. 前端：初始化 `web/console`（Vite+React+TS，proxy 到 8765），路由骨架 + 极简设计系统（白底/灰边/深字）+ Graph 页（React Flow，空态文案）+ 点节点出 Inspector（数据来自 API）。
-5. `web/static/index.html` → `web/agent_static/`，`web/server.py` 改 mount；`npc/server.py` mount `web/console/dist` 到 `/console/`。
+5. `web/static/index.html` → `web/agent_static/`，`web/server.py` 改 mount；`npc/server.py` mount `web/console/dist` 到 `/console/`。（**后被 §12 取代**：这两个目录连同 `web/server.py` 整套下架移出项目）
 6. 回归：全量 `pytest` 保持 802 passed 全绿。
 
-**Step 5** Characters 列表/创建/编辑（含 Personality、Routine 编辑器 + View JSON 高级模式）
-**Step 6** Memory 页面（列表/搜索/新增/编辑/删除/importance）
-**Step 7** Live 页（`/api/state` 轮询 + SSE）
-**Step 8** Relationship Graph 完善（zoom/pan/fit/search/filter、响应式 Inspector）
-**Step 9** Playground（对话 + Debug 面板：model/latency/memory context）
-**Step 10** Settings（Provider UI、masked key、Test Connection）
-**Step 11** 实时事件层（SSE 事件总线抽象，为将来 WS 留口）
+**Step 5** ✅ Characters 列表/创建/编辑（含 Personality、Routine 编辑器 + View JSON 高级模式）
+**Step 6** ✅ Memory 页面（列表/搜索/新增/编辑/删除/importance）
+**Step 7** ⬜ Live 页（`/api/state` 轮询 + SSE）
+**Step 8** ⬜ Relationship Graph 完善（zoom/pan/fit/search/filter、响应式 Inspector）
+**Step 9** ⬜ Playground（对话 + Debug 面板：model/latency/memory context）
+**Step 10** ✅ Settings（Provider UI、masked key、Test Connection）—— **已由 Step 4 提前交付，不必再排期**
+**Step 11** ⬜ 实时事件层（SSE 事件总线抽象，为将来 WS 留口）
+
+> 图例：✅ 已交付 ｜ ⬜ 待做。实施记录见 §8（Step 4）/ §10（Step 5）/ §11（Step 6）。
+> 另：导航里的 **Activity 页**不在原 11 步计划内 —— 定位为事件流/历史视图，与 Live 共享 SSE 后端（⬜ 待做）。
 
 ---
 
@@ -203,8 +220,10 @@ POST   /api/llm/test
   - `/api/npcs/{pid}/memory` 的 GET/POST/PUT/DELETE —— 走 `NPC.remember()` / `NPCMemory` → `npc.save()` 落记忆卡。
   - `/api/settings/providers` 的 GET/POST/DELETE + `/activate` + `POST /api/llm/test`（`asyncio.to_thread`，不冻事件循环；失败返回 200 + `ok=false`）。
 - `npc/secrets.py`（新增）：Windows DPAPI 加密（ctypes 零依赖），回退明文时**显式标注 `encrypted=false`**；对外只给 `{configured, masked_key}`。
-- `npc/server.py`（改）：`/api/npcs` additive 扩展；新增 `config_dir` 注入口；Console 端点挂载 + `/console/` 静态挂载（dist 不存在时静默跳过）；**根路径 `/` 重定向到 `/console/`**（没有构建产物时回落到旧 `npc.html`），保住"一条命令启动、打开根路径就能用"。
+- `npc/server.py`（改）：`/api/npcs` additive 扩展；新增 `config_dir` 注入口；Console 端点挂载 + `/console/` 静态挂载（dist 不存在时静默跳过）；**根路径 `/` 重定向到 `/console/`**（没有构建产物时回落到旧 `npc.html`
+—— **后被 §12 取代**：npc.html 下架，改为返回提示 JSON），保住"一条命令启动、打开根路径就能用"。
 - `web/server.py`（改）：静态目录改 `web/agent_static/`，两个服务彻底解耦。
+  （**后被 §12 取代**：通用聊天台整套下架移到桌面，`web/server.py` 已移出项目，`main.py --web` 一并删除）
 
 ### 顺手修掉的两个既有缺陷
 
