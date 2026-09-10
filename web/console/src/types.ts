@@ -176,6 +176,16 @@ export interface ModePayload {
   requested: string
 }
 
+/** POST /api/talk —— 游戏协议端点（**禁止改动**，Playground 只是消费它）。
+
+    ⚠ 响应里**没有** latency / mode / 记忆上下文字段 —— Debug 面板的延迟由前端实测，
+    模式取自 /api/mode，"召回预览"是按这句话检索的近似结果（不是 talk 内部真实召回）。 */
+export interface TalkResult {
+  reply: string
+  thinking_text?: string
+  audio?: string
+}
+
 export interface ProviderView {
   id: string
   name: string

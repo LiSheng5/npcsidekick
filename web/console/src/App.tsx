@@ -4,6 +4,7 @@ import { CharactersPage } from './pages/CharactersPage'
 import { MemoryPage } from './pages/MemoryPage'
 import { LivePage } from './pages/LivePage'
 import { ActivityPage } from './pages/ActivityPage'
+import { PlaygroundPage } from './pages/PlaygroundPage'
 import { SettingsPage } from './pages/SettingsPage'
 
 const NAV = [
@@ -12,7 +13,7 @@ const NAV = [
   { key: 'live', label: 'Live', ready: true },
   { key: 'memory', label: 'Memory', ready: true },
   { key: 'activity', label: 'Activity', ready: true },
-  { key: 'playground', label: 'Playground', ready: false },
+  { key: 'playground', label: 'Playground', ready: true },
   { key: 'settings', label: 'Settings', ready: true },
 ] as const
 
@@ -57,6 +58,7 @@ export default function App() {
         {page === 'memory' ? <MemoryPage focus={focus?.id} /> : null}
         {page === 'live' ? <LivePage /> : null}
         {page === 'activity' ? <ActivityPage /> : null}
+        {page === 'playground' ? <PlaygroundPage /> : null}
         {page === 'settings' ? <SettingsPage /> : null}
       </main>
     </div>

@@ -1053,3 +1053,136 @@ select {
   color: var(--text-faint);
   padding: 6px 0 14px;
 }
+
+/* ── Playground ── */
+.play-wrap {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  border-top: 1px solid var(--border);
+}
+
+.play-chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.turns {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.turn:hover {
+  background: var(--surface-soft);
+}
+
+.turn.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.bubble {
+  max-width: 82%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.bubble.me {
+  align-self: flex-end;
+  background: var(--accent-soft);
+  border: 1px solid rgba(79, 70, 229, 0.18);
+}
+
+.bubble.npc {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.bubble .err {
+  color: var(--red);
+}
+
+.turn-meta {
+  align-self: flex-end;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.composer {
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 14px 24px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.composer textarea {
+  flex: 1;
+  resize: none;
+}
+
+.play-debug {
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.dbg-box {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.dbg-mem {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.dbg-mem:last-child {
+  border-bottom: none;
+}
+
+@media (max-width: 1080px) {
+  .play-wrap {
+    grid-template-columns: 1fr;
+  }
+  .play-debug {
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+}
