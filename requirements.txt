@@ -3,10 +3,6 @@
 
 # LLM
 openai>=1.0
-tiktoken>=0.5
-
-# Vector Memory
-chromadb>=0.5
 
 # Structured Logging
 structlog>=24.0
@@ -26,6 +22,14 @@ uvicorn>=0.34
 
 # Voice (NPC TTS) — 免费微软 TTS; 未安装时语音自动降级纯文本
 edge-tts>=6.1
+
+# ── 可选：语义向量记忆 ──────────────────────────────────────
+# 未安装时自动降级（关键词匹配 / 粗估 token），主流程不受影响。
+# 需要完整向量检索时再单独装：
+#   pip install "chromadb>=0.5" "tiktoken>=0.5"
+# （等价于 pip install ".[memory]"）
+# chromadb>=0.5
+# tiktoken>=0.5
 
 # Dev & Test (install separately: pip install -r requirements-dev.txt)
 # pytest>=8.0
