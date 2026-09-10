@@ -11,8 +11,6 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.34",
     "edge-tts>=6.1",
-    "tiktoken>=0.5",
-    "chromadb>=0.5",
     "structlog>=24.0",
     "rich>=13.0",
     "httpx>=0.28",
@@ -20,6 +18,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 语义向量记忆 — 可选：未安装时自动降级（关键词匹配 / 粗估 token），
+# 见 agent/memory/vector_store.py:18 与 agent/memory/token_counter.py:10。
+# 需要完整向量检索：pip install ".[memory]"
+memory = [
+    "chromadb>=0.5",
+    "tiktoken>=0.5",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
