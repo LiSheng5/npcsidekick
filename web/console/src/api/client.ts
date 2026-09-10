@@ -11,6 +11,7 @@ import type {
   Persona,
   ProvidersPayload,
   RelationshipGraph,
+  TalkResult,
 } from '../types'
 
 // Console 只跟一个后端说话: NPCSidekick Runtime。
@@ -61,6 +62,10 @@ export const api = {
   setMode: (mode: string) => post<ModePayload>('/api/mode', { mode }),
   /** 手动推一帧自主循环（演示/调试用）。 */
   tick: () => post<Record<string, unknown>>('/api/tick', {}),
+
+  /** POST /api/talk —— 游戏协议端点本身（零改动），Playground 只是消费它。 */
+  talk: (npcId: string, message: string) =>
+    post<TalkResult>('/api/talk', { npc_id: npcId, message }),
 
   /** 动作名建议（routine 编辑器用）。game-agnostic: 值来自 Runtime，UI 不硬编码。 */
   actions: () => req<ActionsPayload>('/api/actions'),
