@@ -409,7 +409,7 @@ NPCSidekick/
 │   └── llm/
 │       ├── client.py             # LLMClient (薄包装)
 │       └── types.py              # StreamEvent / LLMResponse / LLMChunk
-└── tests/                        # 272 个测试 (pytest)
+└── tests/                        # 841 个测试 (pytest，全仓)
     ├── test_planner.py
     ├── test_executor.py
     ├── test_router.py
@@ -466,8 +466,8 @@ MemoryManager 首次运行时自动检测：向量存储为空但 JSON 有数据
 ## 测试
 
 ```bash
-# 全部 272 个测试
-pytest tests/ -v                    # 10.5s
+# 全部 841 个测试
+pytest tests/ -v                    # ~64s
 
 # 覆盖率
 pytest tests/ -v --cov=agent --cov-report=term-missing
@@ -488,8 +488,8 @@ pytest tests/ -k "stream" -v
 
 | 版本 | 日期 | 主要变化 |
 |------|------|----------|
-| v3.1 | 2026-07 | 4 层架构稳定、14 工具、流式输出、多 Provider (DeepSeek/OpenAI/智谱)、上下文压缩、向量检索、272 tests |
+| v3.1 | 2026-07 | 4 层架构稳定、14 工具、流式输出、多 Provider (DeepSeek/OpenAI/智谱)、上下文压缩、向量检索、272 tests（引擎层，历史快照） |
 
 ---
 
-*最后更新: 2026-07-02*
+*最后更新: 2026-09-10*
