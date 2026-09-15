@@ -7,9 +7,9 @@ api_key.txt
 agent/memory/store/
 npc/store/
 .claude/
-npc/store_test/
+# 一切按 world 分目录的运行时数据: store_test / store_godot / store_backup_* …（记忆卡是运行时产物，不入库）
+npc/store_*/
 api_key_zen.txt
-npc/store_backup_*/
 
 # ── GTA5 专属(本地保留, 不入库 — 法务隔离) ──
 npc/personas/gta/
