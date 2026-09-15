@@ -2,9 +2,10 @@
 NPCSidekick — Web 服务（制作者体验优先，参考 AI Town 的 one-command 启动）。
 
 一条命令:  python -m npc.server [--adapter gta] [--port 8765] [--world-id gta]
-  - 自动打开浏览器 http://127.0.0.1:8765/npc.html
-  - API: /api/npc /api/talk /api/state /api/memory(GET+POST 回写) /api/task
-         /api/events(/stream) /api/version(握手) /api/stats(观测)
+  - 自动打开浏览器 http://127.0.0.1:8765/ （根路径指到 Web Console `/console/`;
+    dist 未构建时返回提示 JSON, 不再回落旧 npc.html — 该页 2026-09-08 已下架）
+  - API 全量以代码为准(40 条): 本文件(游戏面) + npc/console_api.py(Console 面);
+    游戏接入最少三条: /api/talk /api/state /api/task
 
 多世界隔离（2026-08-23）: 一个实例服务一个世界。两个游戏同时开 = 起两个实例:
     python -m npc.server --adapter paleolithic --port 8765 --world-id godot

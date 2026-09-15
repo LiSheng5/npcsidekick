@@ -19,6 +19,7 @@ tests/test_gta_adapter.py
 
 # Claude 内部协作文档（给 AI 看，不进公开仓库）
 CLAUDE.md
+CLAUDE.zh.md
 .claude/
 
 # ── Web Console(2026-09-07) ──
