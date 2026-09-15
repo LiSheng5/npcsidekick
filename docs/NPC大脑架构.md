@@ -170,7 +170,7 @@
 
 ```bash
 python -B -m pytest tests/test_npc.py tests/test_npc_memory.py tests/test_npc_server.py   tests/test_npc_tools.py tests/test_npc_world.py tests/test_reviewer.py   tests/test_reflection.py tests/test_association.py tests/test_consolidate.py   tests/test_security.py tests/test_tts.py   tests/test_resource_lexicon.py tests/test_memory_tokenize.py tests/test_server_multiworld.py -q -p no:cacheprovider
-# → 全量套件 588 passed（2026-08-23，`python -m pytest tests -q`；上行 NPC 子集为其中一部分）
+# → 全量套件 **857 passed**（2026-09-15；此前 2026-08-23 为 588，`python -m pytest tests -q`；上行 NPC 子集为其中一部分）
 ```
 
 ## 7. 文件清单
@@ -592,7 +592,7 @@ avg_wait_ms}`；`/api/version.features.scheduler`（bool）。OFF 时也有该�
 ### 协作模式升级
 确立「主控 agent 出任务书 + Trae 强模型执行 + 主控验收」外包流程。
 首单 #01 调度队列已按此流程收货（含一轮打回 + 实弹补刀，见 §19 补记）。
-任务书模板留存于工作区：`任务书_01_调度队列.md`、`任务书_01_返工单.md`。
+任务书模板（`任务书_01_调度队列.md`、`任务书_01_返工单.md`）**已不在仓库中**；后续 `任务书_02~06` 亦已于 2026-09-15 移出 —— 见 §30.4。
 
 ### 今日落地
 - mod v1.7（走开不再销毁回复 + 停留120s）/ v1.8（原生字幕双保险 + 抽搐修复 +
@@ -1064,10 +1064,13 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 
 ### 30.4 文档卫生（顺带记录，未处理）
 
-- 本文档 §24 **重号**（`:716` TDAM 借鉴三件套 / `:813` 任务回路最小闭环）；因 §24 已被
+- 本文档 §24 **重号**（`:716` TDAM 借鉴三件套 / `:813` 任务回路最小闭环）；因 §24 已被原
   `docs/任务书_04_记忆管家.md` 等外部引用，**本次不重排**，留待统一编号时一并处理。
-- §6「测试」段仍是 `588 passed（2026-08-23）` 的历史值；当前基线见 §0/清单（`857`）。
-  该处已作为一条待订正项记入清单 D-01（原先只列了 `README.md` / `ARCHITECTURE.md` / `PROJECT_DELIVERY.md`）。
+- **§6「测试」段已订正为 `857`**（2026-09-15）；§14 里另有一处 `588 passed` 属该章的历史快照
+  （2026-08-23），有意保留。
+- **`docs/任务书_02 ~ 06`（2026-08 的五份执行指令）已于 2026-09-15 移出仓库**
+  （→ `D:\NPCSidekick\_已归档_20260915\任务书_02~06\`，可反悔）。**正文中的「任务书#0X」即指它们**，
+  各任务成果见 §23~§28；更早的 `任务书_01_调度队列.md` / `任务书_01_返工单.md` 也不在仓库中。
 
 ---
 
