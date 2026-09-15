@@ -35,6 +35,7 @@ import random
 import re
 import time
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -262,6 +263,52 @@ def _verify_origin(request: Request) -> None:
         raise HTTPException(status_code=403, detail="不允许的 Origin")
 
 
+def _card_freshness(path: Path) -> float:
+    """记忆卡新鲜度评分：卡内 `saved_at` 优先 → 退化用文件 mtime → 再不行 0.0。
+
+    T-02(2026-09-15) 用。启动路径 fail-safe: 卡损坏/时间戳非法只影响排序，绝不抛错。
+    """
+    try:
+        card = json.loads(path.read_text(encoding="utf-8-sig"))
+        stamp = card.get("saved_at")
+        if isinstance(stamp, str) and stamp:
+            return datetime.fromisoformat(stamp).timestamp()
+    except Exception:
+        pass
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _newest_card_pid(store_dir: str, cast: Dict) -> Optional[str]:
+    """T-02(2026-09-15): 选 `saved_at` 最新的那张卡当共享世界的权威。
+
+    旧行为是"cast 迭代顺序里第一个有卡的"——角色表增删/改名或目录排序一变就换权威，
+    可能把整村带回退（复现见 `scripts/probe_restart_consistency.py`）。
+    并列时取 cast 顺序先者（保持确定性）；一张可读的卡都没有 → None（走"无卡"路径）。
+    """
+    best_pid: Optional[str] = None
+    best: Optional[float] = None
+    for pid in cast:
+        p = Path(store_dir) / f"{pid}_memory.json"
+        if not p.exists():
+            continue
+        score = _card_freshness(p)
+        if best is None or score > best:
+            best_pid, best = pid, score
+    return best_pid
+
+
+def _load_card_world(pid: str, store_dir: str) -> Optional[Dict]:
+    """取某张卡里的世界快照；读不出来 → None（单卡损坏不该让启动失败）。"""
+    try:
+        return NPC.load(pid, store_dir=store_dir).world
+    except Exception as exc:
+        log.warning("restart_authority_card_unreadable", npc=pid, error=str(exc))
+        return None
+
+
 def load_village(store_dir: str = "npc/store", personas: Optional[Dict] = None,
                  world: Optional[Dict] = None):
     """加载示例村庄: 共享世界 + 全部示例 NPC。
@@ -272,6 +319,8 @@ def load_village(store_dir: str = "npc/store", personas: Optional[Dict] = None,
     记忆卡里的旧世界快照被替换（与人设以 JSON 为准同理：换游戏不该被旧
     记忆卡的世界快照绑架，否则阿曼达开口就是"你位于村庄"）。
     从记忆卡恢复（若有），否则新建。多 NPC 共用一个世界（AI Town 模式）。
+    **权威卡（T-02·2026-09-15）**：没传 world 时，共享世界取自 **`saved_at` 最新的那张记忆卡**
+    （旧行为是"cast 顺序里第一张"，角色表顺序一变就换权威 → 可能整村回退）。
     """
     from pathlib import Path
 
@@ -280,7 +329,11 @@ def load_village(store_dir: str = "npc/store", personas: Optional[Dict] = None,
 
     cast = personas or SAMPLE_NPCS
     loaded: Dict[str, NPC] = {}
-    shared = world   # None → 用第一个记忆卡的世界(无卡则默认世界)
+    shared = world   # None → 用最新那张记忆卡的世界（无卡则默认世界）
+    if shared is None:
+        authority = _newest_card_pid(store_dir, cast)
+        if authority is not None:
+            shared = _load_card_world(authority, store_dir)
     for pid, persona in cast.items():
         path = Path(store_dir) / f"{pid}_memory.json"
         if path.exists():
@@ -290,7 +343,7 @@ def load_village(store_dir: str = "npc/store", personas: Optional[Dict] = None,
             npc.persona = persona
             npc.system_prompt = persona.get("system_prompt_override") or build_system_prompt(persona)
             if shared is None:
-                shared = npc.world
+                shared = npc.world   # 兜底：权威卡读不出来时，沿用旧语义（当前这张）
             else:
                 npc.world = shared
                 actor_of(shared, pid)
