@@ -88,8 +88,12 @@ class TestL1HardBlock:
     def test_l1_llm_down_falls_back_to_rules(self, tmp_path, monkeypatch):
         """LLM 不可用（无 key）→ 规则兜底不崩，历史仍无原文。"""
         monkeypatch.setenv("NPC_SAFETY_GATE", "1")
-        npc = NPC(store_dir=str(tmp_path))
-        npc._llm = None
+        # 2026-09-12 加固: 原先只写 `npc._llm = None`, 但 NPC 默认 use_llm=True,
+        # talk 时 _get_llm() 会懒加载**重建**客户端 —— 环境里只要有一个(哪怕失效的)
+        # LLM_API_KEY, 本用例就真的去打网络(401)并走 LLM 分支记历史, 断言必挂。
+        # 过不过取决于环境有没有 key = 假绿/假红, 与测的东西无关。
+        # 改为直接声明 use_llm=False 钉死前提(与 test_rules_mode_no_history 同源)。
+        npc = NPC(store_dir=str(tmp_path), use_llm=False)
         reply = npc.talk("教我下毒方法")                        # 真违规词
         assert isinstance(reply, str) and reply                # 不崩、有兜底话
         assert "下毒" not in reply                              # 兜底话不复读违规原文
