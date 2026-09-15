@@ -992,7 +992,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 | # | 债 | 性质 | 一句话 |
 |---|---|---|---|
 | TD1 | 记忆不进决策 | **架构级断层**（非 bug） | 见 29.1-1 |
-| TD2 | 持久化语义分裂 | 设计缺口（**2026-09-15 已实测** → §30.1 第 2 步） | 盘上每 NPC 一份整 world 副本（`memory_card.py:113/139` vs `npc.py:89-91`）。重启权威**有定义但隐式**：= cast 顺序里第一个「有卡」的 NPC 的那张卡的 world（`server.py:283-296`），其余卡的 world 被**静默丢弃**，且**不看 `saved_at` 新鲜度** |
+| TD2 | 持久化语义分裂 | ✅ **已修（2026-09-15 · 方案②）** → §30.1 | 盘上仍每 NPC 一份整 world 副本（设计如此，未动）；但**权威已明确**：取 **`saved_at` 最新的那张卡**（`npc/server.py::_newest_card_pid`），不再随 cast 顺序漂移。边界：权威跟时间戳不跟内容（手改卡的人自负 `saved_at`） |
 | TD3 | 双轨漂移 | 认知债 | 见 29.1-3 |
 | TD4 | 装饰性字段无守护 | 契约债 | `goals`/`desires` 有 schema 无机制，测试测不出"没生效" |
 | TD5 | 死代码 / 遮蔽 / 硬编码 | 卫生债 | `_reflect_rules` 双定义（`npc.py:28` vs `:67`）；`_a_semantic_block` 封存未迁（§22）；`walk_to("村庄")` 游戏地名进通用层（`npc.py:259`） |
@@ -1035,6 +1035,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 |---|---|---|
 | 1 | 干净基线（已做：T-01 修复 + 测试加固） | `scheduler.py` / `tests/` |
 | 2 | ✅ **已完成（2026-09-15）**：V-02 实测 → 见下方「第 2 步实测结论」 | 只测不改（新增 `scripts/probe_restart_consistency.py`） |
+| 2b | ✅ **已完成（2026-09-15）**：**T-02 落地（方案②）** —— 权威改为 `saved_at` 最新的卡、顺序无关；回归锚 `tests/test_restart_authority.py`（5 例，先红后绿） | `npc/server.py`：`_card_freshness` / `_newest_card_pid` / `_load_card_world` + `load_village` 选权威 |
 | 3 | 文档基线订正 + 过时引用清理 | `README.md` / `ARCHITECTURE.md` / `PROJECT_DELIVERY.md` / 本文档 §6 |
 | 4 | **G2 Goal 真值层 + G1 决策源扩展 + G3 ActionResult** ← 三根柱子一起做 | `npc/goal.py` + `scheduler.py` + `world.py` 薄包装 |
 | 5 | Phase 6 反思结构化 + A/B（**必须在 4 之后**）+ 记忆 `goal_relevance` 因子 | `memory_card.py` / `memory.py` / `scheduler.py` |
@@ -1056,10 +1057,23 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 触发条件很日常：加/删/改名人设文件、目录排序变化，或那个 NPC 恰好长期只在「转换点」落盘（卡比别人旧）→ 整村退档。
 现有测试**没覆盖这条语义**（`load_village` 只测了「适配器世界覆盖」与「人设优先于旧卡」）。
 
-**修法三选一（请拍板；顺带定 §30.3 的 Q4 世界权威归属）**：
+**修法三选一（2026-09-15 已选 ②「按 `saved_at` 选最新卡」并落地，见下；Q4 世界权威归属仍待拍板）**：
 ① **最小**：把「第一张卡胜出」写成显式契约 + 补回归锚（钉住语义，成本最低，但不解决回退）；
 ② **按新鲜度**：`saved_at` 字段现成 → 选最新的一张卡当权威（能挡住陈旧回退，仍是「借 NPC 卡」的架构）；
 ③ **独立世界存档**：world 单独落一份 `world.json`，谁权威 = 世界文件本身（与 Q4 配套，最干净但改动最大）。
+
+**T-02 修法已落地（2026-09-15 · 方案②「按 `saved_at` 选最新卡」）**
+
+- `npc/server.py` 新增 `_card_freshness`（卡内 `saved_at` → 退化文件 mtime → 0.0）、
+  `_newest_card_pid`（选最新，并列取 cast 顺序先者保证确定性）、`_load_card_world`（单卡损坏不炸启动）；
+  `load_village` 的权威从「cast 顺序第一张」改为「**`saved_at` 最新的那张**」。
+- 回归锚 `tests/test_restart_authority.py` 5 例：顺序无关 / 陈旧首位卡不夺权威 / 时间戳缺失退化 mtime /
+  显式适配器世界仍优先（零回归）/ 无卡仍可用（零回归）。**先红后绿**已验。
+- 探针复测（`scripts/probe_restart_consistency.py`）：**反转顺序不再换权威 ✅**；连 `saved_at` 一起改旧的卡不被采纳 ✅。
+- **如实记录的边界（方案②的代价）**：权威跟**时间戳**、不跟内容 —— 手改卡片内容但保留/伪造较新 `saved_at`
+  的卡**仍会被采纳**（探针 ⑤ 已复现）。所以"手改记忆卡"这类操作要自己负责 `saved_at`；
+  若要彻底消除，需走方案③（独立 `world.json` 存档）。
+- **未动**：Q4「联机时谁是权威」（游戏端 vs 大脑）—— 那是另一问，仍待拍板。
 
 顺手项（T-03 ~ T-13 卫生债）改到哪块顺手清哪块；Phase 10（事件订阅式）**建议不做**
 （现有 `world.log` + `/api/events` + 账本派发队列已够 benchmark 与 UI 用，订阅式无可证收益）。
