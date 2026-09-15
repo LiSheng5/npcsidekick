@@ -1,7 +1,22 @@
 # agent 存货展柜 —— 六件好货导购
 
-原件都在 `1_Dagent\agent\` 里睡大觉，本文件夹是**展示副本**（改这里不影响大脑）。
-哪件要正式上岗，说一声，我来做移植（含测试和默认关的开关）。
+原件都在 `1_NPCSidekick\agent\` 里（2026-09 前叫 `1_Dagent`）。
+
+> 📦 **2026-09-15 变更**：本文件夹原有的 6 份展示副本（与 `agent/` 里**逐字节相同**）已**移出仓库**，
+> 现存于 `D:\NPCSidekick\_已归档_20260915\参考_agent好货_副本\`。要读副本去那儿，要改就去改 `agent/` 里的原件 ——
+> 本文件保留为**导购地图**（下表 → 原件位置）。
+> 哪件要正式上岗，说一声，我来做移植（含测试和默认关的开关）。
+
+## 原件位置对照
+
+| 编号 | 副本 → 原件 |
+|---|---|
+| 01 重试退避 | `agent/executor/retry.py` |
+| 02 向量记忆 | `agent/memory/vector_store.py` |
+| 03 交接单压缩 | `agent/memory/compressor.py` |
+| 04 反思五态 | `agent/planner/reflector.py` |
+| 05 复合技能 | `agent/tools/skill.py` |
+| 06 token 预算 | `agent/memory/token_counter.py` |
 
 ## 快速导购
 

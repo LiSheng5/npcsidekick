@@ -1,6 +1,6 @@
 # NPC 大脑架构（三角色 · 记忆三阶段 · 防篡改 · 语音）
 
-> 最后更新：2026-08-25。记录 NPC 层（`npc/` 目录）的完整架构，覆盖：三角色决策、落账口、记忆系统三阶段（反思/关联/遗忘）、防篡改+沙箱分级、审批策略配置化、语音系统、模型可插拔、上下文压缩、Codex 设计吸收（§9）、六项强化：动态资源词典/中文分词/多世界隔离/SSE 推送/清单解析/接入 SDK（§14）、调试台三件套（§15）。
+> 最后更新：2026-09-15（新增 §29 能力审计结论 / §30 演进路线图）。记录 NPC 层（`npc/` 目录）的完整架构，覆盖：三角色决策、落账口、记忆系统三阶段（反思/关联/遗忘）、防篡改+沙箱分级、审批策略配置化、语音系统、模型可插拔、上下文压缩、Codex 设计吸收（§9）、六项强化：动态资源词典/中文分词/多世界隔离/SSE 推送/清单解析/接入 SDK（§14）、调试台三件套（§15）、**Runtime 能力边界与三条断层（§29）**、**演进路线图与待拍板（§30）**。
 
 ## 1. 三角色架构
 
@@ -414,6 +414,9 @@ cast 拒绝反注册/再注册全新身份/tick 孤儿槽防御）。真实 API 
 
 ## 15. 调试台三件套（2026-08-23）
 
+> ⚠ **页面已换（2026-09-08）**：本节提到的 `web/static/npc.html` / `/npc.html` 已整套下架，
+> 界面现在是 Web Console（`/console/`）；本节记录的后端能力仍在服务 —— 见 §31。
+
 > 近期优化第一批落地：Web 调查台接通真后端 + 版本握手 + 观测端点。
 > 全量测试 **601 passed**（新增 13，`tests/test_server_console.py`）。客户端 API 完全向后兼容。
 
@@ -711,7 +714,7 @@ save() 防重复落盘(blob 比对)随⑥落地。
 
 ### 23.7 回归与版本注记
 五连提交每步全量回归(682→695, 小项池净增13)。pyproject/BRAIN_VERSION
-版本号仍 3.1.0 —— 建议下次发布窗口统一 bump 3.2.0, 待拍板。
+✅ 已拍板并执行（2026-09-15）： / README 徽章 /  标题统一 bump 到 **3.2.0**。
 
 ## 24. TDAM 借鉴三件套（2026-08-26 已实施）
 
@@ -932,3 +935,169 @@ gta_actions.json 端到端/manifest 响应隐藏空模板）、
 C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断/
 零地点保持未加载/places 段解析）。
 每组首例都是回归锚：未加载清单与地点词典时，行为与旧版逐字一致。
+
+---
+
+## 29. Runtime 能力审计：边界与断层（2026-09-15 · 只读审计 · 结论章）
+
+> 来源：外部一份把本项目当"Agent framework prototype"的 brief（要求按 12 个 Phase 推进）。
+> 实测结论：**这里是 v3.2-dev 完整运行时，不是原型** —— 12 Phase 里 **6 已有 / 8 部分 / 2 真缺**。
+>
+> **三份文档的分工**（避免三处各维护一份意见）：
+> **本章 = 长期结论**（能力边界 / 断层 / 债务编号）｜
+> `docs/NPC_RUNTIME_AUDIT.md` = **证据快照**（brief 十问逐条 + 实测命令 + 覆盖矩阵，不随进度改）｜
+> `docs/待办与缺口清单_20260915.md` = **状态台账**（每条待办的编号 / 状态 / 执行顺序）。
+>
+> **判读口径**（以后凡有外部方案进来都先跑一遍）：**别信方案里的技术前提，先实测映射**。
+> 本次 brief 就自己接错了轨（它要求复用 `agent/planner` —— 那是另一条轨，见 29.1-3）。
+
+### 29.1 三条断层（改动前必读）
+
+1. **记忆只进对话，不进决策** —— 记忆卡 / 反思 / 画像 / 管家约占 `npc/` 近半代码，
+   但对**自主行为影响为 0**：`scheduler.py` 全文不 import `memory`。闭环断在"行动"这一环。
+   → "反思改变下次行为"**现状不成立**；只把反思做成"反思日志"就是白做，
+   必须先在 `_dynamic_weight`（`scheduler.py:67`）打开"决策层读记忆/目标"这个口子。
+2. **`persona.goals` / `desires` 是装饰** —— `{progress, target}` 只在 prompt 里显示，
+   全仓**没有任何一处写回 progress**，权重也不参与 `_choose_routine_item` 抽签。
+   自主"任务"实质是**加权抽签**（静态 weight × 耐力 × 昼夜 × 天气 × 库存缺口），
+   无优先级 / deadline / 前置条件。
+3. **双轨漂移（新人必踩）** —— `agent/`（4 层、一问一答语义）与 `npc/`（自主 tick 运行时）
+   **互不调用**；`npc/` 只复用 `agent.llm.client` / `logging_config` / `config_flags`。
+   NPC 真实决策点是 `npc/scheduler` + `npc/reviewer` + `npc/talk_pipeline`。
+
+### 29.2 一次自主 tick 实际读了什么（决策源现状）
+
+| 决策输入 | 参与决策？ | 落点 |
+|---|---|---|
+| `persona.routine` 静态 weight | ✅ | `_choose_routine_item` |
+| 耐力 / 昼夜 / 天气 | ✅ | `_dynamic_weight` |
+| 库存缺口（`world.delivered`） | ✅ | `_dynamic_weight` |
+| 记忆卡 / 反思 / 画像 / 管家产出 | ❌ **完全不进** | —— |
+| `persona.goals` / `desires` | ❌ 只进 prompt | —— |
+| 关系数据 | ❌ 接缝已留、数据为 0 | `world["_relationships"]` |
+
+### 29.3 真缺口（G1-G6，按对闭环的杠杆排序）
+
+| # | 缺口 | 落点（已按 2026-09-15 四项拍板） |
+|---|---|---|
+| **G1** | **决策层读记忆/目标**（撬动整条闭环） | `scheduler.py:67::_dynamic_weight` 加因子（纯数值，零 LLM） |
+| **G2** | **Goal 真值层**（三级目标 + 队列 + 生命周期；否则又是装饰） | 新 `npc/goal.py`；`persona.goals` 降为初始种子 |
+| **G3** | **ActionResult 结构化契约**（目标进度/关系/benchmark 都从这消费） | 在 `apply_action` **外面**包一层薄包装，旧签名不破 |
+| **G4** | **关系数据（事件驱动）** | `world.py` 加 `relationships`，由 G3 的后果驱动增量 |
+| **G5** | **Benchmark 骨架**（"改完到底有没有变聪明"的唯一证据） | 在既有 `npc/benchmark.py`（91 行 print 脚本）**之上指标化**，不推倒重来 |
+| **G6** | **世界存档单点**（共享内存 vs 每 NPC 一副本，重启一致性无定义） | 需先定世界权威归属（见 30.4 Q4） |
+
+### 29.4 技术债（TD1-TD5）
+
+| # | 债 | 性质 | 一句话 |
+|---|---|---|---|
+| TD1 | 记忆不进决策 | **架构级断层**（非 bug） | 见 29.1-1 |
+| TD2 | 持久化语义分裂 | 设计缺口 | 盘上每 NPC 一份整 world 副本（`memory_card.py:113/139` vs `npc.py:89-91`），重启权威无定义 |
+| TD3 | 双轨漂移 | 认知债 | 见 29.1-3 |
+| TD4 | 装饰性字段无守护 | 契约债 | `goals`/`desires` 有 schema 无机制，测试测不出"没生效" |
+| TD5 | 死代码 / 遮蔽 / 硬编码 | 卫生债 | `_reflect_rules` 双定义（`npc.py:28` vs `:67`）；`_a_semantic_block` 封存未迁（§22）；`walk_to("村庄")` 游戏地名进通用层（`npc.py:259`） |
+
+### 29.5 已有能力（做得好的，别改坏）
+
+铁律 **LLM 只提议、代码决定执行**（`book.guarded_book` 单入口）｜**确定性世界引擎**
+（`world.py:161::apply_action` 唯一世界变更点）｜**三道门 + 能力协商 + fail-closed**｜
+**诚实边界**（安检 L1 三不清除；无数据 → 空/`null`，**不造假**）｜**防 confabulation 双保险**｜
+**反思卫生**（阈值 / 噪音批跳过 / 去重 / 指针推进）｜**记忆卡体积护栏**（log 截 500 + 归档轮转）｜
+**自主循环契约干净**（`tick_round` 纯函数零 I/O）｜**成本控制**（闲聊零 LLM）｜
+**可观测**（8 个开关暴露生效态；Web Console 7 页全可达）。
+
+### 29.6 风险（R1-R6）
+
+| # | 风险 | 对策 |
+|---|---|---|
+| R1 | LLM 成本（反思/画像 `reasoning_effort=max`） | 两层口径：机制 mock 全量 + 关键 A/B 少量真 API，设调用上限 |
+| R2 | 8 个 `NPC_*` 开关默认 OFF 的"暗路径" | benchmark 必须显式声明开关矩阵 |
+| R3 | 改协议划界易引双记账（历史 B6） | 先补回归锚再改（`tests/test_ledger_boundary.py` 可扩） |
+| R4 | 长跑资源增长未实测 | Phase 12 前先做一次零 LLM 长跑灌水观测 |
+| R5 | 游戏无关红线（引擎层零游戏词） | 游戏词只允许出现在 `npc/personas/*.json` 与声明式世界文件里 |
+| R6 | 账本是内存态（重启丢账，靠重派发自愈） | benchmark 的"长跑"语义必须吃这一点 |
+
+---
+
+## 30. Runtime 演进路线图（2026-09-15 起 · 承 §29）
+
+> **目标**：把"自主运行"接成闭环 —— 目标驱动行为、行为产生后果、后果更新记忆/关系、
+> 记忆反过来影响下一次决策（§29.1 断的那一环）。
+>
+> **原则**：不新建平行体系 / 不重造 §29.5 已有的 6 项 / **每个新机制都带开关（关 = 与旧版逐字节一致）**。
+>
+> ⚠ **最大的顺序陷阱**：**"反思改变行为"（Phase 6）与"决策层读记忆"（G1）是同一件事的两面** ——
+> 必须 G1 先开，Phase 6 才有意义；反过来做等于白做。
+
+### 30.1 落地顺序（每步一次提交，状态见清单 §8）
+
+| 序 | 动作 | 改动面 |
+|---|---|---|
+| 1 | 干净基线（已做：T-01 修复 + 测试加固） | `scheduler.py` / `tests/` |
+| 2 | 重启一致性实测（决定 TD2 的修法，顺带定 Q4） | 只测不改 |
+| 3 | 文档基线订正 + 过时引用清理 | `README.md` / `ARCHITECTURE.md` / `PROJECT_DELIVERY.md` / 本文档 §6 |
+| 4 | **G2 Goal 真值层 + G1 决策源扩展 + G3 ActionResult** ← 三根柱子一起做 | `npc/goal.py` + `scheduler.py` + `world.py` 薄包装 |
+| 5 | Phase 6 反思结构化 + A/B（**必须在 4 之后**）+ 记忆 `goal_relevance` 因子 | `memory_card.py` / `memory.py` / `scheduler.py` |
+| 6 | Phase 8 人格参与决策 + G4 关系数据（各带 A/B） | `persona.py` / `world.py` |
+| 7 | Phase 11 `examples/village` + G5 benchmark 指标化 | 新目录 + `npc/benchmark.py` |
+| 8 | 30 分钟长跑验收（V-01） | 只测不改 |
+
+顺手项（T-03 ~ T-13 卫生债）改到哪块顺手清哪块；Phase 10（事件订阅式）**建议不做**
+（现有 `world.log` + `/api/events` + 账本派发队列已够 benchmark 与 UI 用，订阅式无可证收益）。
+
+### 30.2 两条纪律（本项目既有契约）
+
+1. **每步改完立刻跑相关测试**，全量基线**只升不降**；取数一律走 `--junitxml` 解析，
+   **别信终端尾部**（safe-delete shim 会吞掉摘要；junitxml 也别写系统 Temp）。
+2. **测试守护先行**：要改既有行为，先全仓搜有没有测试/docstring 在固化它（写明理由的 docstring = 设计契约）。
+
+### 30.3 已定 / 待定
+
+| # | 事项 | 状态 |
+|---|---|---|
+| Q1 | 文档落点（后续 ROADMAP / WORLD_MODEL / BEHAVIOR_BENCHMARK 放哪） | ✅ **已定（2026-09-15）：并入本文档编号章节** —— 本章即落点，此后结论只在这里维护 |
+| Q2 | 新数据（goal / relationship）在 Web Console 的可观测粒度 | ⬜ 待定（倾向：API 先出口，复用 Live/Activity，不做新页） |
+| Q3 | `examples/village` 形态 | ⬜ 待定（倾向：**可跑参考世界**，能进 benchmark，非教学模板） |
+| Q4 | 世界权威归属（大脑权威 / 游戏端权威） | ⬜ 待定（倾向：文本单机 = 大脑权威；联机 = 游戏端权威、大脑只提议；按有无活跃消费者切换，复用 `_protocol_owns_pending` 语义） |
+| Q5 | `?? CLAUDE.zh.md` / `?? npc/store_godot/` 的去留 | ⬜ 待定（`tests/test_safety_gate.py` 已随 `d69c726` 提交） |
+| Q6 | Phase 10（事件订阅式）是否砍掉 | ⬜ 待定（建议砍） |
+
+### 30.4 文档卫生（顺带记录，未处理）
+
+- 本文档 §24 **重号**（`:716` TDAM 借鉴三件套 / `:813` 任务回路最小闭环）；因 §24 已被
+  `docs/任务书_04_记忆管家.md` 等外部引用，**本次不重排**，留待统一编号时一并处理。
+- §6「测试」段仍是 `588 passed（2026-08-23）` 的历史值；当前基线见 §0/清单（`857`）。
+  该处已作为一条待订正项记入清单 D-01（原先只列了 `README.md` / `ARCHITECTURE.md` / `PROJECT_DELIVERY.md`）。
+
+---
+
+## 31. Web 层的变迁：旧 Web 下架 → Web Console（2026-09-08 已实施）
+
+> 本章补一处**文档缺口**：§15 记录的调试台是 `web/static/npc.html`（服务端托管 `/npc.html`），
+> 而那个页面已在 **2026-09-08 整套下架**，本文件当时没留变更记录 —— 后来者读 §15 会以为它还在。
+> 详细实施记录见 `docs/WEB_CONSOLE_架构理解.md` §12。
+
+### 31.1 下架的三个东西
+
+| 被下架 | 原角色 | 现在 |
+|---|---|---|
+| `web/static/npc.html` | 旧关系网 / 调试台页面 | → Web Console 的 Graph 页 |
+| `web/agent_static/` | 通用聊天台前端 | 需求由 Console 的 Playground 页承接 |
+| `web/server.py` | 通用聊天台后端（`/api/chat` + SSE + token 认证） | 整套移出项目（含一个未修的 401 bug） |
+
+### 31.2 连带修订
+
+- `npc/server.py`：根路径不再兜底 `/npc.html`，改为指向 `/console/`（dist 未构建 → 提示 JSON）；删 `web/static` 挂载。
+- `npc/bootstrap.py`：自动打开 `http://127.0.0.1:{port}/`（不再写死 `/npc.html`）。
+- `main.py`：删 `--web` 参数与分支。
+- `agent/settings.py`：删 `web_host` / `web_port` / `web_token` / `web_auto_open` 四个字段。
+- `web/` 目录现在只剩 `console/`（Vite + React 前端）与 `__init__.py`。
+
+### 31.3 由此产生的读法（重要）
+
+- **§15「调试台三件套」是历史章**：其中 `web/static/npc.html`、`/npc.html` 的说法**均已失效**；
+  但它记录的后端能力（`/api/version` 握手、`/api/stats` 观测、`POST /api/memory` 回写）**仍在服务**，
+  只是界面换成了 Console。
+- Web Console 自身：7 项导航（Graph / Characters / Live / Memory / Activity / Playground / Settings）
+  **已全部开放**，仅剩 Step 8「Graph 精修（zoom/pan/fit/search/filter + 响应式 Inspector）」未做。
+- 端点全量清单见 `docs/API.md` §9（40 条：游戏面 26 + Console 面 14）。

@@ -1,4 +1,4 @@
-# NPCSidekick — 架构设计文档（引擎: NPCSidekick v3.1）
+# NPCSidekick — 架构设计文档（引擎: NPCSidekick v3.2）
 
 ## 系统概览
 
@@ -409,7 +409,7 @@ NPCSidekick/
 │   └── llm/
 │       ├── client.py             # LLMClient (薄包装)
 │       └── types.py              # StreamEvent / LLMResponse / LLMChunk
-└── tests/                        # 841 个测试 (pytest，全仓)
+└── tests/                        # 857 个测试 (pytest，全仓；2026-09-15)
     ├── test_planner.py
     ├── test_executor.py
     ├── test_router.py
@@ -466,7 +466,7 @@ MemoryManager 首次运行时自动检测：向量存储为空但 JSON 有数据
 ## 测试
 
 ```bash
-# 全部 841 个测试
+# 全部 857 个测试（2026-09-15）
 pytest tests/ -v                    # ~64s
 
 # 覆盖率

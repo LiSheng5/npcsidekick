@@ -22,7 +22,7 @@ python -m npc.server                 # 打开 http://127.0.0.1:8765/
 ```
 
 `npc/server.py` 会把 `dist/` 挂在 `/console/` 下，根路径 `/` 重定向过去
-（dist 不存在时回落到旧的 `npc.html`）。`dist/` 与 `node_modules/` 都不入库。
+（dist 不存在时返回提示 JSON，**不再回落旧 `npc.html`** —— 该页 2026-09-08 已下架）。`dist/` 与 `node_modules/` 都不入库。
 
 ## 结构
 

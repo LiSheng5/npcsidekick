@@ -1,7 +1,7 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.1-9b59b6?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-3.2-9b59b6?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/python-3.10+-purple?style=flat-square" alt="python">
-  <img src="https://img.shields.io/badge/tests-841%20passed-brightgreen?style=flat-square" alt="tests">
+  <img src="https://img.shields.io/badge/tests-857%20passed-brightgreen?style=flat-square" alt="tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/game-Godot%204.x-orange?style=flat-square" alt="godot">
 </p>
@@ -75,10 +75,13 @@ Then point your game at `http://127.0.0.1:8765`. See **[docs/游戏接入.md](do
 ## Documentation
 
 - [游戏接入](docs/游戏接入.md) — endpoints, curl examples, Godot integration pattern
-- [API 参考](docs/API.md) — full endpoint contract
+- [API 参考](docs/API.md) — full endpoint contract (all 40 endpoints)
 - [角色制作 — Making NPCs with JSON](docs/角色制作.md) — persona fields, routine table, example
 - [本地模型接入](docs/本地模型.md) — Ollama, env vars, v4 plan
-- [ARCHITECTURE.md](ARCHITECTURE.md) — engine internals & complexity tiers
+- [NPC 大脑架构](docs/NPC大脑架构.md) — the brain itself: roles, memory, safety tiers, capability audit (Chinese)
+- [Web Console](docs/WEB_CONSOLE_架构理解.md) — the developer console (Graph / Characters / Live / Memory / Activity / Playground / Settings)
+- [协议契约](engine-clients/common/PROTOCOL.md) — game-side protocol v1 (capability negotiation + mirror face)
+- [ARCHITECTURE.md](ARCHITECTURE.md) — agent engine internals
 - [QUICKSTART.md](QUICKSTART.md) — the underlying agent engine CLI
 
 ## Design notes
@@ -159,10 +162,13 @@ curl -X POST http://127.0.0.1:8765/api/talk \
 ## 文档
 
 - [游戏接入](docs/游戏接入.md)
-- [API 参考](docs/API.md)
+- [API 参考](docs/API.md) — 全量 40 条端点契约
 - [角色制作 — 用 JSON 做 NPC](docs/角色制作.md)
 - [本地模型接入](docs/本地模型.md)
-- [ARCHITECTURE.md](ARCHITECTURE.md) — 引擎设计与复杂度分级
+- [NPC 大脑架构](docs/NPC大脑架构.md) — 大脑本体：三角色/记忆/安全分级/能力审计与演进路线图
+- [Web Console](docs/WEB_CONSOLE_架构理解.md) — 开发者控制台（Graph/Characters/Live/Memory/Activity/Playground/Settings）
+- [协议契约](engine-clients/common/PROTOCOL.md) — 游戏侧协议 v1（能力协商 + 镜像面）
+- [ARCHITECTURE.md](ARCHITECTURE.md) — agent 引擎内部设计
 - [QUICKSTART.md](QUICKSTART.md) — 底层 agent 引擎 CLI
 
 ## 设计要点

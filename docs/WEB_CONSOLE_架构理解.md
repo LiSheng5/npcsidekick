@@ -1,8 +1,8 @@
 # NPCSidekick Web Console — 架构理解与技术设计
 
 > **阅读指引**：§1~§7 是 2026-09-07 的**起点盘点与计划**（Step 1~3，当时代码零改动）；
-> §8 起是**实施记录**（§8 Step 4 / §10 Step 5 / §11 Step 6 / §12 下架旧 Web）。
-> **最新状态看 §12；当前进度与约定看项目 `MEMORY.md`** —— 前面的小节保留的是"当时"的判断，不再更新。
+> §8 起是**实施记录**（§8 Step 4 / §10 Step 5 / §11 Step 6 / §12 下架旧 Web / §13 补记 09-09~09-10）。
+> **最新状态看 §13；当前进度与约定看项目 `MEMORY.md`** —— 前面的小节保留的是"当时"的判断，不再更新。
 > 目标：在**不破坏现有游戏接入协议**的前提下，为 NPCSidekick Runtime 增加一层
 > 开发者工具：Visualization + Character Editor + Runtime Monitor + LLM Playground。
 > 核心关系不变：`Game ↔ HTTP ↔ NPCSidekick Runtime`，Web 与 Game、CLI 并列消费同一个 Runtime。
@@ -442,3 +442,23 @@ React 不持有 JSON、不直接改文件、也不另造记忆结构。新增走
 ### 影响
 - `main.py --web` 入口没了（聊天台整套下架）；`python -m npc.server` 与 Console 不受影响。
 - `web/` 目录只剩 `console/`（前端）与 `__init__.py`。
+
+---
+
+## §13 补记：§12 之后落地的四块（2026-09-09 ~ 09-10，后补记录）
+
+> §12 当时写着"最新状态看 §12"，但接着又交付了 Live / Activity / Playground / Settings 四块。
+> 本节补上，使本文档与 `MEMORY.md` 的进度表对齐（动机与踩坑详见 `MEMORY.md` 的 Web Console 小节）。
+
+| 交付 | 内容 | 关键约定（别踩） |
+|---|---|---|
+| **Live 页**（Step 7） | 2s 轮询世界快照 + SSE 实时事件流（追加式，最新在下） | 事件**无时间戳**（后端从 `world.log` 文本正则解析），只能按到达顺序展示；SSE 重连会重放几条，事件无唯一 id 故**不做内容去重**（会误杀"连着两次同样动作"）；**别用 `since=0` 拉全量**（世界跑久了是几万条）——先传超大游标探 `log_count` 再取尾部 |
+| **Activity 页** | 手动刷新的历史档案（倒序，最新在上）+ 类型/角色/关键词筛选 + 分段游标"加载更早"（一次 200 条） | **不接 SSE** —— 倒序列表加实时插入会一直跳动；与 Live 共用 `components/EventLine.tsx` |
+| **Playground 页**（Step 9） | 对话测试 + Debug 面板 | 跨页导航统一走 App 层 `focus({id, seq})` |
+| **Settings 页**（Step 10） | Provider 配置 UI（masked key + Test Connection） | 密钥存 `npc/config/providers.enc`（Windows DPAPI），**只回 masked**；此步在 Step 4 已提前交付，不必再排期 |
+
+**至此 7 项导航全部开放**：Graph / Characters / Live / Memory / Activity / Playground / Settings。
+**剩余**：Step 8「Graph 精修」（zoom/pan/fit/search/filter + 响应式 Inspector，基础版已有，属精修）。
+
+**端点面**：§2 的"现有 API 清单"是 2026-09-07 的盘点；当前全量为 **40 条**（游戏面 26 + Console 面 14），
+权威清单见 `docs/API.md` §9。

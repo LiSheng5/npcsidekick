@@ -3,7 +3,8 @@
 服务器监听 `http://127.0.0.1:8765`。游戏端只需要 `POST` 和 `GET`，全部返回 JSON（UTF-8）。
 
 - **鉴权**：无 token。仅校验 `Origin` 必须来自 `127.0.0.1` / `localhost`（DNS-rebind 防护）。非本机 Origin → `403`
-- **错误格式**：`{"detail": "..."}`，HTTP 状态码 400（参数错）/ 404（没有该 NPC）/ 403（Origin 拒绝）
+- **错误格式**：`{"detail": "..."}`；代码里实际用到的状态码：400（参数错）/ 403（Origin 拒绝）/
+  404（没有该 NPC）/ 409（协议面冲突，如消费者重复报到）/ 422（校验失败）/ 429（限流）/ 500·503（内部故障）
 - **编码**：请求体必须 UTF-8 JSON；中文直接传（`{"npc_id":"cang","message":"给我两根木材"}`）
 
 ---
@@ -119,3 +120,55 @@ body 可选 `{"seed": 42}` 保证确定性。响应 `{"tick": N, "events": {}}`�
 | 交付动画（新到货） | `delivered` 计数增量（每 +1 触发一次） |
 | 派活（旁路对话） | `POST /api/task` |
 | 游戏启动自检 | `GET /api/state` 200 即在线，超时 3s 判定离线 → 拉起服务器 |
+
+---
+
+## 9. 完整端点索引（40 条 · 2026-09-15 实测）
+
+> §1~§8 详述的是**游戏接入面**（最少三条：`/api/talk` `/api/state` `/api/task`）。
+> **Console 面 14 条**属于开发者工具层，只服务本机 Web Console（`/console/`），游戏端不需要。
+> **权威源 = 代码**：`npc/server.py`（26 条）+ `npc/console_api.py`（14 条）—— 本表与代码不一致时，以代码为准。
+
+### 9.1 游戏面（`npc/server.py`，26 条）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/talk` | 玩家对话/下指令（详见 §1） |
+| GET | `/api/state` | 世界状态镜像（详见 §2） |
+| POST | `/api/task` | 直接派活，跳过对话（详见 §3） |
+| GET | `/api/npcs` | NPC 列表（前端切换角色用） |
+| GET | `/api/npc?npc_id=` | 单个人设（详见 §5） |
+| GET | `/api/memory?npc_id=` | 记忆卡内容（详见 §6） |
+| GET·POST | `/api/mode` | 对话模式：规则 ↔ LLM（详见 §7） |
+| POST | `/api/tick` | 手动推一帧（测试/演示；body 可选 `seed`）（详见 §8） |
+| POST | `/api/npc/register` | 动态注册（GTA 前置）：ped 随刷随出热注册，幂等（重复 → `existed`） |
+| POST | `/api/npc/unregister` | 反注册（ped despawn）：移除 NPC + 世界槽；常驻层先落盘 |
+| GET | `/api/personas` | 人设清单（全量 dict 列表） |
+| POST | `/api/personas` | 新建人设 → 校验 → 写 `<personas>/<id>.json` |
+| GET | `/api/events` | 结构化事件流增量（`since` 游标；**事件无时间戳，只有到达顺序**） |
+| GET | `/api/events/stream` | SSE 增量事件流（轮询的升级替代，按需采用） |
+| POST | `/api/memory` | 记忆回写（整表替换语义，生产客户端勿用） |
+| POST | `/api/consumer/hello` | 协议 v1 · 能力协商（M1）：消费者报到 + 心跳 + 声明可执行动词表 |
+| POST | `/api/task_done` | 协议 v1 · 销账（M1）：mod 干完活回报 |
+| GET | `/api/version` | 版本/特性握手：客户端启动探测一次，按特性降级 |
+| GET | `/api/stats` | 观测端点：调用量/延迟/错误/SSE 连接数 |
+| POST | `/api/tts` | 语音合成（可给任意文本配音） |
+| GET·POST | `/api/approval` | 审批策略视图/运行时调整（带 `npc_id` = 按 NPC 粒度，缺省 = 全局） |
+| GET·POST | `/api/manifest` | 动作清单：读取 / 游戏声明自己的动作（`{reset:true}` 恢复默认） |
+| GET | `/` | 根路径 → Web Console `/console/`（dist 未构建时返回提示 JSON） |
+
+### 9.2 Console 面（`npc/console_api.py`，14 条）
+
+> 只服务本机 Web Console。本项目里**"删除"= 移进同级 `.trash/`**（可反悔），不是真删。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET·PUT·DELETE | `/api/personas/{pid}` | 单个人设读/改/删（改 = 校验 → 写盘 → **热加载进运行时**；删 = 文件进 `.trash` + 摘实例，记忆卡默认**保留**） |
+| GET | `/api/actions` | 动作名建议（**不是白名单**，只是编辑器的输入提示） |
+| GET | `/api/relationships` | 关系图数据（无数据 → 空 + `source="none"`，不造假） |
+| GET·POST | `/api/npcs/{pid}/memory` | 单 NPC 记忆列表 / 新增（结果三态 `added` / `merged` / `rejected`） |
+| PUT·DELETE | `/api/npcs/{pid}/memory/{mid}` | 单条记忆改 / 删 |
+| GET·POST | `/api/settings/providers` | Provider 配置读写（密钥存 `npc/config/providers.enc`，只回 masked） |
+| DELETE | `/api/settings/providers/{pid}` | 删 Provider |
+| POST | `/api/settings/providers/{pid}/activate` | 激活指定 Provider（响应 `{"ok", "active", "providers"}`） |
+| POST | `/api/llm/test` | 拨测：拿 `provider_id`（或临时 base_url/key/model）发一个最小请求 |
