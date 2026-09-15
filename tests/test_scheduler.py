@@ -255,6 +255,99 @@ class TestTickLoop:
         assert far.world["actors"]["yuanjia"]["inventory"] == {}
         # 远者同 tick 规划时资源已被采空 → 规划期放弃（优雅，不白跑一趟）
         assert any("没找到地方" in e["content"] for e in far.memory.all())
+
+
+# ── T-01 回归锚（2026-09-15）: routine 项再坏也不能把整帧带走 ────────────────
+import pytest
+
+from npc.scheduler import _plan_steps
+
+UNPLANNABLE_NOTE = "引擎还没有这个动作"
+
+
+def _bare_npc(pid, routine, world, store_dir):
+    """带 routine 的测试 NPC（显式指定 store_dir — 不污染仓库里的 npc/store_test）。"""
+    persona = {
+        "id": pid, "name": pid, "identity": "测试村民", "personality": "测试",
+        "speech_style": "测试", "taboos": [],
+        "rules": {"replies": {"好": "好的。"}, "fallback": "嗯。"},
+        "routine": routine,
+    }
+    return NPC(persona=persona, world=world, store_dir=store_dir)
+
+
+class TestPlanStepsIsTotal:
+    """``_plan_steps`` 对任何 routine 项都必须是"总函数": 返回 None，不抛异常。
+
+    背景（审计 T-01，实测复现）: 旧实现对非 rest/say 项一律走 gather 链
+    (``resource = item["resource"]``)，于是 craft / 自定义动作 / 缺 resource 的
+    gather 全部 ``KeyError``；异常冒到 ``server._tick_loop`` 的 ``except`` 会吞掉
+    **整帧** —— 落盘、反思、管家、账本回收一起跳过，NPC 每帧静默空转、零日志线索。
+
+    契约来源: ``test_persona_loader.py::test_any_action_accepted`` /
+    ``::test_gather_without_resource_ok`` —— loader 只校验"非空字符串"，能不能执行
+    由 Runtime 说了算，**不崩**。
+    """
+
+    @pytest.mark.parametrize("item", [
+        {"action": "craft", "recipe": "木石工具"},          # craft 能力只在 run_task 里
+        {"action": "gather", "weight": 1},                 # loader 明许缺 resource
+        {"action": "巡逻", "weight": 2},                    # 任意自定义动作
+        {"action": "trade", "resource": "铁料", "count": 1},  # 带 resource 也不是 gather 链
+        {"action": "gather", "resource": "", "count": 1},   # 空字符串 resource
+    ])
+    def test_unplannable_item_returns_none(self, item, tmp_path):
+        """认不出来的 routine 项 → None（旧版是 KeyError）。"""
+        world = default_world()
+        npc = _bare_npc("plan", [item], world, str(tmp_path))
+        assert _plan_steps(npc, world, item) is None
+
+    def test_whole_frame_survives_bad_routine(self, tmp_path):
+        """同帧的正常 NPC 照旧推进 —— 一个坏项不许吃掉别人的一步。"""
+        world = default_world()
+        bad = _bare_npc("huai", [{"action": "craft", "recipe": "木石工具"}], world, str(tmp_path))
+        good = _bare_npc("hao", [{"action": "gather", "resource": "木材", "count": 1, "weight": 1}],
+                         world, str(tmp_path))
+        events = tick_round(world, {"huai": bad, "hao": good}, rng=random.Random(1))
+        assert bad.state == "idle"
+        assert "started" in events["hao"]          # 正常那位的这一步没被吞
+
+    def test_player_order_with_craft_does_not_crash(self, tmp_path):
+        """玩家单(pending_task)写 craft 同样不许崩 —— B2 编译产得出 craft 单，旧版必炸。"""
+        world = default_world()
+        npc = _bare_npc("kehu", [], world, str(tmp_path))
+        npc.pending_task = {"action": "craft", "recipe": "木石工具", "count": 1}
+        tick_round(world, {"kehu": npc}, rng=random.Random(1))
+        assert npc.pending_task is None            # 接单一次后清掉（原语义不变）
+        assert npc.state == "idle"
+
+    def test_planning_failure_enters_cooldown(self, tmp_path):
+        """计划失败也进冷却 —— 否则每帧重选同一项 → 每帧写一条记忆（记忆卡刷屏）。"""
+        world = default_world()
+        npc = _bare_npc("leng", [{"action": "craft", "recipe": "木石工具"}], world, str(tmp_path))
+        tick_round(world, {"leng": npc}, rng=random.Random(1))
+        assert npc._blocked[("craft", None)] > world["_tick"]
+
+    def test_planning_failure_memory_not_spammed(self, tmp_path):
+        """连跑 10 帧只留 2 条说明（冷却 5 tick 生效），不是每帧一条。"""
+        world = default_world()
+        npc = _bare_npc("shao", [{"action": "craft", "recipe": "木石工具"}], world, str(tmp_path))
+        for _ in range(10):
+            tick_round(world, {"shao": npc}, rng=random.Random(1))
+        notes = [e for e in npc.memory.all() if UNPLANNABLE_NOTE in e["content"]]
+        assert len(notes) == 2
+
+    def test_supported_items_plan_unchanged(self, tmp_path):
+        """默认世界零差异: gather / rest / say 的步骤序列与旧版逐字一致。"""
+        world = default_world()
+        npc = _bare_npc("jiu", [], world, str(tmp_path))
+        kinds = [s["kind"] for s in
+                 _plan_steps(npc, world, {"action": "gather", "resource": "木材", "count": 2})]
+        assert kinds == ["walk", "gather", "gather", "walk", "deliver", "deliver"]
+        assert _plan_steps(npc, world, {"action": "rest", "ticks": 3}) == [{"kind": "rest"}] * 3
+        assert _plan_steps(npc, world, {"action": "say"}) == [{"kind": "say"}]
+
+
 # ── LLM 调度队列（任务书 #01，NPC_SCHEDULER=1 下过）────────────────────
 import asyncio
 import threading

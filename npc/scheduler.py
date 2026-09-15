@@ -152,15 +152,46 @@ def _walk_steps(world: Dict, start: str, dest: str) -> Optional[List[Dict]]:
     return [{"kind": "walk", "target": dest} for _ in path]
 
 
+# ── routine 计划（T-01·2026-09-15: 计划是"总函数" — 坏项返回 None，绝不抛异常）──
+# 引擎能编排的动作 = 与 _execute_step 认识的 step.kind 对应（rest/say/gather）。
+# 其余动作 loader 允许写（不替游戏做决定），能不能执行由 Runtime 说了算:
+# 这里认不出来 → 计划失败（记一条记忆 + 进冷却），不崩。
+SUPPORTED_ROUTINE_ACTIONS = ("gather", "rest", "say")
+
+
+def _plan_failure_note(item: Dict) -> str:
+    """计划失败的人类可读原因（写进记忆，Memory 页可见）。
+
+    分支与原因一一对应，别把"引擎不会"说成"没找到地方"。
+    """
+    action = item.get("action")
+    if action not in SUPPORTED_ROUTINE_ACTIONS:
+        return f"想做{action}但引擎还没有这个动作"
+    if not item.get("resource"):
+        return f"想做{action}但没写清要什么"
+    return f"想{action}{item.get('resource', '')}但没找到地方"
+
+
 def _plan_steps(npc, world: Dict, item: Dict) -> Optional[List[Dict]]:
-    """routine 项 → 步骤列表。gather 天然含"运回"（走→采×count→走到主角处→交付×count）。"""
-    action = item["action"]
+    """routine 项 → 步骤列表；引擎编排不了的项 → None（调用方记一条 + 冷却）。
+
+    gather 天然含"运回"（走→采×count→走到主角处→交付×count）。
+
+    旧版对非 rest/say 项一律走 gather 链（`item["resource"]`）→ craft / 自定义动作 /
+    缺 resource 的 gather 全 KeyError;异常冒到 server._tick_loop 的 except 会吞掉
+    整帧（落盘/反思/管家/账本回收一起跳过），NPC 每帧静默空转且零日志线索。
+    """
+    action = item.get("action")
     if action == "rest":
         return [{"kind": "rest"} for _ in range(int(item.get("ticks", 2)))]
     if action == "say":
         return [{"kind": "say"}]
+    if action != "gather":
+        return None                     # craft / 自定义动作: 引擎没有对应步骤
+    resource = item.get("resource")
+    if not isinstance(resource, str) or not resource:
+        return None                     # gather 缺 resource（loader 明许）→ 无从下手
 
-    resource = item["resource"]
     who = npc.actor_id
     start = world["actors"][who]["position"]
     site = resource_site(world, start, resource)
@@ -259,7 +290,11 @@ def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
             return ev
         steps = _plan_steps(npc, world, item)
         if steps is None:
-            npc.remember(f"想{item.get('action')}{item.get('resource', '')}但没找到地方", importance=4)
+            # T-01(2026-09-15): 计划失败也要进冷却 —— 否则每帧重选同一项 → 每帧写一条
+            # 记忆（记忆卡刷屏）。冷却键与执行失败同款 (action, resource)，重试窗口一致。
+            npc._blocked[(item.get("action"), item.get("resource"))] = (
+                world["_tick"] + BLOCK_AFTER_FAIL_TICKS)
+            npc.remember(_plan_failure_note(item), importance=4)
             npc.state = "idle"
             return ev
         desc = _describe(item)
