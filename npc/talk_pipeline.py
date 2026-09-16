@@ -35,7 +35,10 @@ class TalkPipelineMixin:
         # 画像段排在原始记忆卡之前, 细节仍由【记忆】按需召回; 开关关 → ""零差异。
         try:
             _profile = self.read_persona_profile()
-        except Exception:
+        except Exception as exc:
+            # T-07(2026-09-16): 画像读取失败仍然不卡对话（fail-soft），但**必须留痕** ——
+            # 原来裸 pass 让"画像一直没生效"完全静默。
+            log.warning("npc_profile_read_failed", npc=self.persona["id"], error=str(exc))
             _profile = ""
         parts = [
             "【世界状态】",
@@ -152,8 +155,9 @@ class TalkPipelineMixin:
             if _disc:
                 sys_content += "\n【未完成的事·主动提起】" + "；".join(
                     d["text"] for d in _disc)
-        except Exception:
-            pass
+        except Exception as exc:
+            # T-07(2026-09-16): 商议队列读取失败同样 fail-soft，但留痕（原来静默 pass）
+            log.warning("npc_discussion_read_failed", npc=self.persona["id"], error=str(exc))
         messages = [
             {"role": "system", "content": sys_content},
             *self.dialogue_history,   # 短期对话历史（最近 N 轮，上下文定期重置）

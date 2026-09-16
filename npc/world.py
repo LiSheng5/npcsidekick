@@ -52,6 +52,10 @@ def default_world() -> Dict:
         "_resource_caps": {"木材": 999, "浆果": 999, "石头": 999},   # 资源再生上限（旧记忆卡缺失时兜底 999）
         "actors": {},         # NPC 角色槽: {id: {position, inventory}}
         "protagonist": {"position": "村庄", "name": "主角"},
+        # T-03(2026-09-16): 制作台地点 + 出生点 —— 由**世界声明**（引擎不硬编码游戏地名）。
+        # 未声明 craft_at = 就地可制作；未声明 _default_spawn = 取第一个地点。
+        "craft_at": "村庄",
+        "_default_spawn": "村庄",
         "locations": {
             "村庄": {
                 "desc": "主角居住的小村庄，安静祥和。",
@@ -90,7 +94,9 @@ def actor_of(world: Dict, who: str) -> Dict:
     2026-08-22 修: 原来硬编码"村庄" — GTA 世界没有这个地点,新槽 KeyError。
     """
     slot = world["actors"].setdefault(
-        who, {"position": world.get("_default_spawn", "村庄"), "inventory": {}})
+        # T-03(2026-09-16): 兜底取"世界声明的出生点"，再退到第一个地点 —— 不写死任何地名
+        who, {"position": world.get("_default_spawn") or next(iter(world["locations"])),
+              "inventory": {}})
     slot.setdefault("stamina", STAMINA_MAX)   # 旧档补键(向后兼容)
     return slot
 
@@ -158,6 +164,19 @@ def find_path(world: Dict, start: str, goal: str) -> List[str]:
     return None
 
 
+def craft_station(world: Dict) -> Optional[str]:
+    """制作台所在地点 —— **声明驱动**（T-03 · 2026-09-16）。
+
+    世界用 `craft_at` 声明"在哪能制作"（示例世界 = "村庄"）。
+    未声明 / 声明的地点不存在 → `None` = **就地可制作** ——
+    引擎层不出现任何游戏地名（game-agnostic 红线，见《NPC大脑架构》§3）。
+    """
+    station = world.get("craft_at")
+    if isinstance(station, str) and station and station in world.get("locations", {}):
+        return station
+    return None
+
+
 def apply_action(world: Dict, action: str, params: Dict, who: str = "cang") -> Tuple[Dict, bool, str]:
     """行动: 改变世界状态，返回 (新世界, 是否成功, 结果消息)。
 
@@ -200,8 +219,10 @@ def apply_action(world: Dict, action: str, params: Dict, who: str = "cang") -> T
         recipe = world.get("recipes", {}).get(recipe_name)
         if recipe is None:
             return world, False, f"没有配方: {recipe_name}"
-        if pos != "村庄":
-            return world, False, "工作台在村庄，需要回到村庄才能制作"
+        # T-03(2026-09-16): 闸门读世界声明（未声明 = 就地制作），引擎里不再出现游戏地名
+        station = craft_station(world)
+        if station is not None and pos != station:
+            return world, False, f"工作台在{station}，需要回到那里才能制作"
         inv = actor["inventory"]
         for ing, need in recipe.items():
             if ing == "produces":

@@ -14,7 +14,7 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional
 
-from npc.world import apply_action, find_path
+from npc.world import apply_action, craft_station, find_path
 
 # 失败项冷却 tick 数（资源采尽后不让 NPC 反复撞同一堵墙）
 BLOCK_AFTER_FAIL_TICKS = 5
@@ -279,7 +279,7 @@ def _walk_steps(world: Dict, start: str, dest: str) -> Optional[List[Dict]]:
 # 引擎能编排的动作 = 与 _execute_step 认识的 step.kind 对应（rest/say/gather）。
 # 其余动作 loader 允许写（不替游戏做决定），能不能执行由 Runtime 说了算:
 # 这里认不出来 → 计划失败（记一条记忆 + 进冷却），不崩。
-SUPPORTED_ROUTINE_ACTIONS = ("gather", "rest", "say")
+SUPPORTED_ROUTINE_ACTIONS = ("gather", "craft", "rest", "say")   # T-04: + craft
 
 
 def _plan_failure_note(item: Dict) -> str:
@@ -288,6 +288,11 @@ def _plan_failure_note(item: Dict) -> str:
     分支与原因一一对应，别把"引擎不会"说成"没找到地方"。
     """
     action = item.get("action")
+    if action == "craft":                     # T-04: craft 的失败原因与采集不同
+        recipe = item.get("recipe")
+        if not recipe:
+            return "想做制作但没写清配方"
+        return f"想制作{recipe}但世界没这个配方"
     if action not in SUPPORTED_ROUTINE_ACTIONS:
         return f"想做{action}但引擎还没有这个动作"
     if not item.get("resource"):
@@ -309,8 +314,23 @@ def _plan_steps(npc, world: Dict, item: Dict) -> Optional[List[Dict]]:
         return [{"kind": "rest"} for _ in range(int(item.get("ticks", 2)))]
     if action == "say":
         return [{"kind": "say"}]
+    if action == "craft":
+        # T-04(2026-09-16): routine 现在**真的能 craft** —— 旧版一律 return None，
+        # 于是人设里写了 craft 项也永远做（与 T-01 同源的静默失效）。
+        recipe = item.get("recipe")
+        if not isinstance(recipe, str) or not recipe or recipe not in world.get("recipes", {}):
+            return None                 # 缺 recipe / 世界没这配方 → 编排不了（调用方记一条+冷却）
+        steps_c: List[Dict] = []
+        station = craft_station(world)          # T-03: 声明驱动；未声明 → 就地制作
+        if station is not None:
+            walk = _walk_steps(world, world["actors"][npc.actor_id]["position"], station)
+            if walk is None:
+                return None
+            steps_c += walk
+        return steps_c + [{"kind": "craft", "recipe": recipe}] * int(item.get("count", 1))
+
     if action != "gather":
-        return None                     # craft / 自定义动作: 引擎没有对应步骤
+        return None                     # 自定义动作: 引擎没有对应步骤
     resource = item.get("resource")
     if not isinstance(resource, str) or not resource:
         return None                     # gather 缺 resource（loader 明许）→ 无从下手
@@ -336,6 +356,8 @@ def _describe(item: Dict) -> str:
     action = item["action"]
     if action == "gather":
         return f"采集{item['resource']}×{item.get('count', 1)}"
+    if action == "craft":                     # T-04: craft 也要有自己的展示描述
+        return f"制作{item.get('recipe')}×{item.get('count', 1)}"
     if action == "rest":
         return f"休息{item.get('ticks', 2)}刻"
     return "说句话"
@@ -394,6 +416,10 @@ def _execute_step(npc, world: Dict, step: Dict, rng: random.Random) -> bool:
 
     if kind in ("gather", "deliver"):
         world, ok, _ = apply_action(world, kind, {"resource": step["resource"]}, who=who)
+        return ok
+
+    if kind == "craft":     # T-04(2026-09-16): craft 步骤（参数是 recipe，不是 resource）
+        world, ok, _ = apply_action(world, "craft", {"recipe": step["recipe"]}, who=who)
         return ok
 
     if kind == "rest":
@@ -470,6 +496,7 @@ def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
         return ev
 
     npc.state = {"walk": "walking", "gather": "working", "deliver": "working",
+                 "craft": "working",   # T-04: 少了这个键 → craft 步骤 KeyError 带走整帧
                  "rest": "resting", "say": "idle"}[step["kind"]]
     if not npc.activity["steps"]:
         item = npc.activity["item"]

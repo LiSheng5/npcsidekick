@@ -290,7 +290,8 @@ class TestPlanStepsIsTotal:
     """
 
     @pytest.mark.parametrize("item", [
-        {"action": "craft", "recipe": "木石工具"},          # craft 能力只在 run_task 里
+        # T-04(2026-09-16) 后 craft **可编排**了 —— 这里改用"世界没这个配方"当不可编排样例
+        {"action": "craft", "recipe": "不存在的配方"},
         {"action": "gather", "weight": 1},                 # loader 明许缺 resource
         {"action": "巡逻", "weight": 2},                    # 任意自定义动作
         {"action": "trade", "resource": "铁料", "count": 1},  # 带 resource 也不是 gather 链
@@ -305,7 +306,8 @@ class TestPlanStepsIsTotal:
     def test_whole_frame_survives_bad_routine(self, tmp_path):
         """同帧的正常 NPC 照旧推进 —— 一个坏项不许吃掉别人的一步。"""
         world = default_world()
-        bad = _bare_npc("huai", [{"action": "craft", "recipe": "木石工具"}], world, str(tmp_path))
+        # T-04(2026-09-16): craft 已可编排 → 坏项改用自定义动作（引擎确实没有）
+        bad = _bare_npc("huai", [{"action": "巡逻", "weight": 2}], world, str(tmp_path))
         good = _bare_npc("hao", [{"action": "gather", "resource": "木材", "count": 1, "weight": 1}],
                          world, str(tmp_path))
         events = tick_round(world, {"huai": bad, "hao": good}, rng=random.Random(1))
@@ -331,7 +333,8 @@ class TestPlanStepsIsTotal:
     def test_planning_failure_memory_not_spammed(self, tmp_path):
         """连跑 10 帧只留 2 条说明（冷却 5 tick 生效），不是每帧一条。"""
         world = default_world()
-        npc = _bare_npc("shao", [{"action": "craft", "recipe": "木石工具"}], world, str(tmp_path))
+        # T-04(2026-09-16): craft 已可编排 → 用自定义动作造"计划失败"（引擎没有这个动作）
+        npc = _bare_npc("shao", [{"action": "巡逻", "weight": 2}], world, str(tmp_path))
         for _ in range(10):
             tick_round(world, {"shao": npc}, rng=random.Random(1))
         notes = [e for e in npc.memory.all() if UNPLANNABLE_NOTE in e["content"]]
