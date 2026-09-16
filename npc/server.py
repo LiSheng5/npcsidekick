@@ -58,7 +58,8 @@ from npc.reviewer import (approval_table, set_approval, get_manifest,
                           load_manifest, manifest_is_default,
                           parse_manifest_doc, set_manifest_places,
                           set_manifest_resources, get_manifest_resources)
-from npc.scheduler import SCHED, P_TALK, SchedulerTimeout, goals_enabled, tick_round
+from npc.scheduler import (SCHED, P_TALK, SchedulerTimeout, goals_enabled,
+                            lessons_enabled, tick_round)
 
 from npc.tts import available as tts_available
 from npc.tts import synthesize as tts_synthesize
@@ -901,6 +902,8 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                     "llm_retry": llm_retry_enabled(),
                     # G1(2026-09-16): 目标真值层是否参与自主抽签（NPC_GOALS，默认关）
                     "goals": goals_enabled(),
+                    # G1 另一半(2026-09-16): 反思 lesson 是否参与调权（NPC_LESSONS，默认关）
+                    "lessons": lessons_enabled(),
                     "approval_policy": os.environ.get("NPC_APPROVAL_POLICY", "auto"),
                     "dialogue_model": os.environ.get("NPC_DIALOGUE_MODEL",
                                                      "deepseek-v4-flash"),
