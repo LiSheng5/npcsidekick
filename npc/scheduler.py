@@ -64,6 +64,91 @@ def _is_night(hour: int) -> bool:
     return hour >= 22 or hour < 6   # [PLACEHOLDER] 夜间 22:00~06:00
 
 
+# ── 目标驱动（G1 · 2026-09-16 · 开关 NPC_GOALS，默认关）────────────────────
+# 关 = 与旧版逐字节一致：目标层**完全不参与**决策（连种子都不建、连 npc.goal 都不导入）。
+# 开 = 活动目标两件事：(a) 给同 (action, resource) 的日常项**抬权**；
+#      (b) 日常表里没有的活**补成候选**（目标能创造新工作）。
+GOAL_WEIGHT_BASE = 3.0     # [PLACEHOLDER] 优先级 9 → ×3 / 5 → ×1（中性）/ 1 → ×1/3
+GOAL_EXTRA_WEIGHT = 2.0    # [PLACEHOLDER] 目标新增候选的基础权重（再叠 _dynamic_weight）
+
+
+def goals_enabled() -> bool:
+    """G1 开关（现读现切，家规）：NPC_GOALS=1 时目标层参与自主抽签。"""
+    return env_flag("NPC_GOALS")
+
+
+def _goals_try(fn, *args):
+    """目标层是**增益**、不是闸门：任何异常都降级吞掉，绝不拖垮自主循环。"""
+    try:
+        return fn(*args)
+    except Exception:
+        return None
+
+
+def npc_goals(npc, world: Dict):
+    """拿这个 NPC 的目标队列：首次从人设 `goals` 播种，此后每次现读刷新状态。
+
+    只在 `goals_enabled()` 时被调用 —— 关着的时候连 `npc.goal` 都不导入（零开销）。
+    """
+    from npc.goal import GoalQueue          # 惰性导入: 关着时不加载
+    q = getattr(npc, "_goal_queue", None)
+    if q is None:
+        q = GoalQueue.seed_from_persona(npc.persona, world_tick=world.get("_tick", 0))
+        npc._goal_queue = q
+    q.refresh(world.get("_tick", 0))
+    return q
+
+
+def _item_key(item: Dict) -> tuple:
+    """抽签项的匹配键（与失败冷却键同构）。"""
+    return (item.get("action"), item.get("resource"))
+
+
+def _goal_factor(npc, world: Dict, item: Dict) -> float:
+    """活动目标对这件活的抬权系数（纯数值，零 LLM）。
+
+    命中 `GoalQueue.actions_for((action, resource))` → 按**最高优先级**抬权：
+    9 → ×GOAL_WEIGHT_BASE、5 → ×1（中性）、1 → ×1/GOAL_WEIGHT_BASE；没命中/出故障 → ×1。
+    """
+    def _calc() -> float:
+        q = npc_goals(npc, world)
+        hits = q.actions_for(_item_key(item))
+        if not hits:
+            return 1.0
+        return float(GOAL_WEIGHT_BASE ** ((max(g.priority for g in hits) - 5) / 4.0))
+
+    factor = _goals_try(_calc)
+    return factor if isinstance(factor, float) else 1.0
+
+
+def _goal_candidates(npc, world: Dict) -> List[Dict]:
+    """活动目标 → 候选项（只取**绑定了 action** 的：没绑动作的目标只能靠玩家单，不自主开工）。"""
+    out: List[Dict] = []
+    q = _goals_try(npc_goals, npc, world)
+    if q is None:
+        return out
+    for g in q.active():
+        if not g.action:
+            continue
+        item: Dict = {"action": g.action, "weight": GOAL_EXTRA_WEIGHT, "_goal": g.id}
+        item.update(g.params)
+        item.setdefault("count", 1)
+        out.append(item)
+    return out
+
+
+def _advance_goals_on_complete(npc, world: Dict, item: Dict) -> None:
+    """一次活动**完整做完** → 命中该 (action, resource) 的活动目标各 +1 进度。
+
+    G3 后果 → G2 目标的消费点（整链成功 = 这一件活成了）。
+    """
+    q = _goals_try(npc_goals, npc, world)
+    if q is None:
+        return
+    for g in q.actions_for(_item_key(item)):
+        q.advance(g.id, 1, world_tick=world.get("_tick", 0))
+
+
 def _dynamic_weight(npc, world: Dict, item: Dict, base: float) -> float:
     """静态 weight → 动态权重:生理(耐力)×昼夜×库存缺口。
     纯数值零 LLM;参数全 [PLACEHOLDER],后续按真实生理/行为学再调比例。
@@ -107,6 +192,10 @@ def _dynamic_weight(npc, world: Dict, item: Dict, base: float) -> float:
                 w *= 0.5       # 满仓降权(别堆一座山)
     elif action == "deliver":
         pass                    # 交付走 pending_task 玩家单优先,日常不在此列
+
+    if goals_enabled():
+        # G1(2026-09-16): 目标驱动 —— 活动目标要这件活 → 按优先级抬权(纯数值,零 LLM)
+        w *= _goal_factor(npc, world, item)
     return w
 
 
@@ -219,9 +308,15 @@ def _describe(item: Dict) -> str:
 
 
 def _choose_routine_item(npc, world: Dict, rng: random.Random) -> Optional[Dict]:
-    """加权随机选下一个日常（跳过冷却中的失败项）。无 routine / 全被冷却 → None。"""
-    routine = npc.persona.get("routine", [])
-    if not routine:
+    """加权随机选下一个日常（跳过冷却中的失败项）。无候选 → None。
+
+    G1(NPC_GOALS=1): 候选 = routine ∪ 活动目标绑定的活；routine 里已有的不重复造项（靠抬权）。
+    """
+    routine = npc.persona.get("routine") or []
+    if not isinstance(routine, list):
+        routine = []          # 手改 JSON 写成字符串/None → 当"没有日常表"（别拿它去迭代）
+    goal_mode = goals_enabled()
+    if not routine and not goal_mode:
         return None
     now = world["_tick"]
     candidates, weights = [], []
@@ -235,6 +330,15 @@ def _choose_routine_item(npc, world: Dict, rng: random.Random) -> Optional[Dict]
         base = w if isinstance(w, (int, float)) and w > 0 else 1
         # 动态权重(2026-08-22): persona 静态 weight × 耐力 × 昼夜 × 库存缺口
         weights.append(_dynamic_weight(npc, world, item, base))
+    if goal_mode:
+        seen = {_item_key(i) for i in candidates}
+        for gi in _goal_candidates(npc, world):
+            if _item_key(gi) in seen:
+                continue                  # 这个活 routine 里已有 → 只靠 _goal_factor 抬权
+            if npc._blocked.get(_item_key(gi), 0) > now:
+                continue                  # 目标也吃冷却：撞过墙的活别连着撞
+            candidates.append(gi)
+            weights.append(_dynamic_weight(npc, world, gi, float(gi["weight"])))
     if not candidates:
         return None
     return rng.choices(candidates, weights=weights, k=1)[0]
@@ -319,7 +423,10 @@ def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
     npc.state = {"walk": "walking", "gather": "working", "deliver": "working",
                  "rest": "resting", "say": "idle"}[step["kind"]]
     if not npc.activity["steps"]:
+        item = npc.activity["item"]
         desc = npc.activity["desc"]
+        if goals_enabled():
+            _goals_try(_advance_goals_on_complete, npc, world, item)   # G1: 干完 → 目标 +1
         npc.remember(f"{EV_DONE}{desc}", importance=5)
         npc.state = "idle"
         npc.activity = None
