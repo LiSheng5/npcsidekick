@@ -982,7 +982,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 |---|---|---|
 | **G1** | **决策层读记忆/目标**（撬动整条闭环） | `scheduler.py:67::_dynamic_weight` 加因子（纯数值，零 LLM） |
 | **G2** | **Goal 真值层**（三级目标 + 队列 + 生命周期；否则又是装饰） | 新 `npc/goal.py`；`persona.goals` 降为初始种子 |
-| **G3** | **ActionResult 结构化契约**（目标进度/关系/benchmark 都从这消费） | 在 `apply_action` **外面**包一层薄包装，旧签名不破 |
+| **G3** | ~~ActionResult 结构化契约~~ ✅ **已落地（2026-09-16）** | 新模块 `npc/action_result.py`：`apply_action_structured()` 薄包装（**旧签名不破、零行为变化**）+ `ActionResult`（success / error_code / world_changes / duration_ms / observation）；锚 `tests/test_action_result.py` 12 例 |
 | **G4** | **关系数据（事件驱动）** | `world.py` 加 `relationships`，由 G3 的后果驱动增量 |
 | **G5** | **Benchmark 骨架**（"改完到底有没有变聪明"的唯一证据） | 在既有 `npc/benchmark.py`（91 行 print 脚本）**之上指标化**，不推倒重来 |
 | **G6** | **世界存档单点**（共享内存 vs 每 NPC 一副本，重启一致性无定义） | 需先定世界权威归属（见 30.4 Q4） |
@@ -1038,6 +1038,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 | 2b | ✅ **已完成（2026-09-15）**：**T-02 落地（方案②）** —— 权威改为 `saved_at` 最新的卡、顺序无关；回归锚 `tests/test_restart_authority.py`（5 例，先红后绿） | `npc/server.py`：`_card_freshness` / `_newest_card_pid` / `_load_card_world` + `load_village` 选权威 |
 | 3 | 文档基线订正 + 过时引用清理 | `README.md` / `ARCHITECTURE.md` / `PROJECT_DELIVERY.md` / 本文档 §6 |
 | 4 | **G2 Goal 真值层 + G1 决策源扩展 + G3 ActionResult** ← 三根柱子一起做 | `npc/goal.py` + `scheduler.py` + `world.py` 薄包装 |
+| 4a | ✅ **G3 已完成（2026-09-16）**：`npc/action_result.py`（薄包装 + 结构化后果，旧签名不破、零行为变化）；锚 12 例。**G2 / G1 仍待做** | 新模块 + 新测试（**未接任何既有调用点** → 无需开关） |
 | 5 | Phase 6 反思结构化 + A/B（**必须在 4 之后**）+ 记忆 `goal_relevance` 因子 | `memory_card.py` / `memory.py` / `scheduler.py` |
 | 6 | Phase 8 人格参与决策 + G4 关系数据（各带 A/B） | `persona.py` / `world.py` |
 | 7 | Phase 11 `examples/village` + G5 benchmark 指标化 | 新目录 + `npc/benchmark.py` |
