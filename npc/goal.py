@@ -221,6 +221,16 @@ class GoalQueue:
             if not isinstance(text, str) or not text.strip():
                 continue
             spec = spec if isinstance(spec, dict) else {}
+            # G1(2026-09-16): 可选 action / params / priority —— 人设声明"这个目标靠哪件活推进"，
+            # 引擎不替它猜（游戏无关：绑定写在声明文件里，不进引擎代码）。
+            action = spec.get("action")
+            action = action if isinstance(action, str) and action else None
+            params = spec.get("params")
+            params = dict(params) if isinstance(params, dict) else {}
+            try:
+                priority = int(spec.get("priority", DEFAULT_PRIORITY))
+            except (TypeError, ValueError):
+                priority = DEFAULT_PRIORITY
             try:
                 target = int(spec.get("target", 1))
             except (TypeError, ValueError):
@@ -232,6 +242,7 @@ class GoalQueue:
             goal = Goal(
                 text=text.strip(), target=target, progress=progress,
                 source="persona_seed", created_tick=world_tick,
+                action=action, params=params, priority=priority,
                 status=COMPLETED if progress >= target else PENDING,
             )
             q.add(goal)
