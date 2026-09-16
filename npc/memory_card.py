@@ -17,7 +17,8 @@ from agent.config_flags import env_flag
 from agent.logging_config import log
 from npc import safety as _safety
 from npc.memory import (CATEGORY_ARCHIVED, EV_DONE, EV_FAIL, MTYPES,
-                        MTYPE_DEFAULT, _canonical_terms)
+                        MTYPE_DEFAULT, _canonical_terms, clean_recommendation,
+                        clean_scope)
 from npc.scheduler import P_REFLECT, SCHED
 
 # ── 反思归纳参数（阶段① 海马体升级, Generative Agents 同款语义）──
@@ -82,8 +83,15 @@ def _parse_typed_reflection(raw: str) -> Optional[List[Dict]]:
             imp = int(item.get("importance", 5))
         except (TypeError, ValueError):
             imp = 5
-        out.append({"mtype": mtype, "content": content,
-                    "importance": max(0, min(9, imp))})
+        entry = {"mtype": mtype, "content": content,
+                 "importance": max(0, min(9, imp))}
+        # 可选 lesson 字段(G1 另一半, 2026-09-16): 两个都给且合法才带上 —— 否则完全不写
+        mscope = clean_scope(item.get("scope"))
+        mrec = clean_recommendation(item.get("recommendation"))
+        if mscope and mrec is not None:
+            entry["scope"] = mscope
+            entry["recommendation"] = mrec
+        out.append(entry)
     return out or None
 
 
@@ -240,7 +248,9 @@ class MemoryCardMixin:
                     return None
                 for t in fresh:
                     self.memory.add(t["content"], importance=t["importance"],
-                                    category="reflection", mtype=t["mtype"])
+                                    category="reflection", mtype=t["mtype"],
+                                    scope=t.get("scope"),
+                                    recommendation=t.get("recommendation"))
                 self._reflected_upto = len(self.memory.all())
                 self.save()
                 log.info("npc_reflected_typed", npc=self.persona["id"], n=len(fresh))

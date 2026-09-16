@@ -77,7 +77,7 @@ def goals_enabled() -> bool:
     return env_flag("NPC_GOALS")
 
 
-def _goals_try(fn, *args):
+def _mech_try(fn, *args):
     """目标层是**增益**、不是闸门：任何异常都降级吞掉，绝不拖垮自主循环。"""
     try:
         return fn(*args)
@@ -117,14 +117,14 @@ def _goal_factor(npc, world: Dict, item: Dict) -> float:
             return 1.0
         return float(GOAL_WEIGHT_BASE ** ((max(g.priority for g in hits) - 5) / 4.0))
 
-    factor = _goals_try(_calc)
+    factor = _mech_try(_calc)
     return factor if isinstance(factor, float) else 1.0
 
 
 def _goal_candidates(npc, world: Dict) -> List[Dict]:
     """活动目标 → 候选项（只取**绑定了 action** 的：没绑动作的目标只能靠玩家单，不自主开工）。"""
     out: List[Dict] = []
-    q = _goals_try(npc_goals, npc, world)
+    q = _mech_try(npc_goals, npc, world)
     if q is None:
         return out
     for g in q.active():
@@ -142,11 +142,42 @@ def _advance_goals_on_complete(npc, world: Dict, item: Dict) -> None:
 
     G3 后果 → G2 目标的消费点（整链成功 = 这一件活成了）。
     """
-    q = _goals_try(npc_goals, npc, world)
+    q = _mech_try(npc_goals, npc, world)
     if q is None:
         return
     for g in q.actions_for(_item_key(item)):
         q.advance(g.id, 1, world_tick=world.get("_tick", 0))
+
+
+# ── 反思 lesson 进决策（G1 另一半 · 2026-09-16 · 开关 NPC_LESSONS，默认关）──────
+# 只认"同时带 scope 与 recommendation"的反思条目（老条目 → 不参与决策）。
+# recommendation ∈ [-1,1] → 权重乘子 = LESSON_WEIGHT_BASE ** rec：
+#   +1 → ×2（经验说"该多做"）/ 0 → ×1（中性）/ -1 → ×0.5（说"该少做"）。
+LESSON_WEIGHT_BASE = 2.0   # [PLACEHOLDER]
+
+
+def lessons_enabled() -> bool:
+    """G1 另一半的开关（现读现切，家规）：NPC_LESSONS=1 时反思 lesson 参与自主抽签。"""
+    return env_flag("NPC_LESSONS")
+
+
+def _lesson_factor(npc, world: Dict, item: Dict) -> float:
+    """作用域命中的反思 lesson 对这件活的权重乘子（纯数值，零 LLM）。
+
+    多命中时取**绝对值最大**的一条（单条最强说了算 —— 避免层层相乘把权重打爆）；
+    没命中 / 记忆不可用 / 出故障 → ×1。
+    """
+    def _calc() -> float:
+        mem = getattr(npc, "memory", None)
+        if mem is None or not hasattr(mem, "lessons_for"):
+            return 1.0
+        hits = mem.lessons_for(item)
+        if not hits:
+            return 1.0
+        return float(LESSON_WEIGHT_BASE ** float(hits[0]["recommendation"]))
+
+    factor = _mech_try(_calc)
+    return factor if isinstance(factor, float) else 1.0
 
 
 def _dynamic_weight(npc, world: Dict, item: Dict, base: float) -> float:
@@ -196,6 +227,9 @@ def _dynamic_weight(npc, world: Dict, item: Dict, base: float) -> float:
     if goals_enabled():
         # G1(2026-09-16): 目标驱动 —— 活动目标要这件活 → 按优先级抬权(纯数值,零 LLM)
         w *= _goal_factor(npc, world, item)
+    if lessons_enabled():
+        # G1 另一半(2026-09-16): 反思 lesson(scope 命中)调权 —— 「反思改变行为」的落点
+        w *= _lesson_factor(npc, world, item)
     return w
 
 
@@ -426,7 +460,7 @@ def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
         item = npc.activity["item"]
         desc = npc.activity["desc"]
         if goals_enabled():
-            _goals_try(_advance_goals_on_complete, npc, world, item)   # G1: 干完 → 目标 +1
+            _mech_try(_advance_goals_on_complete, npc, world, item)   # G1: 干完 → 目标 +1
         npc.remember(f"{EV_DONE}{desc}", importance=5)
         npc.state = "idle"
         npc.activity = None

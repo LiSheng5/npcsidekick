@@ -43,6 +43,49 @@ EV_FAIL = "没做成: "
 MTYPES = ("persona", "episodic", "instruction")
 MTYPE_DEFAULT = "episodic"
 
+# ── 反思 lesson 的可选字段（G1 另一半 · 2026-09-16）────────────────────
+# 只有**同时**带 scope 与 recommendation 的条目才参与决策加权；老条目缺字段 → 不参与（零回归）。
+LESSON_SCOPE_MAX_KEYS = 3      # scope 最多几个键（防模型/手改塞一大坨）
+LESSON_REC_CLAMP = 1.0         # recommendation 夹取到 [-1, 1]
+
+
+def clean_scope(raw) -> Optional[Dict[str, str]]:
+    """`scope` 归一：非空 dict、键值皆非空短字符串、键数 ≤ LESSON_SCOPE_MAX_KEYS → 干净副本；否则 None。
+
+    scope 的键 = **抽签项里的字段名**（如 action / resource）—— 引擎不预设语义，
+    匹配用 `item.get(k) == v`（游戏无关：写什么由人设/世界声明决定，不写进引擎）。
+
+    ⚠ 键数超限 → **整条拒绝**（不是截断）：截断会悄悄放宽作用域、把 lesson 施加到原意之外的活上；
+    拒绝的后果只是"这条经验不参与决策"，安全得多（fail-closed）。
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    if len(raw) > LESSON_SCOPE_MAX_KEYS:
+        return None
+    out: Dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k.strip():
+            return None
+        if not isinstance(v, str) or not v.strip():
+            return None
+        out[k.strip()] = v.strip()
+    return out or None
+
+
+def clean_recommendation(raw) -> Optional[float]:
+    """`recommendation` 归一：数值 → 夹取 [-1, 1]；非法 → None（不猜）。"""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val != val:                 # NaN
+        return None
+    return max(-LESSON_REC_CLAMP, min(LESSON_REC_CLAMP, val))
+
+
+
 # 管家降级层(任务书#04): 流水账 general→archived 后退出检索上下文,
 # 证据链仍在卡上永不物理删除。语义由 memory(卡 owner) 单点定义,
 # 消费方(housekeeper/retrieve/format_for_context)只认本常量。
@@ -205,7 +248,8 @@ class NPCMemory:
     # ── 写入 ─────────────────────────────────────────
 
     def add(self, content: str, importance: int = 5, category: str = "general",
-            mtype: str = "") -> str:
+            mtype: str = "", scope: Optional[Dict] = None,
+            recommendation: Optional[float] = None) -> str:
         """记一条记忆。importance 0-9（可由 LLM 评分，Day 2 起默认手动/规则）。
 
         TDAM 借鉴①(2026-08-26): mtype 三分类标记(persona/episodic/instruction)。
@@ -220,6 +264,13 @@ class NPCMemory:
         }
         if mtype:
             entry["mtype"] = mtype
+        # G1 另一半(2026-09-16): lesson 可选字段 —— **两个都给且合法**才写，
+        # 否则完全不写这两个键（落盘与旧版字节一致，老条目照旧不参与决策）。
+        _scope = clean_scope(scope)
+        _rec = clean_recommendation(recommendation)
+        if _scope and _rec is not None:
+            entry["scope"] = _scope
+            entry["recommendation"] = _rec
         self.entries.append(entry)
         # 温层向量锚点: 同步入语义索引(开关关闭/不可用时静默跳过)
         vs = self._anchor()
@@ -277,6 +328,22 @@ class NPCMemory:
             return [e for e in self.entries
                     if e.get("category") != CATEGORY_ARCHIVED]
         return self.entries
+
+
+    def lessons_for(self, item: Dict) -> List[Dict]:
+        """作用域命中该抽签项的反思 lesson（**绝对值最大的在前**）。
+
+        G1 另一半(2026-09-16)。只认**同时带**合法 scope 与 recommendation 的条目
+        （老条目缺字段 → 不参与，零回归）；匹配 = `item.get(k) == v` 全中。
+        """
+        hits = []
+        for e in self.active():
+            scope, rec = e.get("scope"), e.get("recommendation")
+            if not isinstance(scope, dict) or not isinstance(rec, (int, float)):
+                continue
+            if all(item.get(k) == v for k, v in scope.items()):
+                hits.append(e)
+        return sorted(hits, key=lambda e: -abs(float(e["recommendation"])))
 
     def retrieve(self, query: str = "", top_k: int = 5) -> List[Dict]:
         """加权检索 + 一跳关联（阶段② 轻量海马体）。

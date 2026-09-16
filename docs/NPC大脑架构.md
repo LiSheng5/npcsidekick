@@ -953,10 +953,12 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 
 ### 29.1 三条断层（改动前必读）
 
-1. **记忆只进对话，不进决策** —— 记忆卡 / 反思 / 画像 / 管家约占 `npc/` 近半代码，
-   但对**自主行为影响为 0**：`scheduler.py` 全文不 import `memory`。闭环断在"行动"这一环。
-   → "反思改变下次行为"**现状不成立**；只把反思做成"反思日志"就是白做，
-   必须先在 `_dynamic_weight`（`scheduler.py:67`）打开"决策层读记忆/目标"这个口子。
+1. ~~**记忆只进对话，不进决策**~~ → **2026-09-16 起部分合拢** —— 原状：记忆卡 / 反思 / 画像 / 管家约占
+   `npc/` 近半代码，对**自主行为影响为 0**（`scheduler.py` 全文不 import `memory`），闭环断在"行动"这一环。
+   **现状**：① **目标**（`NPC_GOALS`，人设 `goals` 降为种子）与 ② **结构化反思 lesson**
+   （`NPC_LESSONS`，条目带可选 `scope`+`recommendation`）**都已进 `_dynamic_weight` 调权**，
+   且各有 A/B 证据（`scripts/probe_lesson_ab.py`：有"避着砍木头"的经验 → 选该活的次数 **157 → 98，降 38%**）。
+   **仍未进决策**：任意检索到的记忆、画像（persona 文件）、管家产出 —— 目前只有**带 scope 的反思条目**参与。
 2. **`persona.goals` / `desires` 是装饰** —— `{progress, target}` 只在 prompt 里显示，
    全仓**没有任何一处写回 progress**，权重也不参与 `_choose_routine_item` 抽签。
    自主"任务"实质是**加权抽签**（静态 weight × 耐力 × 昼夜 × 天气 × 库存缺口），
@@ -980,7 +982,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 
 | # | 缺口 | 落点（已按 2026-09-15 四项拍板） |
 |---|---|---|
-| **G1** | ~~决策层读记忆/目标~~ ✅ **已落地（2026-09-16）** | `npc/scheduler.py`：`goals_enabled()`（开关 `NPC_GOALS`，默认关）+ `npc_goals()`（惰性从人设播种 / 现读刷新）+ `_goal_factor()`（按优先级抬权 9→×3 · 5→×1 · 1→×1/3）+ `_goal_candidates()`（目标能补出日常表里没有的活）+ `_advance_goals_on_complete()`（整链干完 → 目标 +1）；`/api/version` 的 `features.flags.goals` 暴露生效态；锚 `tests/test_goal_decide.py` 16 例。⚠ **记忆/反思仍未进决策**（G1 的"目标"这半边先落地，见 §30.1 第 5 步） |
+| **G1** | ~~决策层读记忆/目标~~ ✅ **已落地（2026-09-16）** | `npc/scheduler.py`：`goals_enabled()`（开关 `NPC_GOALS`，默认关）+ `npc_goals()`（惰性从人设播种 / 现读刷新）+ `_goal_factor()`（按优先级抬权 9→×3 · 5→×1 · 1→×1/3）+ `_goal_candidates()`（目标能补出日常表里没有的活）+ `_advance_goals_on_complete()`（整链干完 → 目标 +1）；`/api/version` 的 `features.flags.goals` 暴露生效态；锚 `tests/test_goal_decide.py` 16 例。✅ **目标 + 结构化反思 lesson 均已进决策**（`NPC_GOALS` / `NPC_LESSONS`）；仍未进：任意检索记忆 / 画像 / 管家产出（见 §30.1 第 5 步） |
 | **G2** | ~~Goal 真值层~~ ✅ **模块已落地（2026-09-16）**；**接线（G1）待做** | 新 `npc/goal.py`：`Goal`（priority/status/deadline/progress/prerequisites/source/action+params）+ `GoalQueue`（六态生命周期 / 前置 BLOCKED / 超期 FAILED / `apply_result` 由 G3 后果推进）+ `seed_from_persona`（人设 `goals` 降为**初始种子**）；锚 `tests/test_goal.py` 15 例。**唯一写入口是代码**（不提供"接受模型输出"的 API）|
 | **G3** | ~~ActionResult 结构化契约~~ ✅ **已落地（2026-09-16）** | 新模块 `npc/action_result.py`：`apply_action_structured()` 薄包装（**旧签名不破、零行为变化**）+ `ActionResult`（success / error_code / world_changes / duration_ms / observation）；锚 `tests/test_action_result.py` 12 例 |
 | **G4** | **关系数据（事件驱动）** | `world.py` 加 `relationships`，由 G3 的后果驱动增量 |
@@ -991,7 +993,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 
 | # | 债 | 性质 | 一句话 |
 |---|---|---|---|
-| TD1 | 记忆不进决策 | **架构级断层**（非 bug） | 见 29.1-1 |
+| TD1 | ~~记忆不进决策~~ **部分合拢（2026-09-16）** | 架构级断层 → 已修一半 | 见 29.1-1：**目标**（`NPC_GOALS`）与**结构化反思 lesson**（`NPC_LESSONS`）已进决策；**任意检索记忆 / 画像 / 管家产出仍未进** |
 | TD2 | 持久化语义分裂 | ✅ **已修（2026-09-15 · 方案②）** → §30.1 | 盘上仍每 NPC 一份整 world 副本（设计如此，未动）；但**权威已明确**：取 **`saved_at` 最新的那张卡**（`npc/server.py::_newest_card_pid`），不再随 cast 顺序漂移。边界：权威跟时间戳不跟内容（手改卡的人自负 `saved_at`） |
 | TD3 | 双轨漂移 | 认知债 | 见 29.1-3 |
 | TD4 | 装饰性字段无守护 | 契约债 | `goals`/`desires` 有 schema 无机制，测试测不出"没生效" |
@@ -1004,14 +1006,14 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 **诚实边界**（安检 L1 三不清除；无数据 → 空/`null`，**不造假**）｜**防 confabulation 双保险**｜
 **反思卫生**（阈值 / 噪音批跳过 / 去重 / 指针推进）｜**记忆卡体积护栏**（log 截 500 + 归档轮转）｜
 **自主循环契约干净**（`tick_round` 纯函数零 I/O）｜**成本控制**（闲聊零 LLM）｜
-**可观测**（9 个开关暴露生效态，见 `/api/version` 的 `features.flags`；Web Console 7 页全可达）。
+**可观测**（10 个开关暴露生效态，见 `/api/version` 的 `features.flags`；Web Console 7 页全可达）。
 
 ### 29.6 风险（R1-R6）
 
 | # | 风险 | 对策 |
 |---|---|---|
 | R1 | LLM 成本（反思/画像 `reasoning_effort=max`） | 两层口径：机制 mock 全量 + 关键 A/B 少量真 API，设调用上限 |
-| R2 | **9 个** `NPC_*` 功能开关默认 OFF 的"暗路径"（2026-09-16 起 +`NPC_GOALS`） | benchmark 必须显式声明开关矩阵；**开关打开态也要跑一遍测试**（G1 正是靠这条抓到 `routine: None` 的真 bug） |
+| R2 | **10 个** `NPC_*` 功能开关默认 OFF 的"暗路径"（2026-09-16 起 +`NPC_GOALS` / `NPC_LESSONS`） | benchmark 必须显式声明开关矩阵；**开关打开态也要跑一遍测试**（G1 正是靠这条抓到 `routine: None` 的真 bug） |
 | R3 | 改协议划界易引双记账（历史 B6） | 先补回归锚再改（`tests/test_ledger_boundary.py` 可扩） |
 | R4 | 长跑资源增长未实测 | Phase 12 前先做一次零 LLM 长跑灌水观测 |
 | R5 | 游戏无关红线（引擎层零游戏词） | 游戏词只允许出现在 `npc/personas/*.json` 与声明式世界文件里 |
@@ -1041,6 +1043,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 | 4a | ✅ **G3 已完成（2026-09-16）**：`npc/action_result.py`（薄包装 + 结构化后果，旧签名不破、零行为变化）；锚 12 例 | 新模块 + 新测试（**未接任何既有调用点** → 无需开关） |
 | 4b | ✅ **G2 已完成（2026-09-16）**：`npc/goal.py`（Goal / GoalQueue / 六态 / 前置 / 超期 / 由 G3 后果推进 / 人设种子）；锚 15 例 | 新模块 + 新测试（同样**未接调用点** → 无需开关） |
 | 4c | ✅ **G1 已完成（2026-09-16）**：开关 `NPC_GOALS`（默认关 = 与旧版逐字节一致）；候选 = `routine ∪ active_goals`；按优先级抬权；整链干完推进目标；`features.flags.goals` 可观测；锚 16 例 + **开关打开态全量也 905 通过**。**→ 三根柱子全齐，闭环首次合拢** | `npc/scheduler.py` + `npc/server.py`（flags）+ `npc/goal.py`（种子支持 action/params/priority 绑定） |
+| 5a | ✅ **P-5 反思结构化 + A/B 已完成（2026-09-16）**：反思条目可选 `scope`/`recommendation`（`npc/memory.py` 归一；两者齐备且合法才写、键数超限**整条拒绝**=fail-closed）；`_lesson_factor()`按 `2**rec` 调权（+1→×2 / −1→×0.5，多命中取绝对值最大）；开关 `NPC_LESSONS`；`features.flags.lessons` | `npc/memory.py` + `npc/memory_card.py`（解析器透传）+ `npc/scheduler.py`；锚 32 例 + **A/B 探针**（有经验 → 选该活 157→98，降 38%；关/无经验 → 与基线逐次一致） |
 | 5 | Phase 6 反思结构化 + A/B（**必须在 4 之后**）+ 记忆 `goal_relevance` 因子 | `memory_card.py` / `memory.py` / `scheduler.py` |
 | 6 | Phase 8 人格参与决策 + G4 关系数据（各带 A/B） | `persona.py` / `world.py` |
 | 7 | Phase 11 `examples/village` + G5 benchmark 指标化 | 新目录 + `npc/benchmark.py` |
