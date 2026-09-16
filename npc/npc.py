@@ -33,7 +33,8 @@ from npc.reviewer import (REVIEW_RETRY_HINT, APPROVAL_POLICY_VALUES, _manifest_s
                           compile_task, get_manifest, get_resource_aliases,
                           looks_like_intent, render_action_tpl, review_dialogue,
                           set_approval as reviewer_set_approval, should_review)
-from npc.world import apply_action, default_world, find_path, observe
+from npc.world import (apply_action, craft_station, default_world, find_path,
+                       observe)
 
 # §22(2026-08-25): A 审查退役 —— 旧开关读到即警告忽略（机器按"乙案"封存于 subagent.py / _a_semantic_block）
 import os as _env_probe
@@ -62,12 +63,6 @@ def _dedup_enabled() -> bool:
 def memory_dedup_enabled() -> bool:
     """公共只读口(P1-1 观测用)。"""
     return _dedup_enabled()
-
-
-def _reflect_rules(entries: List[Dict]) -> str:
-    """规则兜底反思: 只做事实摘要，不发明新事实（防 confabulation）。"""
-    tops = sorted(entries, key=lambda e: e.get("importance", 0), reverse=True)[:2]
-    return "我最近做了这些事：" + "；".join(t["content"] for t in tops)
 
 
 class NPC(TalkPipelineMixin, MemoryCardMixin):
@@ -175,7 +170,6 @@ class NPC(TalkPipelineMixin, MemoryCardMixin):
         return client
 
 
-
     # ── 感知 ─────────────────────────────────────────
 
     def observe(self) -> str:
@@ -255,8 +249,9 @@ class NPC(TalkPipelineMixin, MemoryCardMixin):
 
             elif stype == "craft":
                 recipe, count = spec["recipe"], spec.get("count", 1)
-                if self.actor_pos != "村庄":
-                    walk_to("村庄")  # 工作台在村庄
+                station = craft_station(self.world)   # T-03: 声明驱动（未声明 → 就地制作）
+                if station is not None and self.actor_pos != station:
+                    walk_to(station)
                 for _ in range(count):
                     if not step("craft", {"recipe": recipe}):
                         return fail(f"制作{recipe}失败")
@@ -433,6 +428,7 @@ class NPC(TalkPipelineMixin, MemoryCardMixin):
 
         【已退役 · 乙案封存】(§22 · 2026-08-25) 调用点已从 _chat_with_review 移除，
         本方法保留供日后 A/B 对照实验，生产流水线不再经过此处。
+        **无调用点**由 `tests/test_hygiene_t03_t08.py` 钉住（谁把它接回去会红）。
         铁律: 失败/超时/schema 不合规 → 放行（绝不卡对话 — 与规则层同款语义:
         硬约束已由规则层兜住, 语义审查是增益不是闸门）。
         """
