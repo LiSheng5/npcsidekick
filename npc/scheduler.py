@@ -37,7 +37,7 @@ DAY_START_HOUR = 8            # 服务器启动 = 早晨 8 点
 
 
 from agent.config_flags import env_flag
-from npc.memory import EV_DONE, EV_FAIL
+from npc.memory import EV_DONE, EV_FAIL, goal_relevance_enabled
 
 
 def _protocol_owns_pending() -> bool:
@@ -411,9 +411,24 @@ def _execute_step(npc, world: Dict, step: Dict, rng: random.Random) -> bool:
     return False
 
 
+def _sync_goal_terms(npc, world: Dict) -> None:
+    """把当前活动目标文本注入记忆层（P-6：检索时按 goal_relevance 加分）。
+
+    只有 NPC_GOALS 或 NPC_GOAL_RELEVANCE 任一开启时才会被调用 —— 两个都关时
+    连目标队列都不建（零开销、零行为变化）。
+    """
+    q = npc_goals(npc, world)
+    mem = getattr(npc, "memory", None)
+    if q is not None and mem is not None and hasattr(mem, "set_goal_terms"):
+        mem.set_goal_terms([g.text for g in q.active()])
+
+
 def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
     """一个 NPC 的一个 tick: 无活动 → 选新日常并开始；有活动 → 推进一步。返回转换事件。"""
     ev: Dict = {}
+
+    if goals_enabled() or goal_relevance_enabled():
+        _mech_try(_sync_goal_terms, npc, world)   # P-6: 目标 → 记忆检索打分的注入点
 
     if npc.activity is None:
         # 对话下的指令（"给我两根木材"）优先于自主日常 — 玩家 > 日常

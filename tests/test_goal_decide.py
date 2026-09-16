@@ -55,6 +55,9 @@ class TestSwitchOffIsZeroChange:
 
     def test_goals_ignored_when_off(self, monkeypatch):
         monkeypatch.delenv("NPC_GOALS", raising=False)
+        # P-6(2026-09-16) 起：NPC_GOAL_RELEVANCE 也会建目标队列（它要用目标文本给召回加分），
+        # 所以"零开销"的前提是**两个开关都关**。
+        monkeypatch.delenv("NPC_GOAL_RELEVANCE", raising=False)
         w1, w2 = _world(), _world()
         # 同一个 actor_id（事件字典按 id 做键，得同键才比得出差异）
         plain = _npc("same", [dict(ITEM)], w1)
