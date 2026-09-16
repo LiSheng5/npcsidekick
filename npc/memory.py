@@ -27,7 +27,8 @@ except ImportError:   # pragma: no cover
     jieba = None  # type: ignore
 
 # AI Town 记忆加权参数 (MIT, a16z-infra) — 见模块 docstring
-_GW = (0.5, 3, 2)          # (recency, relevance, importance) 权重
+_GW = (0.5, 3, 2, 2.0)   # (recency, relevance, importance, goal_relevance[P-6]) 权重
+# 第 4 项只在 NPC_GOAL_RELEVANCE=1 且注入了活动目标文本时参与求和 —— 关着一字不加(逐字节同分)。
 _DECAY = 0.99              # 每小时衰减
 _HOUR_SECONDS = 3600
 
@@ -42,6 +43,11 @@ EV_FAIL = "没做成: "
 # 旧卡无 mtype 字段 → 视作 episodic(读取方用 e.get("mtype") 兜底), 向下兼容。
 MTYPES = ("persona", "episodic", "instruction")
 MTYPE_DEFAULT = "episodic"
+
+
+def goal_relevance_enabled() -> bool:
+    """P-6 开关（现读现切，家规）：NPC_GOAL_RELEVANCE=1 时检索按"与活动目标的相关度"加分。"""
+    return env_flag("NPC_GOAL_RELEVANCE")
 
 # ── 反思 lesson 的可选字段（G1 另一半 · 2026-09-16）────────────────────
 # 只有**同时**带 scope 与 recommendation 的条目才参与决策加权；老条目缺字段 → 不参与（零回归）。
@@ -244,6 +250,9 @@ class NPCMemory:
         self._anchor_vs = None
         self._anchor_tried = False
         self._backfilled = False   # [{id, content, importance, created_at}]
+        # P-6(2026-09-16): 当前活动目标的文本（由代码注入，**不进卡、不落盘**）——
+        # 只有当 NPC_GOAL_RELEVANCE=1 时才参与检索打分；空 = 等于没有。
+        self._goal_terms: List[str] = []
 
     # ── 写入 ─────────────────────────────────────────
 
@@ -345,6 +354,18 @@ class NPCMemory:
                 hits.append(e)
         return sorted(hits, key=lambda e: -abs(float(e["recommendation"])))
 
+    def set_goal_terms(self, terms) -> None:
+        """注入"当前活动目标"文本（P-6 · 2026-09-16）—— 检索时据此给相关记忆加分。
+
+        由代码注入（scheduler 在刷新目标队列后调用）。**不落盘**（运行时派生状态，
+        进卡就会破坏"关时逐字节一致"的锚）。任何非字符串/空白项一律丢弃。
+        """
+        if isinstance(terms, (list, tuple)):
+            self._goal_terms = [t for t in (s.strip() if isinstance(s, str) else ""
+                                            for s in terms) if t]
+        else:
+            self._goal_terms = []
+
     def retrieve(self, query: str = "", top_k: int = 5) -> List[Dict]:
         """加权检索 + 一跳关联（阶段② 轻量海马体）。
 
@@ -358,14 +379,19 @@ class NPCMemory:
         # 任务书#04: archived(管家降级层)不参与检索 — 腾上下文空间, 证据链仍在卡上
         active = self.active()
         q_canon = _canonical_terms(query)
+        # P-6(2026-09-16): 活动目标 → 规范词集合（开关关 / 没注入 → 空集 = 不参与打分）
+        goal_canon: set = set()
+        if goal_relevance_enabled():
+            for _t in self._goal_terms:
+                goal_canon |= _canonical_terms(_t)
         assoc: set = set()
         # 简洁性 review: entry 规范词只算一遍 — assoc 趟顺手缓存, 打分趟复用
         canon_by_id: Dict[str, set] = {}
-        if q_canon:
+        if q_canon or goal_canon:
             for e in active:
                 e_canon = _canonical_terms(e["content"])
                 canon_by_id[e["id"]] = e_canon
-                if q_canon & e_canon:
+                if q_canon and (q_canon & e_canon):
                     assoc |= e_canon
             assoc -= q_canon
         # BM25 兜底(默认关): 一次 retrieve 一遍分词与词档频, 零依赖零 IO。
@@ -397,6 +423,10 @@ class NPCMemory:
                 + rel * _GW[1]
                 + e["importance"] * _GW[2]
             )
+            if goal_canon:
+                # P-6: 与活动目标的规范词重合度(0~1) × 权重 —— 目标相关的事更容易被想起来
+                _hit = len(canon_by_id.get(e["id"], set()) & goal_canon)
+                score += (_hit / len(goal_canon)) * _GW[3]
             if assoc:
                 score += len(canon_by_id.get(e["id"], set()) & assoc) * _ASSOCIATION_WEIGHT
             scored.append((score, e))
