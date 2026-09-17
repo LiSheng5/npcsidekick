@@ -4,7 +4,9 @@ import type {
   LiveState,
   LiveStats,
   MemoryEntry,
+  MemoryJournalPayload,
   MemoryListPayload,
+  MemoryReportPayload,
   MemoryWriteResult,
   ModePayload,
   NpcBrief,
@@ -107,6 +109,16 @@ export const api = {
     }),
   deleteMemory: (id: string, mid: string) =>
     req<{ ok: boolean }>(`/api/npcs/${id}/memory/${mid}`, { method: 'DELETE' }),
+
+  /** GET /api/memory/report —— 跨 NPC 记忆体检（纯规则 · 零 LLM）。 */
+  memoryReport: () => req<MemoryReportPayload>('/api/memory/report'),
+
+  /** GET /api/npcs/{pid}/memory-journal —— 整理审计流水（housekeeper 写）。
+   *  复数 + 连字符，与既有 `/api/npcs/{pid}/memory` 家族对齐，且不与 `{mid}` 冲突。 */
+  memoryJournal: (id: string, limit = 50) =>
+    req<MemoryJournalPayload>(
+      `/api/npcs/${encodeURIComponent(id)}/memory-journal?limit=${limit}`,
+    ),
 
   providers: () => req<ProvidersPayload>('/api/settings/providers'),
   upsertProvider: (body: Record<string, unknown>) =>

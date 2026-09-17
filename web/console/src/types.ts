@@ -208,3 +208,79 @@ export interface ProvidersPayload {
     masked_key: string
   }
 }
+
+/** GET /api/memory/report —— 跨 NPC 记忆体检（纯规则 · 零 LLM）。
+ *
+ *  字段名取自实测后端（`npc/memory_report.py` 真实输出），不再为"另一个可能的名字"兜底。
+ *  唯一保留的防御：字段**缺失**时显示 '—'（后端字段增减是可能的），所以全部 optional；
+ *  索引签名同样只用于"字段可能增减"，不暗示会换别的键名。 */
+export interface MemoryReportNpc {
+  actor_id?: string
+  total?: number
+  active?: number
+  archived?: number
+  tokens?: number
+  over_threshold?: boolean
+  /** 三分类分布: { persona / episodic / instruction: count }（实际键以 MTYPES 为准） */
+  mtype_distribution?: Record<string, number>
+  untyped?: number
+  untyped_ratio?: number
+  /** 重复组: [{ content, entries, times }] */
+  duplicate_groups?: { content?: string; entries?: number; times?: number }[]
+  /** 重复"组数"（与 duplicate_groups 长度可能不同） */
+  duplicate_group_count?: number
+  /** 最陈旧跨度（小时）；无时间戳为 null */
+  oldest_span_hours?: number | null
+  [key: string]: unknown
+}
+
+export interface TidyRankItem {
+  actor_id?: string
+  tokens?: number
+  overage?: number
+  untyped?: number
+  untyped_ratio?: number
+  [key: string]: unknown
+}
+
+export interface TopDuplicate {
+  content?: string
+  times?: number
+  npc_count?: number
+  [key: string]: unknown
+}
+
+export interface MemoryReportGlobal {
+  npc_count?: number
+  total_entries?: number
+  total_tokens?: number
+  threshold_limit?: number
+  over_threshold_count?: number
+  /** 最该整理的 NPC 榜（后端已排好序，UI 不重排） */
+  tidy_ranking?: TidyRankItem[]
+  /** 全库重复最多的内容 top N */
+  top_duplicates?: TopDuplicate[]
+  ephemeral_count?: number
+  ephemeral_ids?: string[]
+  [key: string]: unknown
+}
+
+export interface MemoryReportPayload {
+  per_npc?: Record<string, MemoryReportNpc>
+  global?: MemoryReportGlobal
+  [key: string]: unknown
+}
+
+/** GET /api/npcs/{pid}/memory/journal?limit=50 —— 整理审计流水（housekeeper 写）。
+ *  文件不存在 → 空数组。 */
+export interface MemoryJournalEntry {
+  at?: string
+  trigger?: string
+  npc?: string
+  actions?: unknown[]
+  [key: string]: unknown
+}
+
+export interface MemoryJournalPayload {
+  entries?: MemoryJournalEntry[]
+}

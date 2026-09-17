@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import { relativeTime, stateColor } from '../lib/format'
+import { MemoryHealth } from '../components/MemoryHealth'
 import type {
   MemoryEntry,
   MemoryFacets,
@@ -29,6 +30,7 @@ export function MemoryPage({ focus }: { focus?: string }) {
   const [sort, setSort] = useState<'newest' | 'oldest' | 'importance'>('newest')
   const [notice, setNotice] = useState<{ kind: 'ok' | 'error'; text: string }>()
   const [adding, setAdding] = useState(false)
+  const [view, setView] = useState<'cards' | 'health'>('cards') // 记忆卡 / 记忆体检
 
   const loadNpcs = useCallback(async () => {
     try {
@@ -92,21 +94,43 @@ export function MemoryPage({ focus }: { focus?: string }) {
         <div>
           <h1>Memory</h1>
           <p>
-            读写与检索角色的记忆卡 —— 全部经 Runtime 的记忆系统落盘，UI 不直接改 JSON。
+            {view === 'cards'
+              ? '读写与检索角色的记忆卡 —— 全部经 Runtime 的记忆系统落盘，UI 不直接改 JSON。'
+              : '跨 NPC 记忆体检（纯规则 · 零 LLM）—— 体积 / 重复 / 最该整理的 NPC，全在这里看得见。'}
           </p>
         </div>
         <div className="spacer" />
-        <div className="metrics">
-          <span>
-            <b>{data?.total ?? 0}</b>条在卡上
-          </span>
-          <span>
-            <b>{entries.length}</b>条显示中
-          </span>
+        {view === 'cards' ? (
+          <div className="metrics">
+            <span>
+              <b>{data?.total ?? 0}</b>条在卡上
+            </span>
+            <span>
+              <b>{entries.length}</b>条显示中
+            </span>
+          </div>
+        ) : null}
+        <div className="seg">
+          <button
+            className={`seg-btn${view === 'cards' ? ' on' : ''}`}
+            onClick={() => setView('cards')}
+          >
+            记忆卡
+          </button>
+          <button
+            className={`seg-btn${view === 'health' ? ' on' : ''}`}
+            onClick={() => setView('health')}
+          >
+            记忆体检
+          </button>
         </div>
       </div>
 
-      <div className="chars-toolbar">
+      {view === 'health' ? (
+        <MemoryHealth npcs={npcs} />
+      ) : (
+        <>
+          <div className="chars-toolbar">
         <select
           className="input"
           value={pid}
@@ -273,6 +297,8 @@ export function MemoryPage({ focus }: { focus?: string }) {
             />
           ))}
         </div>
+      )}
+        </>
       )}
     </div>
   )

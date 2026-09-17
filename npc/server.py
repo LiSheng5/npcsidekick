@@ -4,7 +4,7 @@ NPCSidekick — Web 服务（制作者体验优先，参考 AI Town 的 one-comm
 一条命令:  python -m npc.server [--adapter gta] [--port 8765] [--world-id gta]
   - 自动打开浏览器 http://127.0.0.1:8765/ （根路径指到 Web Console `/console/`;
     dist 未构建时返回提示 JSON, 不再回落旧 npc.html — 该页 2026-09-08 已下架）
-  - API 全量以代码为准(40 条): 本文件(游戏面) + npc/console_api.py(Console 面);
+  - API 全量以代码为准(42 条): 本文件(游戏面) + npc/console_api.py(Console 面);
     游戏接入最少三条: /api/talk /api/state /api/task
 
 多世界隔离（2026-08-23）: 一个实例服务一个世界。两个游戏同时开 = 起两个实例:
@@ -52,6 +52,7 @@ from npc import safety as _safety
 from npc import taskloop as _taskloop
 from npc import events_archive
 from npc import housekeeper as _hk
+from npc import memory_report as _mr
 from npc.memory import EV_DONE, EV_FAIL, goal_relevance_enabled
 from npc.npc import NPC, memory_dedup_enabled
 from npc.reviewer import (approval_table, set_approval, get_manifest,
@@ -826,6 +827,72 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
     async def get_memory(npc_id: str = "cang") -> Dict:
         """记忆（记忆=可编辑文档 — 条目直接来自记忆卡）。"""
         return {"entries": get_npc(npc_id).memory.all()}
+
+    @app.get("/api/memory/report", dependencies=[Depends(_verify_origin)])
+    async def get_memory_report(top_n: str = "10") -> Dict:
+        """记忆体检报告（只读出口 · 纯规则零 LLM）: 跨 NPC 全局体检。
+
+        调 memory_report.survey 出结构化 dict（含 per_npc / global），直接返回。
+
+        参数:
+          top_n: 全库重复榜取前 N（默认 10）。以字符串接收后手动解析，
+                 以便"非法值（非整数）回落默认 10、越界值夹到 1..100"。
+                 例: top_n=abc → 10; top_n=500 → 100; top_n=0 → 1。
+
+        注意: 本端点是只读 GET，无请求体，故不参与世界守卫（world_id 仅用于 POST 写通道）。
+        """
+        try:
+            n = int(top_n)
+        except (TypeError, ValueError):
+            n = 10
+        n = max(1, min(int(n), 100))
+        return _mr.survey(npcs, world=world, top_n=n)
+
+    @app.get("/api/npcs/{pid}/memory-journal", dependencies=[Depends(_verify_origin)])
+    async def get_npc_memory_journal(pid: str, limit: str = "50") -> List[Dict]:
+        """NPC 整理审计流水（只读出口）: 读该 NPC 的 {id}_report.jsonl。
+
+        即 housekeeper.append_report 逐条写的机器审计流水（op/id/content/to/why，
+        给回滚用）—— 此前只有管家自己写、没有对外出口，用户花了 token 看不到。
+
+        路径用 `/api/npcs/{pid}/memory-journal`（复数前缀，与 console_api.py 的
+        `/api/npcs/{pid}/memory` 家族对齐；且段数为 4 而非 5），从而与将来的
+        `/api/npcs/{pid}/memory/{mid}` 永不可能冲突（`journal` 不会被当成 `{mid}`）。
+
+        参数:
+          pid:   NPC id（不存在 → 404，照 get_npc 行为）。
+          limit: 返回尾部条数（默认 50，夹到 1..200；非整数回落 50）。
+
+        行为:
+          · 文件不存在 → 返回空列表（新 NPC 正常没有这文件，不报错）。
+          · 逐行解析、坏行跳过（不因一行 JSON 坏了就 500）。
+          · 返回最近 N 条，时间序（文件追加序），最新在后。
+        """
+        npc = get_npc(pid)                       # 不存在 → 404
+        p = _hk.report_path(npc)
+        try:
+            lim = int(limit)
+        except (TypeError, ValueError):
+            lim = 50
+        lim = max(1, min(int(lim), 200))
+        if not p.is_file():
+            return []
+        records: List[Dict] = []
+        try:
+            with p.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue                # 坏行跳过
+                    if isinstance(rec, dict):
+                        records.append(rec)
+        except OSError:
+            return []
+        return records[-lim:]                    # 最近 N 条，最新在后
 
     @app.post("/api/memory", dependencies=[Depends(_verify_origin)])
     async def save_memory(request: Request) -> Dict:
