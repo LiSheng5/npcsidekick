@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-3.2-9b59b6?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/python-3.10+-purple?style=flat-square" alt="python">
-  <img src="https://img.shields.io/badge/tests-857%20passed-brightgreen?style=flat-square" alt="tests">
+  <img src="https://img.shields.io/badge/tests-982%20passed-brightgreen?style=flat-square" alt="tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/game-Godot%204.x-orange?style=flat-square" alt="godot">
 </p>
