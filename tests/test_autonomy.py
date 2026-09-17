@@ -167,14 +167,30 @@ class TestFlagsAndMiddleware:
         assert "autonomy" not in _DECISION_FLAG_NAMES
         # frozen 不入布尔开关表(它是运行时态, 非"默认关+选择加入"开关) —— 见 TestFlagsObservability
 
-    def test_flags_free_default(self, tmp_path):
-        # 未声明 _autonomy → free; frozen 默认 False
+    def test_flags_free_when_undeclared(self, tmp_path):
+        """未声明 `_autonomy` → `free`（= 旧行为）; `frozen` 默认 False。
+
+        注：参考世界 `default_world()` **自 2026-09-17 起已声明 `"game"`**，
+        故这里显式摘掉声明，验的是"**未声明 → 回落 free**"这条契约本身。
+        """
         npc = NPC(store_dir=str(tmp_path))
         npc.use_llm = False
+        npc.world.pop("_autonomy", None)      # 显式未声明
         with TestClient(create_npc_server({"cang": npc})) as c:
             flags = c.get("/api/version").json()["features"]["flags"]
         assert flags["autonomy"] == "free"
         assert flags["frozen"] is False
+
+    def test_default_world_declares_game(self):
+        """参考世界 `default_world()` 声明 `"game"`（Q4 阶段一 · 2026-09-17）。
+
+        理由：跑起服务却没人连时不该空烧 token（"1 真小时 = 20 游戏小时"，见《大脑架构》§30.5）。
+        观察能力不受影响 —— Console 本身就是客户端（2 秒轮询 `/api/state`），会刷新在场。
+        想要**元宇宙模式**（玩家退出后世界继续演化）→ 把这条声明改成 `"free"`。
+        """
+        from npc.world import autonomy_mode, default_world
+        assert default_world()["_autonomy"] == "game"
+        assert autonomy_mode(default_world()) == "game"
 
     def test_middleware_marks_presence(self, tmp_path):
         # 任意请求经过 middleware 即刷新"最后请求时间"
