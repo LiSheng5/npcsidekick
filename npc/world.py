@@ -177,6 +177,22 @@ def craft_station(world: Dict) -> Optional[str]:
     return None
 
 
+def autonomy_mode(world: Dict) -> str:
+    """世界自治档位 —— **声明驱动**（`_autonomy`，2026-09-17）。
+
+    世界用 `_autonomy` 声明大脑与世界推进的耦合关系（游戏无关红线：引擎层不出现
+    任何游戏词，只认两个档位）：
+      - "free" = 大脑自己推世界（现状；也是**未声明时的默认**，零回归）
+      - "game" = 尊重游戏端：**没有活跃客户端时不推进世界**（mod 退出 = 大脑停推）
+
+    未声明 / 声明的不是这两个合法值之一 → "free"（= 旧行为，零回归）。
+    """
+    mode = world.get("_autonomy")
+    if mode in ("free", "game"):
+        return mode
+    return "free"
+
+
 def apply_action(world: Dict, action: str, params: Dict, who: str = "cang") -> Tuple[Dict, bool, str]:
     """行动: 改变世界状态，返回 (新世界, 是否成功, 结果消息)。
 
