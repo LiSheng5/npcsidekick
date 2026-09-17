@@ -44,6 +44,49 @@ class TestVersionApi:
         assert data["features"]["multi_world"] is True
 
 
+class TestFlagsObservability:
+    """P1-1 运维可观测：`features.flags` 必须覆盖全部决策类开关的生效态。
+
+    DESIGN CONTRACT（2026-09-17 锚定）：家规是"开关默认关、选择加入"，但开关一旦
+    落地却**不进 flags**，用户就无法从 `/api/version` 判断它到底有没有生效 ——
+    P-6 的 `NPC_GOAL_RELEVANCE` 就漏过一次（2026-09-16 落地、9-17 补上）。
+    以后每加一个影响决策的布尔开关，**必须同时在这里挂账**。
+    """
+
+    # 决策类布尔开关 → 环境变量名（加开关时同步扩这张表）
+    _DECISION_FLAGS = {
+        "goals": "NPC_GOALS",
+        "lessons": "NPC_LESSONS",
+        "goal_relevance": "NPC_GOAL_RELEVANCE",
+        "memory_dedup": "NPC_MEMORY_DEDUP",
+        "safety_gate": "NPC_SAFETY_GATE",
+    }
+
+    def test_all_decision_flags_present(self, client, monkeypatch):
+        for k in self._DECISION_FLAGS.values():
+            monkeypatch.delenv(k, raising=False)
+        flags = client.get("/api/version").json()["features"]["flags"]
+        missing = sorted(set(self._DECISION_FLAGS) - set(flags))
+        assert not missing, f"决策类开关未进 features.flags（用户无法观测生效态）: {missing}"
+
+    def test_flags_default_off(self, client, monkeypatch):
+        """默认态：决策类开关全 False（家规"默认关"，关 = 与旧版逐字节一致）。"""
+        for k in self._DECISION_FLAGS.values():
+            monkeypatch.delenv(k, raising=False)
+        flags = client.get("/api/version").json()["features"]["flags"]
+        for name in self._DECISION_FLAGS:
+            assert flags[name] is False, f"{name} 默认应为 False（家规：默认关）"
+
+    @pytest.mark.parametrize("name", sorted(_DECISION_FLAGS))
+    def test_flags_read_live(self, name, client, monkeypatch):
+        """现读现切（家规）：开关是读环境变量、不缓存，改完立刻反映到 flags。"""
+        env = self._DECISION_FLAGS[name]
+        monkeypatch.delenv(env, raising=False)
+        assert client.get("/api/version").json()["features"]["flags"][name] is False
+        monkeypatch.setenv(env, "1")
+        assert client.get("/api/version").json()["features"]["flags"][name] is True
+
+
 class TestStatsApi:
     def test_initial_counters_zeroed(self, client):
         r = client.get("/api/stats")

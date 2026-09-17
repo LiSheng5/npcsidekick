@@ -52,7 +52,7 @@ from npc import safety as _safety
 from npc import taskloop as _taskloop
 from npc import events_archive
 from npc import housekeeper as _hk
-from npc.memory import EV_DONE, EV_FAIL
+from npc.memory import EV_DONE, EV_FAIL, goal_relevance_enabled
 from npc.npc import NPC, memory_dedup_enabled
 from npc.reviewer import (approval_table, set_approval, get_manifest,
                           load_manifest, manifest_is_default,
@@ -60,6 +60,7 @@ from npc.reviewer import (approval_table, set_approval, get_manifest,
                           set_manifest_resources, get_manifest_resources)
 from npc.scheduler import (SCHED, P_TALK, SchedulerTimeout, goals_enabled,
                             lessons_enabled, tick_round)
+from npc.world import autonomy_mode
 
 from npc.tts import available as tts_available
 from npc.tts import synthesize as tts_synthesize
@@ -109,6 +110,26 @@ def _tick_interval() -> float:
         return float(os.environ.get("NPC_TICK_INTERVAL", TICK_INTERVAL))
     except ValueError:
         return TICK_INTERVAL
+
+
+# 世界自治档位 "game" 的在场判定（2026-09-17）: 判据 = "任何客户端请求即在场"。
+# 模块级 monotonic 时间戳，无需持久化（重启即"无人在场"）；初始 0.0 表示自启动到
+# 首个请求前都视为不在场 —— 默认冻结，契合"游戏端没开 = 大脑不推进世界"。
+_last_client_seen = 0.0
+# 当前世界冻结态（供 /api/version features.flags.frozen 观测；模块级便于读取）。
+_tick_frozen = False
+
+
+def _presence_ttl() -> float:
+    """客户端在场 TTL（秒）: 环境变量 NPC_PRESENCE_TTL 可覆盖，默认 10.0。
+
+    风格照 `_tick_interval`（`os.environ.get` + `float()` + 失败回落默认值）。
+    客户端一般 2 秒轮询一次 /api/state，10s 余量足以容忍短暂网络抖动。
+    """
+    try:
+        return float(os.environ.get("NPC_PRESENCE_TTL", 10.0))
+    except ValueError:
+        return 10.0
 
 
 def pump_task_dispatch(world_obj: Dict) -> int:
@@ -193,19 +214,41 @@ def _is_dawn_boundary(prev_hour, now_hour) -> bool:
 
 
 async def _tick_loop(world, npcs: Dict[str, NPC]) -> None:
-    """后台自主循环（村民日常）: 每帧 tick_round + 转换点落盘。单帧异常不杀循环。"""
+    """后台自主循环（村民日常）: 每帧 tick_round + 转换点落盘。单帧异常不杀循环。
+
+    世界自治闸门（2026-09-17）: 每帧读一次 `autonomy_mode(world)` ——
+      · mode=="game" 且客户端已超时(无人在场) → **冻结**世界推进与落盘
+        (pump_task_dispatch / tick_round / _save_on_transitions 这一串跳过);
+        但记忆维护(管家 minor/emergency、反思 _reflect_batch、consolidate、黎明 dawn、
+        僵尸账回收)照常 —— 冻结的是"世界"不是"记忆"，且这些机制自带阈值保护，空跑近乎零成本。
+      · 其余(module=="free" / 有客户端在场) → 全量推进（旧行为，零回归）。
+    循环本身绝不退出（客户端回来要立刻恢复），单帧异常不杀循环（既有契约）。
+    """
+    global _tick_frozen
     tick_count = 0
     hk_gate = _hk.TriggerState()   # 任务书#04: 管家触发器状态机(每个循环独立)
+    _frozen = False                # 上一帧冻结态(低频日志: 仅在翻转时记一条)
     while True:
         await asyncio.sleep(_tick_interval())
         tick_count += 1
         hk_on = _hk.enabled()      # 每 tick 读一次(简洁性 review: 不再 3 次重复读)
-        # 任务书#05·A: 每帧驱动派发 + 落日志 — 不依赖客户端 poll, mod 断连也不丢
-        pump_task_dispatch(world)
+        # 世界自治闸门判据: 仅 "game" 且客户端已超时(自上次请求超过 TTL)才冻结世界
+        mode = autonomy_mode(world)
+        frozen = (mode == "game"
+                  and (time.monotonic() - _last_client_seen) > _presence_ttl())
+        if frozen != _frozen:     # 冻结态翻转才记一条 —— 别每帧刷屏
+            log.info("autonomy_freeze_state", mode=mode, frozen=frozen)
+            _frozen = frozen
+            _tick_frozen = frozen
+        if not frozen:
+            # 任务书#05·A: 每帧驱动派发 + 落日志 — 不依赖客户端 poll, mod 断连也不丢
+            pump_task_dispatch(world)
         try:
-            events = tick_round(world, npcs, rng=random.Random())
-            _save_on_transitions(npcs, events)
+            if not frozen:
+                events = tick_round(world, npcs, rng=random.Random())
+                _save_on_transitions(npcs, events)
             # 阶段①: 定期触发反思归纳（阈值由 maybe_reflect 内部判定，未达不调 LLM）
+            # 注意: 即便本帧世界已冻结，记忆维护仍照常(管家解耦) —— 见函数 docstring。
             # 流民跳过: RAM-only 记忆 despawn 即忘,反思归纳纯属浪费 LLM
             # 任务书#01实弹教训(2026-08-24): 反思含 LLM 调用,invoke 等锁是同步阻塞——
             # 必须整体挪进 to_thread,等锁只冻这条工作线程,绝不冻事件循环本体
@@ -434,6 +477,15 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                 await SCHED.stop()
 
     app = FastAPI(title="NPCSidekick", lifespan=_lifespan)
+
+    @app.middleware("http")
+    async def _presence_middleware(request: Request, call_next):
+        """在场打点（2026-09-17）: 每个进来的请求刷新"最后请求时间"(monotonic 时钟),
+        供 `_tick_loop` 的世界自治闸门判据"客户端是否还在场"。最轻实现 —— 仅记一个时间戳,
+        不动任何路由逻辑，也不碰 `_verify_origin`。"""
+        global _last_client_seen
+        _last_client_seen = time.monotonic()
+        return await call_next(request)
 
     def get_npc(npc_id: str) -> NPC:
         if npc_id not in npcs:
@@ -904,12 +956,21 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                     "goals": goals_enabled(),
                     # G1 另一半(2026-09-16): 反思 lesson 是否参与调权（NPC_LESSONS，默认关）
                     "lessons": lessons_enabled(),
+                    # P-6(2026-09-16): 检索是否按"与活动目标的相关度"加分
+                    # （NPC_GOAL_RELEVANCE，默认关；关时与旧版逐字节同分）
+                    "goal_relevance": goal_relevance_enabled(),
                     "approval_policy": os.environ.get("NPC_APPROVAL_POLICY", "auto"),
                     "dialogue_model": os.environ.get("NPC_DIALOGUE_MODEL",
                                                      "deepseek-v4-flash"),
                     "review_model": os.environ.get("NPC_REVIEW_MODEL",
                                                    "deepseek-v4-flash"),
                     "tick_interval_sec": _tick_interval(),
+                    # 世界自治档位(2026-09-17): 当前档位("free"/"game") + 是否因无客户端在场而冻结。
+                    # 注意: autonomy 是字符串、frozen 是运行时态(非决策类布尔开关), 两者都不进
+                    # TestFlagsObservability 的 _DECISION_FLAGS 表(那张表只验"默认关+选择加入"
+                    # 的环境变量布尔开关, 见 tests/test_server_console.py)。
+                    "autonomy": autonomy_mode(world),
+                    "frozen": _tick_frozen,
                 },
             },
         }
