@@ -409,7 +409,7 @@ NPCSidekick/
 │   └── llm/
 │       ├── client.py             # LLMClient (薄包装)
 │       └── types.py              # StreamEvent / LLMResponse / LLMChunk
-└── tests/                        # 857 个测试 (pytest，全仓；2026-09-15)
+└── tests/                        # 982 个测试 (pytest，全仓；2026-09-17)
     ├── test_planner.py
     ├── test_executor.py
     ├── test_router.py
@@ -466,7 +466,7 @@ MemoryManager 首次运行时自动检测：向量存储为空但 JSON 有数据
 ## 测试
 
 ```bash
-# 全部 857 个测试（2026-09-15）
+# 全部 982 个测试（2026-09-17）
 pytest tests/ -v                    # ~64s
 
 # 覆盖率

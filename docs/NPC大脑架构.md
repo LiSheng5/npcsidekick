@@ -170,7 +170,7 @@
 
 ```bash
 python -B -m pytest tests/test_npc.py tests/test_npc_memory.py tests/test_npc_server.py   tests/test_npc_tools.py tests/test_npc_world.py tests/test_reviewer.py   tests/test_reflection.py tests/test_association.py tests/test_consolidate.py   tests/test_security.py tests/test_tts.py   tests/test_resource_lexicon.py tests/test_memory_tokenize.py tests/test_server_multiworld.py -q -p no:cacheprovider
-# → 全量套件 **857 passed**（2026-09-15；此前 2026-08-23 为 588，`python -m pytest tests -q`；上行 NPC 子集为其中一部分）
+# → 全量套件 **982 passed**（2026-09-17；此前 2026-09-16 为 975、2026-09-15 为 857、2026-08-23 为 588，`python -m pytest tests -q`；上行 NPC 子集为其中一部分）
 ```
 
 ## 7. 文件清单
@@ -988,7 +988,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 | **G3** | ~~ActionResult 结构化契约~~ ✅ **已落地（2026-09-16）** | 新模块 `npc/action_result.py`：`apply_action_structured()` 薄包装（**旧签名不破、零行为变化**）+ `ActionResult`（success / error_code / world_changes / duration_ms / observation）；锚 `tests/test_action_result.py` 12 例 |
 | **G4** | **关系数据（事件驱动）** | `world.py` 加 `relationships`，由 G3 的后果驱动增量 |
 | **G5** | **Benchmark 骨架**（"改完到底有没有变聪明"的唯一证据） | 在既有 `npc/benchmark.py`（91 行 print 脚本）**之上指标化**，不推倒重来 |
-| **G6** | **世界存档单点**（共享内存 vs 每 NPC 一副本，重启一致性无定义） | 需先定世界权威归属（见 30.4 Q4） |
+| **G6** | **世界存档单点**（共享内存 vs 每 NPC 一副本，重启一致性无定义） | 需先定世界权威归属 —— ✅ **Q4 已于 2026-09-17 定案（见 §30.5）**，G6 可据此推进 |
 
 ### 29.4 技术债（TD1-TD5）
 
@@ -1007,14 +1007,14 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 **诚实边界**（安检 L1 三不清除；无数据 → 空/`null`，**不造假**）｜**防 confabulation 双保险**｜
 **反思卫生**（阈值 / 噪音批跳过 / 去重 / 指针推进）｜**记忆卡体积护栏**（log 截 500 + 归档轮转）｜
 **自主循环契约干净**（`tick_round` 纯函数零 I/O）｜**成本控制**（闲聊零 LLM）｜
-**可观测**（11 个开关暴露生效态，见 `/api/version` 的 `features.flags`；Web Console 7 页全可达）。
+**可观测**（`/api/version` 的 `features.flags` 暴露 12 个键的生效态：8 个布尔开关 + 4 个配置值；Web Console 7 页全可达）。
 
 ### 29.6 风险（R1-R6）
 
 | # | 风险 | 对策 |
 |---|---|---|
 | R1 | LLM 成本（反思/画像 `reasoning_effort=max`） | 两层口径：机制 mock 全量 + 关键 A/B 少量真 API，设调用上限 |
-| R2 | **11 个** `NPC_*` 功能开关默认 OFF 的"暗路径"（2026-09-16 起 +`NPC_GOALS` / `NPC_LESSONS` / `NPC_GOAL_RELEVANCE`） | benchmark 必须显式声明开关矩阵；**开关打开态也要跑一遍测试**（G1 正是靠这条抓到 `routine: None` 的真 bug） |
+| R2 | **`NPC_*` 功能开关默认 OFF 的"暗路径"**（`features.flags` 现暴露 12 键＝8 布尔开关 + 4 配置值；另有若干开关未进该字典，全仓 `env_flag("NPC_*")` 约 19 个） | benchmark 必须显式声明开关矩阵；**开关打开态也要跑一遍测试**（G1 正是靠这条抓到 `routine: None` 的真 bug） |
 | R3 | 改协议划界易引双记账（历史 B6） | 先补回归锚再改（`tests/test_ledger_boundary.py` 可扩） |
 | R4 | 长跑资源增长未实测 | Phase 12 前先做一次零 LLM 长跑灌水观测 |
 | R5 | 游戏无关红线（引擎层零游戏词） | 游戏词只允许出现在 `npc/personas/*.json` 与声明式世界文件里 |
@@ -1039,13 +1039,13 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 | 1 | 干净基线（已做：T-01 修复 + 测试加固） | `scheduler.py` / `tests/` |
 | 2 | ✅ **已完成（2026-09-15）**：V-02 实测 → 见下方「第 2 步实测结论」 | 只测不改（新增 `scripts/probe_restart_consistency.py`） |
 | 2b | ✅ **已完成（2026-09-15）**：**T-02 落地（方案②）** —— 权威改为 `saved_at` 最新的卡、顺序无关；回归锚 `tests/test_restart_authority.py`（5 例，先红后绿） | `npc/server.py`：`_card_freshness` / `_newest_card_pid` / `_load_card_world` + `load_village` 选权威 |
-| 3 | 文档基线订正 + 过时引用清理 | `README.md` / `ARCHITECTURE.md` / `PROJECT_DELIVERY.md` / 本文档 §6 |
+| 3 | ✅ **已完成（2026-09-17）**：文档基线订正 + 过时引用清理 —— README:4 徽章 / ARCHITECTURE:412,469 / PROJECT_DELIVERY:18,20,32 / 本文档 §6 全部统一为 **982**（含本轮新增 7 例 flags 可观测锚） | `README.md` / `ARCHITECTURE.md` / `PROJECT_DELIVERY.md` / 本文档 §6 |
 | 4 | **G2 Goal 真值层 + G1 决策源扩展 + G3 ActionResult** ← 三根柱子一起做 | `npc/goal.py` + `scheduler.py` + `world.py` 薄包装 |
 | 4a | ✅ **G3 已完成（2026-09-16）**：`npc/action_result.py`（薄包装 + 结构化后果，旧签名不破、零行为变化）；锚 12 例 | 新模块 + 新测试（**未接任何既有调用点** → 无需开关） |
 | 4b | ✅ **G2 已完成（2026-09-16）**：`npc/goal.py`（Goal / GoalQueue / 六态 / 前置 / 超期 / 由 G3 后果推进 / 人设种子）；锚 15 例 | 新模块 + 新测试（同样**未接调用点** → 无需开关） |
-| 4c | ✅ **G1 已完成（2026-09-16）**：开关 `NPC_GOALS`（默认关 = 与旧版逐字节一致）；候选 = `routine ∪ active_goals`；按优先级抬权；整链干完推进目标；`features.flags.goals` 可观测；锚 16 例 + **开关打开态全量也 905 通过**。**→ 三根柱子全齐，闭环首次合拢** | `npc/scheduler.py` + `npc/server.py`（flags）+ `npc/goal.py`（种子支持 action/params/priority 绑定） |
+| 4c | ✅ **G1 已完成（2026-09-16）**：开关 `NPC_GOALS`（默认关 = 与旧版逐字节一致）；候选 = `routine ∪ active_goals`；按优先级抬权；整链干完推进目标；`features.flags.goals` 可观测；锚 16 例（13 个 `def`，其中 1 个参数化展开为 4）+ **开关打开态全量也 982 通过**。**→ 三根柱子全齐，闭环首次合拢** | `npc/scheduler.py` + `npc/server.py`（flags）+ `npc/goal.py`（种子支持 action/params/priority 绑定） |
 | 5a | ✅ **P-5 反思结构化 + A/B 已完成（2026-09-16）**：反思条目可选 `scope`/`recommendation`（`npc/memory.py` 归一；两者齐备且合法才写、键数超限**整条拒绝**=fail-closed）；`_lesson_factor()`按 `2**rec` 调权（+1→×2 / −1→×0.5，多命中取绝对值最大）；开关 `NPC_LESSONS`；`features.flags.lessons` | `npc/memory.py` + `npc/memory_card.py`（解析器透传）+ `npc/scheduler.py`；锚 32 例 + **A/B 探针**（有经验 → 选该活 157→98，降 38%；关/无经验 → 与基线逐次一致） |
-| 5b | ✅ **P-6 已完成（2026-09-16）**：检索打分加第 4 个因子 `goal_relevance`（`_GW = (0.5, 3, 2, 2.0)`）—— 与**活动目标**规范词重合度 ×2 加权；开关 `NPC_GOAL_RELEVANCE`（默认关 = **一字不加、逐字节同分**）；目标文本由 `_sync_goal_terms()` 每 tick 注入、**不落盘**（进卡会破坏关时一致） | `npc/memory.py`（`set_goal_terms` / 打分项）+ `npc/scheduler.py`（注入）；锚 11 例 | **方向说明**：这一因子是「目标 → 记忆召回」，不是「记忆 → 决策」——后者仍是 TD1 未合拢的那一半 |
+| 5b | ✅ **P-6 已完成（2026-09-16）**：检索打分加第 4 个因子 `goal_relevance`（`_GW = (0.5, 3, 2, 2.0)`）—— 与**活动目标**规范词重合度 ×2 加权；开关 `NPC_GOAL_RELEVANCE`（默认关 = **一字不加、逐字节同分**）；`features.flags.goal_relevance` 可观测；目标文本由 `_sync_goal_terms()` 每 tick 注入、**不落盘**（进卡会破坏关时一致） | `npc/memory.py`（`set_goal_terms` / 打分项）+ `npc/scheduler.py`（注入）+ `npc/server.py`（flags）；锚 11 例 | **方向说明**：这一因子是「目标 → 记忆召回」，不是「记忆 → 决策」——后者仍是 TD1 未合拢的那一半 |
 | 5 | Phase 6 反思结构化 + A/B（**必须在 4 之后**）+ 记忆 `goal_relevance` 因子 | `memory_card.py` / `memory.py` / `scheduler.py` |
 | 6 | Phase 8 人格参与决策 + G4 关系数据（各带 A/B） | `persona.py` / `world.py` |
 | 7 | Phase 11 `examples/village` + G5 benchmark 指标化 | 新目录 + `npc/benchmark.py` |
@@ -1100,7 +1100,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 | Q1 | 文档落点（后续 ROADMAP / WORLD_MODEL / BEHAVIOR_BENCHMARK 放哪） | ✅ **已定（2026-09-15）：并入本文档编号章节** —— 本章即落点，此后结论只在这里维护 |
 | Q2 | 新数据（goal / relationship）在 Web Console 的可观测粒度 | ⬜ 待定（倾向：API 先出口，复用 Live/Activity，不做新页） |
 | Q3 | `examples/village` 形态 | ⬜ 待定（倾向：**可跑参考世界**，能进 benchmark，非教学模板） |
-| Q4 | 世界权威归属（大脑权威 / 游戏端权威） | ⬜ 待定（倾向：文本单机 = 大脑权威；联机 = 游戏端权威、大脑只提议；按有无活跃消费者切换，复用 `_protocol_owns_pending` 语义） |
+| Q4 | 世界权威归属（大脑权威 / 游戏端权威） | ✅ **已定（2026-09-17）：分两阶段** —— **阶段一（现在）= 尊重游戏端**：世界用 `_autonomy` 声明档位，`"game"` 档下**无活跃客户端 → 大脑不推进世界**（不 tick、不落盘）；`"free"` 档 = 大脑自己推（**未声明时的默认 = 旧行为，零回归**）。**阶段二（将来）**真联机时按"有无活跃消费者"判定，复用 `_protocol_owns_pending` 语义。**元宇宙模式（玩家退出后世界继续演化）记为将来项 = `free` 档，保留现状不删**。详述见 §30.5 |
 | Q5 | `?? CLAUDE.zh.md` / `?? npc/store_godot/` 的去留 | ⬜ 待定（`tests/test_safety_gate.py` 已随 `d69c726` 提交） |
 | Q6 | Phase 10（事件订阅式）是否砍掉 | ⬜ 待定（建议砍） |
 
@@ -1108,11 +1108,60 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 
 - 本文档 §24 **重号**（`:716` TDAM 借鉴三件套 / `:813` 任务回路最小闭环）；因 §24 已被原
   `docs/任务书_04_记忆管家.md` 等外部引用，**本次不重排**，留待统一编号时一并处理。
-- **§6「测试」段已订正为 `857`**（2026-09-15）；§14 里另有一处 `588 passed` 属该章的历史快照
+- **§6「测试」段已订正为 `982`**（2026-09-17）；§14 里另有一处 `588 passed` 属该章的历史快照
   （2026-08-23），有意保留。
 - **`docs/任务书_02 ~ 06`（2026-08 的五份执行指令）已于 2026-09-15 移出仓库**
   （→ `D:\NPCSidekick\_已归档_20260915\任务书_02~06\`，可反悔）。**正文中的「任务书#0X」即指它们**，
   各任务成果见 §23~§28；更早的 `任务书_01_调度队列.md` / `任务书_01_返工单.md` 也不在仓库中。
+
+### 30.5 Q4 定案详述（2026-09-17）—— 世界自治档位
+
+**问题（实测，非估算）**：后台自主循环 `_tick_loop` 原来**无条件每 3 秒推一帧**。账如下：
+
+| 参数 | 值 | 出处 |
+|---|---|---|
+| 帧间隔 | 3 秒 | `npc/server.py:91` `TICK_INTERVAL = 3.0` |
+| 1 游戏小时 | 60 帧 | `npc/scheduler.py:35` `TICKS_PER_GAME_HOUR = 60` |
+| **1 真小时** | **= 20 游戏小时** | 3 分钟真时间 = 1 游戏小时 |
+| **过夜 8 小时** | **= 160 游戏小时 ≈ 6.7 游戏天** | |
+
+且 `_tick` / `_game_hour` **落盘进记忆卡** → 漂移**持久**。更严重的是漂移的不只是时间：
+NPC 真的采了资源、交付了、目标推进了、**lesson 还改了行为权重** → **做 mod 的人无法复现任何场景**。
+（用户原话："后台运行的数据不好和游戏对上啊，对做 MOD 的人太不友好了"。）
+
+**根因**：大脑把两个身份混在了同一根时钟上 —— 「**世界的主人**」和「**NPC 的脑子**」。
+前者要求世界归大脑、自由演化；后者要求世界归游戏、大脑只负责"想干什么"。
+
+**决策（用户拍板）**：**分两阶段**。
+
+| 阶段 | 内容 |
+|---|---|
+| **阶段一（现在）** | **尊重游戏端**。世界用 `_autonomy` 声明档位；`"game"` 档下**无活跃客户端 = 大脑不推进世界**（不 tick、不落盘），数据永不漂移 |
+| **阶段二（将来）** | 真联机时按"有无活跃消费者"判定归属，复用 `_protocol_owns_pending` 语义 |
+
+**档位定义**：
+
+| 档 | 行为 | 用途 |
+|---|---|---|
+| `"free"` | 大脑自己推世界（**未声明时的默认 = 旧行为，零回归**） | Console 观察 / 演示 / benchmark；**元宇宙模式** |
+| `"game"` | 无活跃客户端 → 冻结世界 | **做 mod 的人** |
+
+**"在场"判据**：**任何客户端请求即在场**（三个引擎的参考客户端本就 2 秒轮询 `/api/state`，零客户端改动），
+超时上限走 `NPC_PRESENCE_TTL`。
+
+**⚠️ 这修正了任务书 #05 的一个决定**：`npc/server.py` 原注释为"每帧驱动派发 + 落日志 —
+不依赖客户端 poll, mod 断连也不丢"。所幸它保护的只是"断连时别丢任务"，而**冻结世界并不丢任务**
+（任务躺在队列里，客户端回来接着派发）→ 因此可**只闸掉世界推进，保留任务不丢**。
+
+**管家解耦（同批落地）**：冻结的是"**世界**"，不是"**记忆**"。
+`"game"` 档冻结期**仍跑记忆维护**（管家 minor/emergency、反思、consolidate、dawn）——
+这些机制自带阈值保护（`housekeeper.tidy_memory` 候选 <3 直接 `return []`、`maybe_reflect` 有阈值），
+空跑几乎零成本；**否则"游戏退出"会连带把记忆整理一起冻死**（管家触发器全挂在 `TriggerState.on_tick()` 上，
+原来与世界时钟同生共死）。
+
+**将来项（元宇宙模式）**：**玩家退出后世界继续演化** —— 即 `free` 档，
+**当前就是现状，保留不删**。真做起来还差两块：① 多世界并行（`world_id` 已有）
+② **离线回顾**（"我不在时发生了什么"；事件日志已在攒，缺一个叙述出口）。
 
 ---
 
