@@ -1051,7 +1051,7 @@ C 7（未加载回退/最长匹配/别名归一/清单 places/长地名不截断
 | 7 | Phase 11 `examples/village` + G5 benchmark 指标化 | 新目录 + `npc/benchmark.py` |
 | 7a | ✅ **P-11 指标化骨架已完成（2026-09-16）**：`npc/benchmark.py` 从"只会 print"变成可断言、可卡回归 —— 结构化结果 + 断言（10 任务全对，受阻场景=优雅失败）+ **退出码**（不符预期 → 非零）+ `--json` **纯 JSON**（CI 可直接解析）+ **自主循环机制指标**（纯规则 N 帧、固定 seed 确定性：动作计数 / 交付 / 失败数）。`llm_calls` 恒 0 → CI 里不需要任何 key | 锚 `tests/test_benchmark.py` 11 例（含**子进程验证 JSON 纯度** + 人为回归验证**退出码真的会失败**）。**仍待**：`tests/benchmark/` + `tests/e2e/` 目录结构、GitHub Actions 工作流、"关键 A/B 走真 API 少量"那层；**P-10 未做** |
 | Q4-1 | ✅ **Q4 阶段一已落地（2026-09-17）—— 世界自治档位**：`npc/world.py::autonomy_mode()`（**声明驱动**读 `_autonomy`；未声明/非法 → `"free"` = 旧行为**零回归**）+ `npc/server.py` 的**在场 middleware**（任何客户端请求即在场，TTL 走 `NPC_PRESENCE_TTL` 默认 10s）+ `_tick_loop` **闸门**（仅 `"game"` 档且无人在场 → 冻结世界推进与落盘）。同批 **管家解耦**：冻结的是"**世界**"不是"**记忆**"，冻结期仍跑管家/反思/consolidate/黎明 | `npc/world.py` + `npc/server.py` + `features.flags.autonomy/frozen`；锚 `tests/test_autonomy.py` 12 例。**决策与实测账见 §30.5** |
-| 7b | ✅ **记忆体检报告（规则层）已落地（2026-09-17）**：`npc/memory_report.py` —— **零 LLM token** 的**跨 NPC** 记忆体检（`survey()` + CLI `--json` 纯 JSON）。补的正是 `housekeeper.append_report` 那份**机器审计流水**的两个短板：① 只有**每 NPC 自己**的视角（无全局）② **写了没出口**（全仓只被管家自己调用，无 API / 无 Console 消费）。指标：条数 / 体积 / 超阈值 / 三分类分布与**未分型占比** / 重复组（含 `count` 合并计数）/ 最陈旧跨度；全局给**最该整理的 NPC 榜**与**全库重复 top N**。流民（`ephemeral`）**单列跳过、不隐去**（透明优于静默丢弃） | 锚 `tests/test_memory_report.py` 12 例（含子进程验证 `--json` 纯度）。**仍待**：接 API + Console 出口（为避与自治闸门撞同一文件而延后） |
+| 7b | ✅ **记忆体检报告（规则层）已落地（2026-09-17）**：`npc/memory_report.py` —— **零 LLM token** 的**跨 NPC** 记忆体检（`survey()` + CLI `--json` 纯 JSON）。补的正是 `housekeeper.append_report` 那份**机器审计流水**的两个短板：① 只有**每 NPC 自己**的视角（无全局）② **写了没出口**（全仓只被管家自己调用，无 API / 无 Console 消费）。指标：条数 / 体积 / 超阈值 / 三分类分布与**未分型占比** / 重复组（含 `count` 合并计数）/ 最陈旧跨度；全局给**最该整理的 NPC 榜**与**全库重复 top N**。流民（`ephemeral`）**单列跳过、不隐去**（透明优于静默丢弃）。**出口已接（2026-09-17）**：`GET /api/memory/report`（全局体检）+ `GET /api/npcs/{pid}/memory-journal`（整理审计流水，尾部 N 条、坏行跳过、无文件返空）→ 端点总数 40 → **42**；Console **Memory 页**加「记忆卡 / 记忆体检」分段（**复用现有页，不新增导航**） | 锚 `tests/test_memory_report.py` 12 例 + `tests/test_memory_report_api.py` 10 例（含"新路径不与既有 `/api/npcs/{pid}/memory` 相撞"的回归锚）。已无遗留 |
 | 8 | 30 分钟长跑验收（V-01） | 只测不改 |
 
 **第 2 步实测结论（V-02 · 2026-09-15）** —— 复现：`python scripts/probe_restart_consistency.py`
@@ -1150,6 +1150,12 @@ NPC 真的采了资源、交付了、目标推进了、**lesson 还改了行为�
 
 **"在场"判据**：**任何客户端请求即在场**（三个引擎的参考客户端本就 2 秒轮询 `/api/state`，零客户端改动），
 超时上限走 `NPC_PRESENCE_TTL`。
+
+**参考世界已声明 `"game"`（2026-09-17）**：`default_world()` 现在声明 `"_autonomy": "game"` ——
+理由：跑起服务却没人连时不该空烧 token（"1 真小时 = 20 游戏小时"）。
+**观察能力不受影响**：Console 本身就是客户端（2 秒轮询），打开就自动恢复推进。
+**要开元宇宙模式**（玩家退出后世界继续演化）→ 把那条声明改成 `"free"`。
+（`npc/npc.py:86` 的 `NPC()` 与 `server.load_village()` 都走 `default_world()` → 参考世界行为一致。）
 
 **⚠️ 这修正了任务书 #05 的一个决定**：`npc/server.py` 原注释为"每帧驱动派发 + 落日志 —
 不依赖客户端 poll, mod 断连也不丢"。所幸它保护的只是"断连时别丢任务"，而**冻结世界并不丢任务**
