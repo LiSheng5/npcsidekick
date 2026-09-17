@@ -123,7 +123,7 @@ body 可选 `{"seed": 42}` 保证确定性。响应 `{"tick": N, "events": {}}`�
 
 ---
 
-## 9. 完整端点索引（40 条 · 2026-09-15 实测）
+## 9. 完整端点索引（42 条 · 2026-09-17 实测）
 
 > §1~§8 详述的是**游戏接入面**（最少三条：`/api/talk` `/api/state` `/api/task`）。
 > **Console 面 14 条**属于开发者工具层，只服务本机 Web Console（`/console/`），游戏端不需要。
@@ -139,6 +139,7 @@ body 可选 `{"seed": 42}` 保证确定性。响应 `{"tick": N, "events": {}}`�
 | GET | `/api/npcs` | NPC 列表（前端切换角色用） |
 | GET | `/api/npc?npc_id=` | 单个人设（详见 §5） |
 | GET | `/api/memory?npc_id=` | 记忆卡内容（详见 §6） |
+| GET | `/api/memory/report` | 记忆体检报告（纯规则零 LLM，跨 NPC 全局体检；`top_n` 夹 1..100，非法值回落 10） |
 | GET·POST | `/api/mode` | 对话模式：规则 ↔ LLM（详见 §7） |
 | POST | `/api/tick` | 手动推一帧（测试/演示；body 可选 `seed`）（详见 §8） |
 | POST | `/api/npc/register` | 动态注册（GTA 前置）：ped 随刷随出热注册，幂等（重复 → `existed`） |
@@ -148,6 +149,7 @@ body 可选 `{"seed": 42}` 保证确定性。响应 `{"tick": N, "events": {}}`�
 | GET | `/api/events` | 结构化事件流增量（`since` 游标；**事件无时间戳，只有到达顺序**） |
 | GET | `/api/events/stream` | SSE 增量事件流（轮询的升级替代，按需采用） |
 | POST | `/api/memory` | 记忆回写（整表替换语义，生产客户端勿用） |
+| GET | `/api/npcs/{pid}/memory-journal` | 该 NPC 整理审计流水（`{id}_report.jsonl`，读尾部 N 条；坏行跳过不 500；无文件返回 []；pid 不存在 404） |
 | POST | `/api/consumer/hello` | 协议 v1 · 能力协商（M1）：消费者报到 + 心跳 + 声明可执行动词表 |
 | POST | `/api/task_done` | 协议 v1 · 销账（M1）：mod 干完活回报 |
 | GET | `/api/version` | 版本/特性握手：客户端启动探测一次，按特性降级 |

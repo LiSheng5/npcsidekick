@@ -1186,3 +1186,372 @@ select {
     border-top: 1px solid var(--border);
   }
 }
+
+/* ── Memory 页: 子视图分段切换 ── */
+.seg {
+  display: inline-flex;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  gap: 2px;
+  flex: none;
+}
+
+.seg-btn {
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  padding: 6px 14px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 550;
+  transition: background 0.15s, color 0.15s;
+}
+
+.seg-btn:hover {
+  color: var(--text);
+}
+
+.seg-btn.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ── 记忆体检（MemoryHealth）── */
+.report {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 32px 36px;
+  max-width: 1080px;
+}
+
+.report > section {
+  margin-top: 26px;
+}
+
+.report .sec-title {
+  margin-bottom: 10px;
+}
+
+.quiet-note {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  line-height: 1.6;
+}
+
+.quiet-note b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+  gap: 12px;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  box-shadow: var(--shadow-sm);
+}
+
+.stat-card .v {
+  font-size: 26px;
+  font-weight: 640;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-card .l {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.stat-card.warn {
+  border-color: rgba(220, 38, 38, 0.3);
+}
+
+.stat-card.warn .v {
+  color: var(--red);
+}
+
+.rank-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rank-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 11px 14px;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.rank-row:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-sm);
+}
+
+.rank-row.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.rank-row .nm {
+  font-weight: 600;
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.rank-row .nm code {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.rank-row .num {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  font-size: 13px;
+  flex: none;
+}
+
+.pill {
+  font-size: 11.5px;
+  padding: 2px 9px;
+  border-radius: 99px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  flex: none;
+}
+
+.pill.over {
+  color: var(--red);
+  background: rgba(220, 38, 38, 0.07);
+  border-color: rgba(220, 38, 38, 0.3);
+}
+
+.pill.untyped {
+  color: var(--amber);
+  background: rgba(180, 83, 9, 0.07);
+  border-color: rgba(180, 83, 9, 0.3);
+}
+
+.dup-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.dup-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 13px;
+}
+
+.dup-row:last-child {
+  border-bottom: none;
+}
+
+.dup-row .x {
+  color: var(--amber);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.dup-row .nc {
+  color: var(--text-faint);
+  font-size: 12px;
+  flex: none;
+}
+
+.dup-row .ct {
+  color: var(--text-dim);
+  min-width: 0;
+  word-break: break-word;
+}
+
+.npc-health-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.npc-health-row {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.npc-health-row.open {
+  border-color: var(--border-strong);
+}
+
+.npc-health-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+}
+
+.npc-health-summary:hover {
+  background: var(--surface-soft);
+}
+
+.npc-health-summary .nm {
+  font-weight: 600;
+}
+
+.npc-health-summary code {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.npc-health-summary .sp {
+  flex: 1;
+}
+
+.npc-health-summary .mini {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.over-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--text-faint);
+}
+
+.over-dot.on {
+  background: var(--red);
+}
+
+.npc-health-detail {
+  padding: 4px 16px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mtype-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mtype-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.mtype-bar .bl {
+  width: 72px;
+  flex: none;
+}
+
+.mtype-bar .track {
+  flex: 1;
+  height: 6px;
+  border-radius: 99px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.mtype-bar .track i {
+  display: block;
+  height: 100%;
+  background: var(--text-dim);
+}
+
+.mtype-bar .bv {
+  width: 40px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.journal {
+  display: flex;
+  flex-direction: column;
+}
+
+.journal-row {
+  padding: 10px 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.journal-row:last-child {
+  border-bottom: none;
+}
+
+.journal-row .jh {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-bottom: 5px;
+}
+
+.journal-row .jt {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.journal-row .ja {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.journal-row .ja code {
+  font-size: 11.5px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 7px;
+  color: var(--text-dim);
+  word-break: break-word;
+}
