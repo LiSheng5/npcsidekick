@@ -79,7 +79,7 @@ class NPC(TalkPipelineMixin, MemoryCardMixin):
         self.persona = dict(SAMPLE_NPC if persona is None else persona)
         self.actor_id = self.persona["id"]
         # 流民层(2026-08-22): RAM-only,save() 跳过 — despawn 即忘(陌生人聊一次就忘)。
-        # 常驻层(cast 静态角色/GTA locals)默认 False,记忆落盘可续前缘。
+        # 常驻层(cast 静态角色)默认 False,记忆落盘可续前缘。
         self.ephemeral = ephemeral
         # 共享世界: 传入世界 = 引用（多 NPC 共用一个世界 — AI Town 模式）；
         # 未传入 = 新建独立世界。
@@ -369,7 +369,7 @@ class NPC(TalkPipelineMixin, MemoryCardMixin):
 
         触发闸门（成本控制 — 闲聊零调用）:
           - B1 回复承诺/高风险（与 A 审查同一触发信号）, 或
-          - 玩家输入像派活但规则词典没接住（长尾意图 — GTA 类纯对话世界的主路径:
+          - 玩家输入像派活但规则词典没接住（长尾意图 — 纯对话世界的主路径:
             世界没声明资源词典时规则版 compile_task 永远接不了单, 这里补上）
         纪律: 只在 pending_task 为空时编译; 产物必须过与规则路径完全相同的
         三道门（deny 档 / review_task 白名单+可行性 / 落账口 book）——

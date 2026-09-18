@@ -41,7 +41,7 @@ def gate_enabled() -> bool:
     """协议门总开关 NPC_TASK_LOOP（方案稿审批项⑥修订版, 默认关）。
 
     关(默认): book() 行为与 v3.2 完全一致 —— 旧石器等内置执行器世界零回归;
-    开(GTA bat): book() 过能力协商门 + 镜像进账本。端点本身恒在(空表惰性无副作用)。
+    开(游戏侧 bat): book() 过能力协商门 + 镜像进账本。端点本身恒在(空表惰性无副作用)。
     """
     return env_flag("NPC_TASK_LOOP")
 

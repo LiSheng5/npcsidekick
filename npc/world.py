@@ -95,8 +95,8 @@ def default_world() -> Dict:
 def actor_of(world: Dict, who: str) -> Dict:
     """取角色槽（NPC 注册时自动创建）。
 
-    出生点: 世界可用 _default_spawn 声明(如 GTA 的罗克福山);缺省"村庄"。
-    2026-08-22 修: 原来硬编码"村庄" — GTA 世界没有这个地点,新槽 KeyError。
+    出生点: 世界可用 _default_spawn 声明(如某游戏的出生地);缺省"村庄"。
+    2026-08-22 修: 原来硬编码"村庄" — 别的世界没有这个地点,新槽 KeyError。
     """
     slot = world["actors"].setdefault(
         # T-03(2026-09-16): 兜底取"世界声明的出生点"，再退到第一个地点 —— 不写死任何地名
