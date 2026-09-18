@@ -87,7 +87,7 @@
 - ⚠️ `routine[].action` 白名单硬编码 `("gather","rest","say")` → 与"不假设 action 只有三种"冲突，**需放宽**
   （方案：允许任意 action 字符串，`gather` 仍需 `resource`；UI 从 `/api/manifest` 取动作清单做建议 + 允许自由输入）。
 - `system_prompt_override` 在 UI 中标为 **Advanced**（默认折叠）。
-- 扫描非递归（`*.json`），`npc/personas/gta/` 子目录不进列表。
+- 扫描非递归（`*.json`），`npc/personas/` 下的子目录不进列表。
 
 ### Memory（`npc/memory.py` · `NPCMemory`）
 
@@ -460,5 +460,5 @@ React 不持有 JSON、不直接改文件、也不另造记忆结构。新增走
 **至此 7 项导航全部开放**：Graph / Characters / Live / Memory / Activity / Playground / Settings。
 **剩余**：Step 8「Graph 精修」（zoom/pan/fit/search/filter + 响应式 Inspector，基础版已有，属精修）。
 
-**端点面**：§2 的"现有 API 清单"是 2026-09-07 的盘点；当前全量为 **40 条**（游戏面 26 + Console 面 14），
+**端点面**：§2 的"现有 API 清单"是 2026-09-07 的盘点；当前全量为 **42 条**（游戏面 28 + Console 面 14），
 权威清单见 `docs/API.md` §9。

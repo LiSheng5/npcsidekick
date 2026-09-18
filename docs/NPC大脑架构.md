@@ -170,7 +170,7 @@
 
 ```bash
 python -B -m pytest tests/test_npc.py tests/test_npc_memory.py tests/test_npc_server.py   tests/test_npc_tools.py tests/test_npc_world.py tests/test_reviewer.py   tests/test_reflection.py tests/test_association.py tests/test_consolidate.py   tests/test_security.py tests/test_tts.py   tests/test_resource_lexicon.py tests/test_memory_tokenize.py tests/test_server_multiworld.py -q -p no:cacheprovider
-# → 全量套件 **982 passed**（2026-09-17；此前 2026-09-16 为 975、2026-09-15 为 857、2026-08-23 为 588，`python -m pytest tests -q`；上行 NPC 子集为其中一部分）
+# → 全量套件 **1044 tests / 1043 passed / 1 skipped**（2026-09-18；此前 2026-09-17 为 1017、2026-09-15 为 857、2026-08-23 为 588，`python -m pytest tests -q`；上行 NPC 子集为其中一部分）
 ```
 
 ## 7. 文件清单
@@ -1206,4 +1206,4 @@ NPC 真的采了资源、交付了、目标推进了、**lesson 还改了行为�
   只是界面换成了 Console。
 - Web Console 自身：7 项导航（Graph / Characters / Live / Memory / Activity / Playground / Settings）
   **已全部开放**，仅剩 Step 8「Graph 精修（zoom/pan/fit/search/filter + 响应式 Inspector）」未做。
-- 端点全量清单见 `docs/API.md` §9（40 条：游戏面 26 + Console 面 14）。
+- 端点全量清单见 `docs/API.md` §9（42 条：游戏面 28 + Console 面 14）。

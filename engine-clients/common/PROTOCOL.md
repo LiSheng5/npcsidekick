@@ -18,7 +18,7 @@
 
 ```bash
 python -m npc.server --adapter paleolithic --port 8765 --world-id godot --no-browser
-python -m npc.server --adapter gta         --port 8766 --world-id gta   --no-browser
+python -m npc.server --adapter <适配器名>  --port 8766 --world-id <命名空间> --no-browser
 ```
 
 - 一个实例服务一个世界；两个游戏同时开 = 两个实例，**端口必须不同**。
@@ -78,6 +78,10 @@ python -m npc.server --adapter gta         --port 8766 --world-id gta   --no-bro
 （存量世界零回归）。**面板只是显示层契约，`actors` 数据字段照旧完整** —
 游戏端镜像照读全量字段，不受声明影响；未知面板名界面忽略（向前兼容）。
 
+> 世界 JSON 的**全部声明字段**（`_autonomy` / `_resource_regen` / `_entity_synonyms` /
+> `_review_tpl` 等）与"未声明时的行为"见 `docs/世界声明键.md`。
+> 其中 **`_autonomy` 建议显式声明**：不声明就没有"无客户端在场则停推世界"的行为。
+
 ### 2.3 GET /api/events?since=N — 增量事件（轮询版）
 
 游标 = `world.log` 索引。响应 `events[]`（结构化事件）+ `log_count`（下轮 since）。
@@ -95,7 +99,7 @@ python -m npc.server --adapter gta         --port 8766 --world-id gta   --no-bro
 `text/event-stream`。每条事件一帧 `data: {...}`（schema 同 2.3），`retry: 3000`，
 每 ~15s 一条 `: ping` 心跳。NPC 多/多游戏共用时用它，服务端零新依赖。
 
-### 2.5 POST /api/npc/register · /api/npc/unregister — 动态人设（GTA 灵魂附体）
+### 2.5 POST /api/npc/register · /api/npc/unregister — 动态人设（随刷随出的路人/流民）
 
 ```json
 // register
@@ -118,7 +122,7 @@ python -m npc.server --adapter gta         --port 8766 --world-id gta   --no-bro
 
 ### 2.7.1 任务回路（协议 v1·M2 任务书#02 已实施）
 
-启动开关 `NPC_TASK_LOOP=1`（GTA bat 已开）+ `--manifest <gta_actions.json>`。三个端点：
+启动开关 `NPC_TASK_LOOP=1`（启动脚本里已开）+ `--manifest <你的动作清单.json>`。三个端点：
 
 | 端点 | 载荷 → 语义 |
 |---|---|
@@ -126,7 +130,7 @@ python -m npc.server --adapter gta         --port 8766 --world-id gta   --no-bro
 | GET `/api/state?consumer=<name>` | 响应 `pending_tasks[]`（当前在岗任务；**纯读，不写日志**） |
 | POST `/api/task_done` | `{"task_id":"t_1","status":"completed"\|"failed"\|"cancelled","detail":"…"}` → 销账; completed 落 EV_DONE 记忆 + "完成任务"事件, failed 落 EV_FAIL 记忆 + 商议字幕(say 事件) |
 
-GTA 方言动作表（`npc/adapters/gta_actions.json`）：
+**示例**动作清单（某款游戏经 `--manifest` 提供，非引擎内置文件）：
 - `follow_player`（tier3/ask, 持续型）：mod 让 ped 持续跟随玩家；无完成条件——玩家下新指令
   由账本 supersede 自动取消，mod 见 pending_tasks 消失即停
 - `goto`（tier2/ask, params=[地点]）：mod 按内置中文地标表翻坐标走路；到达(6m) 报 completed，

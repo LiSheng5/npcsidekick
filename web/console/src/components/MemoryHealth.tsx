@@ -4,7 +4,6 @@ import { fmtInt, fmtPct, isoTime } from '../lib/format'
 import { StateBlock } from './StateBlock'
 import type {
   MemoryJournalEntry,
-  MemoryJournalPayload,
   MemoryReportNpc,
   MemoryReportPayload,
   NpcBrief,
@@ -220,7 +219,7 @@ function NpcHealthRow({
   open: boolean
   onToggle: () => void
 }) {
-  const [journal, setJournal] = useState<MemoryJournalPayload>()
+  const [journal, setJournal] = useState<MemoryJournalEntry[]>([])
   const [jLoading, setJLoading] = useState(false)
   const [jError, setJError] = useState<string>()
 
@@ -256,7 +255,7 @@ function NpcHealthRow({
   const dupGroups = dupGroupsOf(stat)
   const dupCount = dupCountOf(stat)
   const oldest = oldestHoursOf(stat)
-  const entries = journal?.entries ?? []
+  const entries = journal ?? []
 
   return (
     <div className={`npc-health-row${open ? ' open' : ''}`}>

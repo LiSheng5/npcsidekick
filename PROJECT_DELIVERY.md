@@ -15,9 +15,9 @@
 | Phase 1 | 测试基础设施 + structlog + 可注入 settings | 79 |
 | Phase 2 | 流式输出 + Rich CLI + Skill 模式 | +48 |
 | Phase 3 | 多 Provider 抽象（OpenAI/DeepSeek） | +21 |
-| **合计** | | **982** |
+| **合计** | | **1043 passed**（1044 tests，1 skipped） |
 
-> 注：上表各 Phase 为历史增量记录；「合计」为当前全仓基线（2026-09-17 实测 `982 passed / 0 failed / 0 errors / 0 skipped`）。
+> 注：上表各 Phase 为历史增量记录；「合计」为当前全仓基线（2026-09-18 实测 `1044 tests / 1043 passed / 0 failed / 0 errors / 1 skipped`）。
 
 ## 核心特性
 
@@ -29,7 +29,7 @@
 - ✅ 记忆管理（短期/长期/向量存储/渐进压缩）
 - ✅ 可注入 AgentSettings，structlog 结构化日志
 - ✅ Skill 组合模式：decompose → dispatch → synthesize
-- ✅ 982 单元测试，pytest-asyncio，ProviderProtocol 测试接缝（2026-09-17）
+- ✅ 1044 单元测试（1043 passed / 1 skipped），pytest-asyncio，ProviderProtocol 测试接缝（2026-09-18）
 
 ## 已知限制
 
@@ -45,4 +45,4 @@
 |-------|------|
 | Phase 4 | 代码清理：死代码删除、文档更新 |
 | Phase 5 | 质量修复：memory bypass、测试覆盖、prompt 国际化 |
-| Phase 6 | 集成测试、Web UI 后端（✅ 已交付：Web Console 7 页 + 40 条 API）、CLI 优化 |
+| Phase 6 | 集成测试、Web UI 后端（✅ 已交付：Web Console 7 页 + 42 条 API）、CLI 优化 |

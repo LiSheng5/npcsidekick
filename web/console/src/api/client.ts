@@ -4,7 +4,7 @@ import type {
   LiveState,
   LiveStats,
   MemoryEntry,
-  MemoryJournalPayload,
+  MemoryJournalEntry,
   MemoryListPayload,
   MemoryReportPayload,
   MemoryWriteResult,
@@ -116,7 +116,7 @@ export const api = {
   /** GET /api/npcs/{pid}/memory-journal —— 整理审计流水（housekeeper 写）。
    *  复数 + 连字符，与既有 `/api/npcs/{pid}/memory` 家族对齐，且不与 `{mid}` 冲突。 */
   memoryJournal: (id: string, limit = 50) =>
-    req<MemoryJournalPayload>(
+    req<MemoryJournalEntry[]>(
       `/api/npcs/${encodeURIComponent(id)}/memory-journal?limit=${limit}`,
     ),
 
