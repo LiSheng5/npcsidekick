@@ -56,10 +56,13 @@ def load_resource_lexicon_from_world(world: Optional[Dict],
         还能接单聊, 真采不到由 A 审查可行性诚实拒绝, 不归词典管）;
       - 别名来源: 世界扩展键 world["_resource_aliases"] = {规范名: [别名...]}
         + 动作清单(manifest)里的 resources 段(经 extra 合并);
-    语义:
+    三态语义（2026-09-18 收紧, 与项目"兜底三态"约定一致）:
       - 收集到 ≥1 个资源 → 整表替换默认（游戏声明自己的真相, 不让别游戏的
-        残留词漏进来）; 纯对话世界(一个资源都没有)→ 回退默认表;
-      - world=None 且 extra 空 → 恢复默认（测试复位用）。
+        残留词漏进来）;
+      - 世界已加载但零资源（纯对话游戏）→ **空词典**(态②) —— 制作者的沉默 =
+        不要我的资源词表; **不**回落到硬编码默认表（旧行为会把"木材/浆果/石头"
+        塞给别的游戏, 与本文件另一条注释的意图相反）;
+      - world=None 且 extra 空 → 恢复默认(态③, 测试复位用/裸调用)。
     返回生效词典。
     """
     global _ACTIVE_RESOURCE_ALIASES
@@ -90,13 +93,17 @@ def load_resource_lexicon_from_world(world: Optional[Dict],
                 if a and a not in lex[canon]:
                     lex[canon].append(a)
     active = {k: tuple(v) for k, v in lex.items()}
-    _ACTIVE_RESOURCE_ALIASES = active if active else None
-    return dict(_ACTIVE_RESOURCE_ALIASES or DEFAULT_RESOURCE_ALIASES)
+    # 空表也算"已加载"(态②): 世界加载了但一个资源都没有 → 空词典,
+    # **不**回落到硬编码默认表 —— 否则纯对话游戏会继承本游戏的资源词表。
+    _ACTIVE_RESOURCE_ALIASES = active
+    return dict(_ACTIVE_RESOURCE_ALIASES if _ACTIVE_RESOURCE_ALIASES is not None
+                else DEFAULT_RESOURCE_ALIASES)
 
 
 def get_resource_aliases() -> Dict[str, tuple]:
     """当前生效的资源词典（动态优先, 未加载用默认）。"""
-    return _ACTIVE_RESOURCE_ALIASES if _ACTIVE_RESOURCE_ALIASES else dict(DEFAULT_RESOURCE_ALIASES)
+    return (_ACTIVE_RESOURCE_ALIASES if _ACTIVE_RESOURCE_ALIASES is not None
+            else dict(DEFAULT_RESOURCE_ALIASES))
 
 
 # ── 任务书#05·C 动态地点词典（与资源词典同款, 由 world/manifest 声明驱动）────
