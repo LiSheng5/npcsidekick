@@ -94,6 +94,7 @@ def main(argv=None) -> None:
         _store = _BASE_DIR / _store
 
     from npc.server import create_npc_server, load_village
+    from npc.memory import load_entity_synonyms_from_world
     from npc.reviewer import (get_manifest_places, get_manifest_resources,
                               load_place_lexicon_from_world,
                               load_resource_lexicon_from_world)
@@ -103,6 +104,9 @@ def main(argv=None) -> None:
     # 游戏加新资源改世界 JSON/清单表即可, 对话接单立刻认识, 零代码。
     lex = load_resource_lexicon_from_world(world, extra=get_manifest_resources())
     print(f"资源词典已就绪: {sorted(lex.keys())}")
+    # 同义词表(2026-09-18): 同款声明驱动 —— 世界声明自己的词表, 引擎不掺参考内容。
+    syn = load_entity_synonyms_from_world(world)
+    print(f"同义词表已就绪: {len(syn)} 组")
     # 动态地点词典(任务书#05·C): 地标表 = world["locations"] 的 key + 清单 places 别名;
     # goto 接单走最长匹配归一, 长地名不再被截断成别的地名。
     places = load_place_lexicon_from_world(world, extra=get_manifest_places())

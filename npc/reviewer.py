@@ -577,21 +577,50 @@ def compile_task(player_input: str) -> Optional[Dict]:
 
 
 # ── A: 审查任务（安全 + 可行性，规则）────────────────────
+# ── 审查拒绝语（2026-09-18 声明驱动）─────────────────────────
+# 引擎只留**中性默认**（不含任何游戏专属词）；世界可用 `_review_tpl` 覆盖
+# （键: disallowed / forbidden / exhausted）。未声明 → 用中性默认 ——
+# 制作者的沉默 = 用中性措辞，而不是继承本游戏的台词。
+_DEFAULT_REVIEW_TPL: Dict[str, str] = {
+    "disallowed": "……这个我不会做（不允许的动作：{action}）。",
+    "forbidden": "……这个涉及我不该碰的东西。",
+    "exhausted": "……{resource}现在弄不到了。",
+}
+
+
+def _review_line(world: Dict, key: str, action: str = "", resource: str = "") -> str:
+    """取审查拒绝语：世界 `_review_tpl` 优先，缺省用中性默认。
+
+    渲染失败（模板占位符写错）→ 回落中性默认，绝不因文案问题让审查本身失败。
+    中性默认只含参数占位、不含游戏专属词 —— game-agnostic 红线。
+    """
+    neutral = _DEFAULT_REVIEW_TPL[key]
+    tpl = ((world or {}).get("_review_tpl") or {}).get(key)
+    if not isinstance(tpl, str) or not tpl:
+        tpl = neutral
+    try:
+        return tpl.format(action=action, resource=resource)
+    except Exception:
+        return neutral.format(action=action, resource=resource)
+
+
 def review_task(npc, task: Dict) -> tuple[bool, str]:
     """A 审查: 任务单（规则）— 安全白名单 + 可行性。不过 → (False, 拒绝语)。
 
     防篡改铁律: LLM 只提议、代码决定执行 — 审查只放行白名单游戏动作，
     含路径/文件/读写/执行类字段的任务一律拒绝（LLM 永远碰不到文件）。
     可行性: 资源枯竭 → 诚实拒绝，不空口答应。
+    拒绝语(2026-09-18): 由世界 `_review_tpl` 声明，缺省用引擎中性默认 ——
+    引擎层不硬编码任何游戏台词；"资源会长回来"这类假设属于世界，不属于引擎。
     """
     action = task.get("action", "")
     if action not in _current_actions():
-        return False, f"……这个我不会做（不允许的动作：{action}）。"
+        return False, _review_line(npc.world, "disallowed", action=action)
     if _FORBIDDEN_TASK_TOKENS & {str(f).lower() for f in task}:
-        return False, "……这个涉及我不该碰的东西。"
+        return False, _review_line(npc.world, "forbidden")
     for v in task.values():
         if isinstance(v, str) and any(t in v.lower() for t in _FORBIDDEN_TASK_TOKENS):
-            return False, "……这个涉及我不该碰的东西。"
+            return False, _review_line(npc.world, "forbidden")
     # 可行性: 资源枯竭检查只对"以资源为参数"的动作生效(任务书#02)——
     # follow_player/goto 等无资源概念的动作直达放行, 不再被空 resource 误拒。
     spec = _manifest_spec(action)
@@ -601,7 +630,7 @@ def review_task(npc, task: Dict) -> tuple[bool, str]:
     from npc.scheduler import resource_site
 
     if resource_site(npc.world, npc.actor_pos, resource) is None:
-        return False, f"……{resource}现在弄不到了，采空了，等它长回来吧。"
+        return False, _review_line(npc.world, "exhausted", resource=resource)
     return True, ""
 
 

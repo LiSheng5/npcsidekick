@@ -98,7 +98,8 @@ def clean_recommendation(raw) -> Optional[float]:
 CATEGORY_ARCHIVED = "archived"
 
 # 阶段② 轻量海马体: 规范词 → 同义词族（中文同义召回，不依赖 embedding）
-# 只收游戏世界的稳定名词（资源/地点/角色），避免过度匹配
+# ⚠ 本表是**参考默认**：只在"未加载任何世界"时生效（态③，见 load_entity_synonyms_from_world）。
+# 真正的真相在世界的 `_entity_synonyms` 声明里 —— 换游戏改世界 JSON，不要改这里。
 _ENTITY_SYNONYMS: Dict[str, frozenset] = {
     "木材": frozenset({"木材", "木头", "柴", "柴火", "木料", "原木", "木", "树"}),
     "浆果": frozenset({"浆果", "果子", "野果", "果实"}),
@@ -117,6 +118,13 @@ _ENTITY_SYNONYMS: Dict[str, frozenset] = {
 # （"砍柴"=木材、村边那条"河"），误伤面小。其余单字（家/木/石/绳）不参与
 # 子串匹配 —— "大家/了不起"这类无关词里的"家/木"污染过检索/合并/统计。
 _SINGLE_CHAR_TERMS = frozenset({"柴", "河"})
+
+# 当前生效的同义词表（声明驱动，2026-09-18）—— 三态语义，别简化：
+#   ① 世界已声明         → 用声明值
+#   ② 世界已加载但未声明  → **空表**（制作者的沉默 = 不要我的词表；别游戏不继承本游戏的地名/资源名）
+#   ③ 未加载任何世界(None) → 回落上面的参考默认（保裸调用与既有测试）
+_ACTIVE_ENTITY_SYNONYMS: Optional[Dict[str, frozenset]] = None
+_ACTIVE_SINGLE_CHARS: Optional[frozenset] = None
 # 一跳关联加分: 与 query 实体共现的实体所链接的记忆 +0.8/实体（HippoRAG 思想轻量版）
 _ASSOCIATION_WEIGHT = 0.8
 # 阶段③ 遗忘: 记忆强度半衰期（小时）— 强度 = importance × 0.5^(小时/半衰期)
@@ -139,16 +147,54 @@ def _tokenize(text: str) -> List[str]:
     return [w for w in cleaned.split() if w]
 
 
+def load_entity_synonyms_from_world(world: Optional[Dict]) -> Dict[str, frozenset]:
+    """实体同义词族 —— **声明驱动**（`_entity_synonyms` / `_entity_single_chars`，2026-09-18）。
+
+    世界用这两个键声明"哪些词归一成哪个规范名"（检索召回用）。**引擎层不持有游戏
+    词表** —— 上面的 `_ENTITY_SYNONYMS` 只是"未加载世界"时的参考默认。
+
+    三态（关键，别简化）:
+      - `world=None`        → 复位到未加载态（态③）→ `_canonical_terms` 回落参考默认
+      - 世界已声明该键       → 用声明值（态①）
+      - 世界已加载但未声明    → **空表**（态②）—— 制作者的沉默 = 不要我的词表。
+        没有这一态，"可覆盖"是假的：别的游戏漏声明一个键，就会从兜底继承本游戏的
+        资源名与地名，污染它的检索召回。
+
+    返回生效表。
+    """
+    global _ACTIVE_ENTITY_SYNONYMS, _ACTIVE_SINGLE_CHARS
+    if world is None:
+        _ACTIVE_ENTITY_SYNONYMS = None
+        _ACTIVE_SINGLE_CHARS = None
+        return dict(_ENTITY_SYNONYMS)
+    syn: Dict[str, frozenset] = {}
+    for canon, aliases in ((world.get("_entity_synonyms") or {})).items():
+        if isinstance(aliases, (list, tuple, set, frozenset)):
+            words = frozenset(str(a) for a in aliases if str(a))
+            if words:
+                syn[str(canon)] = words
+    _ACTIVE_ENTITY_SYNONYMS = syn       # 空 dict 也算"已加载" → 态②（不回落参考默认）
+    chars = world.get("_entity_single_chars")
+    _ACTIVE_SINGLE_CHARS = (frozenset(str(c) for c in chars)
+                            if isinstance(chars, (list, tuple, set, frozenset))
+                            else frozenset())
+    return dict(syn)
+
+
 def _canonical_terms(text: str) -> set:
     """抽取文本里命中的规范词（同义词族归一到规范词）。阶段② 轻量海马体。
 
+    词表来源见 `load_entity_synonyms_from_world`（声明驱动 + 三态兜底）。
+
     2026-08-28 修复: 单字别名默认不参与子串匹配 — "大家/了不起"里的
     "家/木"必误命中, 曾污染检索/关联/合并/画像统计四处（review 发现）。
-    白名单 _SINGLE_CHAR_TERMS 里的单字（柴/河）语义单义仍放行（"砍柴"→木材）。
+    白名单里的单字（如"柴"）语义单义仍放行（"砍柴"→木材）。
     """
+    syn = _ACTIVE_ENTITY_SYNONYMS if _ACTIVE_ENTITY_SYNONYMS is not None else _ENTITY_SYNONYMS
+    single = _ACTIVE_SINGLE_CHARS if _ACTIVE_SINGLE_CHARS is not None else _SINGLE_CHAR_TERMS
     found = set()
-    for canon, aliases in _ENTITY_SYNONYMS.items():
-        if any((len(a) >= 2 or a in _SINGLE_CHAR_TERMS) and a in text
+    for canon, aliases in syn.items():
+        if any((len(a) >= 2 or a in single) and a in text
                for a in aliases):
             found.add(canon)
     return found
