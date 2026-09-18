@@ -271,16 +271,14 @@ export interface MemoryReportPayload {
   [key: string]: unknown
 }
 
-/** GET /api/npcs/{pid}/memory/journal?limit=50 —— 整理审计流水（housekeeper 写）。
- *  文件不存在 → 空数组。 */
+/** GET /api/npcs/{pid}/memory-journal?limit=50 —— 整理审计流水（housekeeper 写）。
+ *  ⚠ 后端返回**裸数组** `MemoryJournalEntry[]`，不是 `{ entries: [...] }`。
+ *  曾按对象接 → `journal.entries` 命中 `Array.prototype.entries`（是个函数，非 null）
+ *  → `?? []` 不生效 → 流水恒显示为空。文件不存在 → `[]`。 */
 export interface MemoryJournalEntry {
   at?: string
   trigger?: string
   npc?: string
   actions?: unknown[]
   [key: string]: unknown
-}
-
-export interface MemoryJournalPayload {
-  entries?: MemoryJournalEntry[]
 }

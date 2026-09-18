@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-3.2-9b59b6?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/python-3.10+-purple?style=flat-square" alt="python">
-  <img src="https://img.shields.io/badge/tests-982%20passed-brightgreen?style=flat-square" alt="tests">
+  <img src="https://img.shields.io/badge/tests-1043%20passed-brightgreen?style=flat-square" alt="tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/game-Godot%204.x-orange?style=flat-square" alt="godot">
 </p>
@@ -75,8 +75,9 @@ Then point your game at `http://127.0.0.1:8765`. See **[docs/游戏接入.md](do
 ## Documentation
 
 - [游戏接入](docs/游戏接入.md) — endpoints, curl examples, Godot integration pattern
-- [API 参考](docs/API.md) — full endpoint contract (all 40 endpoints)
+- [API 参考](docs/API.md) — full endpoint contract (all 42 endpoints)
 - [角色制作 — Making NPCs with JSON](docs/角色制作.md) — persona fields, routine table, example
+- [世界声明键](docs/世界声明键.md) — every `_`-prefixed world field + what happens when left undeclared
 - [本地模型接入](docs/本地模型.md) — Ollama, env vars, v4 plan
 - [NPC 大脑架构](docs/NPC大脑架构.md) — the brain itself: roles, memory, safety tiers, capability audit (Chinese)
 - [Web Console](docs/WEB_CONSOLE_架构理解.md) — the developer console (Graph / Characters / Live / Memory / Activity / Playground / Settings)
@@ -86,7 +87,7 @@ Then point your game at `http://127.0.0.1:8765`. See **[docs/游戏接入.md](do
 
 ## Design notes
 
-- **Player orders beat autonomous routines** — and the NPC refuses honestly when resources are depleted ("木材现在弄不到了，采空了")
+- **Player orders beat autonomous routines** — and the NPC refuses honestly when resources are depleted ("木材现在弄不到了，采空了，等它长回来吧" — *reference world wording, declared via `_review_tpl`*)
 - **Anti-hallucination** — factual recall answers come from memory cards verbatim; the LLM context only states world facts, never invented ones
 - **Short-term dialogue history in memory only** — chat logs never pollute the memory cards
 - **Resource regen** — trees grow back (every tick +1 up to cap), matching the game-side 60s respawn
@@ -129,7 +130,7 @@ MIT — see [LICENSE](LICENSE).
                                     │  │  · 每 tick 每 NPC 一步      │  │
                                     │  │  · 日常作息表(加权随机)     │  │
                                     │  │  · 玩家指令优先             │  │
-                                    │  │  · 资源再生                 │  │
+                                    │  │  · 资源回补                 │  │
                                     │  └────────────────────────────┘  │
                                     │  ┌────────────────────────────┐  │
                                     │  │ 对话(LLM,可选)              │  │
@@ -162,8 +163,9 @@ curl -X POST http://127.0.0.1:8765/api/talk \
 ## 文档
 
 - [游戏接入](docs/游戏接入.md)
-- [API 参考](docs/API.md) — 全量 40 条端点契约
+- [API 参考](docs/API.md) — 全量 42 条端点契约
 - [角色制作 — 用 JSON 做 NPC](docs/角色制作.md)
+- [世界声明键](docs/世界声明键.md) — 世界 JSON 的全部声明字段 + 未声明时的三态行为
 - [本地模型接入](docs/本地模型.md)
 - [NPC 大脑架构](docs/NPC大脑架构.md) — 大脑本体：三角色/记忆/安全分级/能力审计与演进路线图
 - [Web Console](docs/WEB_CONSOLE_架构理解.md) — 开发者控制台（Graph/Characters/Live/Memory/Activity/Playground/Settings）
@@ -173,10 +175,10 @@ curl -X POST http://127.0.0.1:8765/api/talk \
 
 ## 设计要点
 
-- **玩家指令 > 自主日常** — 资源采空时诚实拒绝（"木材现在弄不到了，采空了，等它长回来吧"）
+- **玩家指令 > 自主日常** — 资源采空时诚实拒绝（"木材现在弄不到了，采空了，等它长回来吧" —— *该措辞由参考世界经 `_review_tpl` 声明；引擎中性默认是"……{resource}现在弄不到了。"，不含"长回来"这类属于世界的假设*）
 - **防幻觉** — 事实回忆从记忆卡逐字回答；LLM 上下文只放世界事实，禁止编造
 - **短期对话历史只在内存** — 聊天记录绝不污染记忆卡
-- **资源再生** — 树会再长（每 tick +1 到上限），与游戏侧 60 秒重生对齐
+- **资源回补** — 由世界 `_resource_regen` 声明每 tick 回补多少（参考世界 = 1，上限 `_resource_caps`）；**引擎不持有再生设定，未声明则不回补（会真的采空）**
 
 ## 开发工具
 
