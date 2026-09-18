@@ -28,7 +28,7 @@ def build_parser():
     parser.add_argument("--port", type=int, default=8765,
                         help="监听端口(默认 8765; 多世界同开时各占一个端口)")
     parser.add_argument("--world-id", dest="world_id", default="",
-                        help="世界命名空间(如 godot/gta): 独立 store 目录 + 请求 world_id 守卫")
+                        help="世界命名空间(多世界同开时隔离): 独立 store 目录 + 请求 world_id 守卫")
     parser.add_argument("--store-dir", dest="store_dir", default="",
                         help="记忆卡目录(缺省: 有 world-id 用 npc/store_<id>, 否则 npc/store)")
     return parser
@@ -56,7 +56,7 @@ def main(argv=None) -> None:
         mod = import_module(f"npc.adapters.{args.adapter}")
         personas = mod.VILLAGERS
         print(f"已加载适配器角色表: {args.adapter}（{list(personas.keys())}）")
-        # 适配器自定义世界(2026-08-22 GTA): 有 WORLD 属性就用 — 换游戏换世界,零代码
+        # 适配器自定义世界(2026-08-22): 有 WORLD 属性就用 — 换游戏换世界,零代码
         if hasattr(mod, "WORLD"):
             adapter_world = mod.WORLD   # type: ignore[attr-defined]
             print(f"已加载适配器世界: {args.adapter}（{list(adapter_world['locations'].keys())}）")
@@ -83,7 +83,7 @@ def main(argv=None) -> None:
             print(f"警告: 动作清单加载失败({_e}), 使用默认动作")
 
     port = args.port
-    # 多世界隔离: 独立端口 + 独立记忆卡目录（GTA 和 Godot 同开互不打架）
+    # 多世界隔离: 独立端口 + 独立记忆卡目录（多游戏同开互不打架）
     if args.store_dir:
         _store = Path(args.store_dir)
     elif args.world_id:

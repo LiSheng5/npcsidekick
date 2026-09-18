@@ -58,7 +58,7 @@ def load_resource_lexicon_from_world(world: Optional[Dict],
         + 动作清单(manifest)里的 resources 段(经 extra 合并);
     语义:
       - 收集到 ≥1 个资源 → 整表替换默认（游戏声明自己的真相, 不让别游戏的
-        残留词漏进来）; 纯对话世界(GTA 一个资源都没有)→ 回退默认表;
+        残留词漏进来）; 纯对话世界(一个资源都没有)→ 回退默认表;
       - world=None 且 extra 空 → 恢复默认（测试复位用）。
     返回生效词典。
     """

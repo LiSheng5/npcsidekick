@@ -1,7 +1,7 @@
 """
 NPCSidekick — Web 服务（制作者体验优先，参考 AI Town 的 one-command 启动）。
 
-一条命令:  python -m npc.server [--adapter gta] [--port 8765] [--world-id gta]
+一条命令:  python -m npc.server [--adapter <适配器>] [--port 8765] [--world-id <命名空间>]
   - 自动打开浏览器 http://127.0.0.1:8765/ （根路径指到 Web Console `/console/`;
     dist 未构建时返回提示 JSON, 不再回落旧 npc.html — 该页 2026-09-08 已下架）
   - API 全量以代码为准(42 条): 本文件(游戏面) + npc/console_api.py(Console 面);
@@ -9,7 +9,7 @@ NPCSidekick — Web 服务（制作者体验优先，参考 AI Town 的 one-comm
 
 多世界隔离（2026-08-23）: 一个实例服务一个世界。两个游戏同时开 = 起两个实例:
     python -m npc.server --adapter paleolithic --port 8765 --world-id godot
-    python -m npc.server --adapter gta         --port 8766 --world-id gta
+    python -m npc.server --adapter <适配器>    --port 8766 --world-id <命名空间>
   · 各实例独立 store 目录（npc/store_<world_id>）→ 记忆卡永不串世界;
   · 请求带 world_id 且与本实例不符 → 409（客户端接错了线,响亮地失败而不是污染别人记忆）;
   · 不传 world_id 的旧客户端完全兼容（零回归）。
@@ -72,11 +72,11 @@ from npc.console_api import ConsoleContext, mount_console_api
 
 _ALLOWED_ORIGIN_PREFIXES = ("http://127.0.0.1", "http://localhost")
 
-# ── 动态注册(2026-08-22,GTA 前置 #1) —————————————————————
+# ── 动态注册(2026-08-22) —————————————————————
 # 流民层: persistent=false(默认) RAM-only,despawn 反注册即忘
 # 常驻层: persistent=true 反注册落盘,重注册读记忆卡续前缘
 _DYNAMIC_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")   # id 白名单(防路径穿越:store 文件名由 id 拼出)
-MAX_DYNAMIC_NPCS = 200   # 流民上限(防失控;GTA 同步半径内通常 <30)
+MAX_DYNAMIC_NPCS = 200   # 流民上限(防失控;典型同步半径内通常 <30)
 # 程序化人设兜底: 游戏只需传 id(+可选 name/identity/voice 等),缺省字段按路人填
 _DEFAULT_DYNAMIC_PERSONA = {
     "identity": "街上的陌生人",
@@ -101,7 +101,7 @@ SSE_HEARTBEAT_IDLE = 15
 # 版本/特性握手（2026-08-23 §15）: 客户端启动探测一次, 按特性降级 — 加功能不炸老客户端
 BRAIN_VERSION = "2026.08.24"
 # 世界状态 HUD 面板默认集（§16 数据驱动界面）: 世界 JSON 可用 "_hud": {"panels": [...]}
-# 声明本游戏要显示哪些面板（如 GTA 纯对话世界只要 position/activity）;
+# 声明本游戏要显示哪些面板（如纯对话世界只要 position/activity）;
 # 不声明 = 全部面板（旧世界/旧石器世界向后兼容, 行为不变）。未知面板名前端忽略。
 _DEFAULT_HUD_PANELS = ("position", "activity", "stamina", "inventory", "delivered")
 
@@ -360,7 +360,7 @@ def load_village(store_dir: str = "npc/store", personas: Optional[Dict] = None,
 
     personas: {id: persona} 角色表 — 默认角色表（苍/阿黎）；
     传入适配器角色表（如 paleolithic.VILLAGERS）即得到该游戏的村民。
-    world: 适配器自定义世界（2026-08-22 GTA 接入）— 传入则所有 NPC 共用它，
+    world: 适配器自定义世界（2026-08-22 适配器接入）— 传入则所有 NPC 共用它，
     记忆卡里的旧世界快照被替换（与人设以 JSON 为准同理：换游戏不该被旧
     记忆卡的世界快照绑架，否则阿曼达开口就是"你位于村庄"）。
     从记忆卡恢复（若有），否则新建。多 NPC 共用一个世界（AI Town 模式）。
@@ -408,7 +408,7 @@ def _apply_context(world: Dict, context: Optional[Dict]) -> None:
     """游戏→大脑世界同步(2026-08-22): 对话请求捎带的 context 直写世界扩展键(_ 前缀)。
 
     补全"世界真相单向"缺口: 此前大脑活在文本世界,游戏端真实天气/时间/位置进不来。
-    GTA 流民层靠它聊完即弃(不维护镜像世界);Godot 常驻层持续同步同一接口。
+    流民层靠它聊完即弃(不维护镜像世界);常驻层持续同步同一接口。
     可选键: weather("rain"/"festival"/""=晴)、game_hour(0~23)、player_pos(地点/坐标串)
     坏值静默忽略(客户端手滑不炸服务)。
     """
@@ -556,7 +556,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
 
     @app.post("/api/npc/register", dependencies=[Depends(_verify_origin)])
     async def register_npc(request: Request) -> Dict:
-        """动态注册(GTA 前置 #1): ped 随刷随出热注册。幂等 — 重复注册返回 existed。
+        """动态注册: ped 随刷随出热注册。幂等 — 重复注册返回 existed。
 
         body: {persona: {id 必填, name/identity/voice/rules... 可选},
                persistent: false=流民(despawn 即忘)/true=常驻(反注册落盘),
@@ -1083,7 +1083,7 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
             # 排队超时 → SchedulerTimeout → 落回本地规则兜底，绝不卡客户端。
             # §20未决#3 落地(2026-08-25): 排队超时可调(NPC_TALK_QUEUE_TIMEOUT 秒);
             # 缺省/非法值一律 60s —— 默认行为与旧版完全一致;
-            # GTA bat 放宽到 110s(网关慢日实测 100s+, mod HTTP 上限 120s)多吃真 LLM。
+            # 游戏侧 bat 放宽到 110s(网关慢日实测 100s+, mod HTTP 上限 120s)多吃真 LLM。
             try:
                 _talk_timeout = float(os.environ.get("NPC_TALK_QUEUE_TIMEOUT") or 60.0)
             except ValueError:

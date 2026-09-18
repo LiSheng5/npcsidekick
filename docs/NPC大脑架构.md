@@ -664,6 +664,10 @@ avg_wait_ms}`；`/api/version.features.scheduler`（bool）。OFF 时也有该�
 > 五连提交(db2c046→9a61c51)+收尾(42448e8), 全程测试 682→695 passed 零波动。
 > 法务隔离同期完成: GTA 专属八文件经 filter-branch 从待推历史整体剥离,
 > .gitignore 隔离段永久拦截; 完整史备份于本地分支 backup-gta-full-history。
+> **[2026-09-18 更新]** 上述 `backup-gta-full-history` 分支当前已不存在（`git branch -a` 实测）。
+> 同日 GTA5 专属内容已从工作区**整体移出**至仓库外
+> `D:\NPCSidekick\2_GTA5_MOD\engine-side\`（保留原相对路径，可原样搬回；该目录另有 README 说明）。
+> `.gitignore` 隔离段保留作护栏防误回填。**本节其余 GTA 记载为历史记录，不回改。**
 
 ### 23.1 线上 BattlEye 循环排障（详见 gta_bridge.md 附录）
 游戏根目录 `args.txt`(内容 -nobattleye -noBE) 强制禁反作弊 + 无签名 `xinput1_4.dll`
