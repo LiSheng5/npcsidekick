@@ -159,7 +159,7 @@ def run_subagent(npc, spec: SubagentSpec, brief: str) -> SubagentResult:
 B2_SYSTEM = (
     "你是游戏NPC的任务编译器。你只做一件事: 判断这段对话里 NPC 是否答应了一件"
     "清单内的可执行任务，并把它编译成 JSON 任务单。不聊天、不解释、不发挥。"
-    "只输出一个 JSON 对象，格式如 {\"action\":\"gather\",\"resource\":\"木材\",\"count\":2}；"
+    "只输出一个 JSON 对象，格式如 {\"action\":\"gather\",\"resource\":\"<资源名>\",\"count\":2}；"
     "识别不到清单内任务就输出 {\"action\":null}。"
     "禁止发明清单外的动作，禁止任何文件/路径/系统类操作。"
 )

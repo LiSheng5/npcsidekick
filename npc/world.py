@@ -49,7 +49,9 @@ def default_world() -> Dict:
     """
     return {
         "_tick": 0,           # 自主循环推进的 tick 计数（下划线 = 扩展字段，非契约语义）
-        "_resource_caps": {"木材": 999, "浆果": 999, "石头": 999},   # 资源再生上限（旧记忆卡缺失时兜底 999）
+        "_resource_caps": {"木材": 999, "浆果": 999, "石头": 999},   # 资源回补上限（旧记忆卡缺失时兜底 999）
+        # 资源回补速率(2026-09-18): 由世界声明 —— 引擎只按此值回补，未声明 = 不回补。
+        "_resource_regen": 1,
         "actors": {},         # NPC 角色槽: {id: {position, inventory}}
         "protagonist": {"position": "村庄", "name": "主角"},
         # T-03(2026-09-16): 制作台地点 + 出生点 —— 由**世界声明**（引擎不硬编码游戏地名）。
@@ -61,6 +63,36 @@ def default_world() -> Dict:
         # 观察不受影响：Console 打开时它本身就是客户端（2 秒轮询 `/api/state`）→ 自动恢复推进。
         # 想要"玩家退出后世界继续演化"（元宇宙模式）→ 改成 "free"。
         "_autonomy": "game",
+        # 天气文案(2026-09-18): 参考世界的天气描述。引擎里 observe() 只读本声明，
+        # 不再硬编码任何文案（game-agnostic 红线）。换游戏改这里，或整体省掉。
+        "_weather_text": {
+            "rain": "天上下着雨,雨点砸在树叶上噼啪响。",
+            "festival": "今天是部落的节庆日,营地热闹得很。",
+        },
+        # 同义词族(2026-09-18): 检索召回用的词表 —— 引擎只按声明驱动，不硬编码游戏词。
+        # 换游戏改这里；整体省掉 = 没有同义召回（只有分词原词匹配），不被本游戏词表污染。
+        "_entity_synonyms": {
+            "木材": ["木材", "木头", "柴", "柴火", "木料", "原木", "木", "树"],
+            "浆果": ["浆果", "果子", "野果", "果实"],
+            "石头": ["石头", "岩石", "石块", "石"],
+            "工具": ["工具", "木石工具", "石器"],
+            "麻绳": ["麻绳", "结实麻绳", "绳子", "绳"],
+            "村庄": ["村庄", "村子", "村里", "家"],
+            "森林": ["森林", "树林", "林子"],
+            "矿洞": ["矿洞", "矿山", "洞里"],
+            "河边": ["河边", "河岸", "河"],
+            "苍": ["苍", "老猎手", "猎手"],
+            "阿黎": ["阿黎", "采集者"],
+            "主角": ["主角", "玩家"],
+        },
+        "_entity_single_chars": ["柴", "河"],
+        # 审查拒绝语(2026-09-18): 参考世界的措辞 —— 引擎只留中性默认，不硬编码本游戏台词。
+        # 换游戏声明自己的措辞，或整体省掉走中性默认。键: disallowed/forbidden/exhausted
+        "_review_tpl": {
+            "disallowed": "……这个我不会做（不允许的动作：{action}）。",
+            "forbidden": "……这个涉及我不该碰的东西。",
+            "exhausted": "……{resource}现在弄不到了，采空了，等它长回来吧。",
+        },
         "locations": {
             "村庄": {
                 "desc": "主角居住的小村庄，安静祥和。",
@@ -126,11 +158,12 @@ def observe(world: Dict, who: str = "cang") -> str:
     elif st < 60:
         lines.append("你有些喘,体力过半。")
     # 天气/真实时间感知(2026-08-22): 游戏经 /api/talk context 同步;未同步时静默(文本世界自洽)
+    # 天气文案(2026-09-18): 由世界声明 `_weather_text` 给出 —— 引擎层不出现游戏专属文案。
+    # 未声明该键 / 该天气无对应条目 = 不追加描述行（制作者的沉默 = 不要我的文案）。
     weather = world.get("_weather", "")
-    if weather == "rain":
-        lines.append("天上下着雨,雨点砸在树叶上噼啪响。")
-    elif weather == "festival":
-        lines.append("今天是部落的节庆日,营地热闹得很。")
+    _weather_text = (world.get("_weather_text") or {}).get(weather)
+    if _weather_text:
+        lines.append(str(_weather_text))
     gh = world.get("_game_hour")
     if gh is not None and (gh >= 22 or gh < 6):
         lines.append("夜已经很深了。")
@@ -196,6 +229,21 @@ def autonomy_mode(world: Dict) -> str:
     if mode in ("free", "game"):
         return mode
     return "free"
+
+
+def regen_rate(world: Dict) -> int:
+    """资源回补速率 —— **声明驱动**（`_resource_regen`，2026-09-18）。
+
+    世界用 `_resource_regen` 声明"每 tick 各地点资源向 `_resource_caps` 回补多少"
+    （示例世界 = 1）。**引擎层不持有任何再生设定** —— 资源会不会再长属于游戏经济设计，
+    不是引擎能力。
+
+    未声明 / 非正整数 / ≤0 → **0 = 不回补**（制作者的沉默 = 不要资源再生）。
+    """
+    rate = world.get("_resource_regen")
+    if isinstance(rate, bool):      # bool 是 int 子类，显式挡掉，防 True 被当成 1
+        return 0
+    return rate if isinstance(rate, int) and rate > 0 else 0
 
 
 def apply_action(world: Dict, action: str, params: Dict, who: str = "cang") -> Tuple[Dict, bool, str]:

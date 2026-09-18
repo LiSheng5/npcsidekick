@@ -354,6 +354,34 @@ def _load_card_world(pid: str, store_dir: str) -> Optional[Dict]:
         return None
 
 
+# 声明机制引入后新增的世界声明键（2026-09-18）—— 迁移用，按需增补。
+_MIGRATED_DECL_KEYS = ("_resource_regen", "_entity_synonyms",
+                       "_entity_single_chars", "_weather_text", "_review_tpl")
+
+
+def _migrate_world_declarations(world: Dict) -> List[str]:
+    """迁移补全（**非游戏设定**）: 给"声明机制引入前"的存档补上缺失的声明键。
+
+    为什么需要: `NPC.load` 原样取记忆卡里的 `world`，不做字段补齐；而新机制一律
+    按"世界已加载但未声明 → 空"处理（三态约定）。老存档因此会静默失去资源回补
+    与同义召回 —— 那是回归，不是设计意图。
+
+    做法: 只补**键完全缺失**的世界，值取参考世界 `default_world()` 的声明（= 旧行为）。
+    世界已声明该键（哪怕声明成 `0` / 空表）→ 一律不覆盖，尊重制作者意图。
+    **仅内存注入**: 不写盘、不动用户文件；函数幂等，重启重算同样结果。
+
+    返回本次补进去的键名列表（便于日志/测试断言）。
+    """
+    from npc.world import default_world
+    ref = default_world()
+    filled: List[str] = []
+    for key in _MIGRATED_DECL_KEYS:
+        if key not in world and key in ref:
+            world[key] = ref[key]
+            filled.append(key)
+    return filled
+
+
 def load_village(store_dir: str = "npc/store", personas: Optional[Dict] = None,
                  world: Optional[Dict] = None):
     """加载示例村庄: 共享世界 + 全部示例 NPC。
@@ -401,6 +429,8 @@ def load_village(store_dir: str = "npc/store", personas: Optional[Dict] = None,
     # tick_round 会遍历 world["actors"] 全部槽做 npcs[actor_id] 索引 → 孤儿槽 KeyError → 全村冻结。
     for orphan in [a for a in shared["actors"] if a not in loaded]:
         del shared["actors"][orphan]
+    # 迁移补全(2026-09-18): 老存档缺声明键 → 补参考默认, 维持旧行为(见函数 docstring)。
+    _migrate_world_declarations(shared)
     return shared, loaded
 
 

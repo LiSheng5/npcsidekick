@@ -14,14 +14,14 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional
 
-from npc.world import apply_action, craft_station, find_path
+from npc.world import apply_action, craft_station, find_path, regen_rate
 
 # 失败项冷却 tick 数（资源采尽后不让 NPC 反复撞同一堵墙）
 BLOCK_AFTER_FAIL_TICKS = 5
 # 休息时碰面说话的概率（说台词 = 只写 log，零代价 — 游戏侧差分显示气泡）
 CHAT_CHANCE = 0.5
-# 资源再生: 每 tick 各地点资源向初始值回补（零惩罚哲学 — 游戏侧树 60s 重生,大脑侧同构）
-RESOURCE_REGEN_PER_TICK = 1
+# 资源回补(2026-09-18): 速率由世界声明 `_resource_regen` 给出（见 world.regen_rate）——
+# 引擎层不持有"资源会再生"这个游戏经济设定。这里只留上限兜底：
 _RESOURCE_CAP_FALLBACK = 999   # 旧记忆卡无 _resource_caps 时用初始值兜底
 
 # ── 耐力系统(2026-08-22) ——————————————————————————————
@@ -511,13 +511,20 @@ def _tick_one(npc, world: Dict, rng: random.Random) -> Dict:
 
 
 def _regen_resources(world: Dict) -> None:
-    """资源再生: 各地点资源向初始值回补（树会再长，浆果会再结 — 不会采空）。"""
+    """资源回补: 各地点资源向 `_resource_caps` 回补，速率由世界声明 `_resource_regen`。
+
+    未声明（速率 0）→ 直接返回 —— 世界不声明就真的会采空。这既让"资源枯竭"
+    成为可验证的真实状态，也保证引擎层零游戏经济设定。
+    """
+    step = regen_rate(world)
+    if step <= 0:
+        return
     caps = world.get("_resource_caps", {})
     for loc in world["locations"].values():
         for res, count in loc.get("resources", {}).items():
             cap = caps.get(res, _RESOURCE_CAP_FALLBACK)
             if count < cap:
-                loc["resources"][res] = min(cap, count + RESOURCE_REGEN_PER_TICK)
+                loc["resources"][res] = min(cap, count + step)
 
 
 def tick_round(world: Dict, npcs: Dict, rng: Optional[random.Random] = None) -> Dict[str, Dict]:

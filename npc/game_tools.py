@@ -72,7 +72,7 @@ class MoveTool(ToolProtocol):
             description="移动到另一个地点（只能去可到达的地方）。",
             parameters={
                 "properties": {
-                    "dest": {"type": "string", "description": "目的地名称，如 '森林'"},
+                    "dest": {"type": "string", "description": "目的地名称（用世界里的地点名）"},
                 },
                 "required": ["dest"],
             },
@@ -108,7 +108,7 @@ class GatherTool(ToolProtocol):
             description="采集当前地点的资源到背包（每次 1 个）。",
             parameters={
                 "properties": {
-                    "resource": {"type": "string", "description": "要采集的资源名，如 '木材'"},
+                    "resource": {"type": "string", "description": "要采集的资源名（用世界里的资源名）"},
                 },
                 "required": ["resource"],
             },
@@ -144,7 +144,7 @@ class DeliverTool(ToolProtocol):
             description="把背包里的物资交付给主角（主角必须在你身边）。",
             parameters={
                 "properties": {
-                    "resource": {"type": "string", "description": "要交付的资源名，如 '木材'"},
+                    "resource": {"type": "string", "description": "要交付的资源名（用世界里的资源名）"},
                 },
                 "required": ["resource"],
             },
