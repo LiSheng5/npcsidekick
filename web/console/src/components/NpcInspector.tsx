@@ -121,9 +121,6 @@ export function NpcInspector({
         >
           Memory
         </button>
-        <button className="btn" disabled title="Step 9 Playground 起开放">
-          Start Dialogue
-        </button>
       </div>
     </aside>
   )

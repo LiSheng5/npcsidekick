@@ -991,6 +991,31 @@ select {
   color: var(--text-faint);
 }
 
+.ev-type.task {
+  color: var(--text-secondary);
+  border-color: rgba(100, 116, 139, 0.25);
+  background: rgba(100, 116, 139, 0.06);
+}
+
+.ev-type.subagent {
+  color: var(--purple);
+  border-color: rgba(124, 58, 237, 0.25);
+  background: rgba(124, 58, 237, 0.06);
+}
+
+/* 任务事件的状态徽章（started / done） */
+.chip.started {
+  color: var(--amber);
+  border-color: rgba(180, 83, 9, 0.25);
+  background: rgba(180, 83, 9, 0.06);
+}
+
+.chip.done {
+  color: var(--green);
+  border-color: rgba(22, 163, 74, 0.25);
+  background: rgba(22, 163, 74, 0.06);
+}
+
 .ev-who {
   flex: none;
   font-weight: 600;

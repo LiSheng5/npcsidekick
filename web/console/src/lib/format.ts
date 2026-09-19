@@ -10,10 +10,6 @@ export function stateColor(state?: string): string {
   return PALETTE[h % PALETTE.length]
 }
 
-export function titleCase(s: string): string {
-  return s.length ? s[0].toUpperCase() + s.slice(1) : s
-}
-
 export function relativeTime(ts?: number): string {
   if (!ts) return ''
   const diff = Date.now() / 1000 - ts

@@ -185,13 +185,17 @@ export function LivePage() {
             actors.map(([id, a]) => (
               <div className="actor-card card" key={id}>
                 <div className="actor-top">
-                  <span className="dot" style={{ background: stateColor(a.state) }} />
+                  {shown('state') ? (
+                    <span className="dot" style={{ background: stateColor(a.state) }} />
+                  ) : null}
                   <span className="actor-name">{names[id] || id}</span>
                   <code>{id}</code>
-                  <span className="actor-state">{a.state ?? '—'}</span>
+                  {shown('state') ? <span className="actor-state">{a.state ?? '—'}</span> : null}
                 </div>
 
-                {a.activity ? <div className="actor-line">{a.activity}</div> : null}
+                {shown('activity') && a.activity ? (
+                  <div className="actor-line">{a.activity}</div>
+                ) : null}
 
                 {shown('position') && a.position ? (
                   <div className="actor-kv">

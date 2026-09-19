@@ -28,7 +28,7 @@ python -m npc.server                 # 打开 http://127.0.0.1:8765/
 
 ```
 src/
-  pages/         Graph · Settings（Characters/Live/Memory/Activity/Playground 按 Step 5~11 开放）
+  pages/         Graph · Characters · Live · Memory · Activity · Playground · Settings（7 页全开）
   components/    RelationshipGraph · NpcNode · NpcInspector · StateBlock
   api/client.ts  与 Runtime 的全部 HTTP 调用
   types.ts       与后端响应一一对应的类型

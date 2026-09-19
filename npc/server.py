@@ -103,7 +103,7 @@ BRAIN_VERSION = "2026.08.24"
 # 世界状态 HUD 面板默认集（§16 数据驱动界面）: 世界 JSON 可用 "_hud": {"panels": [...]}
 # 声明本游戏要显示哪些面板（如纯对话世界只要 position/activity）;
 # 不声明 = 全部面板（旧世界/旧石器世界向后兼容, 行为不变）。未知面板名前端忽略。
-_DEFAULT_HUD_PANELS = ("position", "activity", "stamina", "inventory", "delivered")
+_DEFAULT_HUD_PANELS = ("position", "activity", "state", "stamina", "inventory", "delivered")
 
 
 def _tick_interval() -> float:
