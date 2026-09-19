@@ -161,6 +161,19 @@ def lessons_enabled() -> bool:
     return env_flag("NPC_LESSONS")
 
 
+def availability_enabled() -> bool:
+    """决策层可得性探针开关（现读现切，家规；**默认关**）：NPC_AVAILABILITY=1 时生效。
+
+    关（默认）= 与旧版逐字节一致：候选不过滤，采不到由**规划层**兜底
+      （`_plan_steps` 返回 None → 记一条失败 → 冷却 5 tick → 撞过墙就别连着撞）。
+
+    开 = 组装候选时跳过"当前无地可采"的 gather 项 —— NPC 不再每 5 个 tick 撞一次墙
+      （尝试 → 失败 → 冷却 → 冷了再试），记忆里也不再堆"没找到地方"的假失败。
+      判定口径与 `_plan_steps` 的 gather 分支完全一致，两层不会打架。
+    """
+    return env_flag("NPC_AVAILABILITY")
+
+
 def _lesson_factor(npc, world: Dict, item: Dict) -> float:
     """作用域命中的反思 lesson 对这件活的权重乘子（纯数值，零 LLM）。
 
@@ -248,6 +261,27 @@ def _pick_rules_line(persona: Dict, rng: random.Random) -> str:
     if replies:
         return rng.choice(list(replies.values()))
     return rules.get("fallback", "嗯。")
+
+
+def _item_available(npc, world: Dict, item: Dict) -> bool:
+    """该候选当前是否可行 —— 只检查"以资源为参数"的 gather（决策层可得性探针用）。
+
+    判定口径与 `_plan_steps` 的 gather 分支**完全一致**（同一个 `resource_site`、
+    同一处位置来源 `world["actors"][id]["position"]`）—— 保证"决策层放行 = 规划层
+    能编排"，不会出现一层说行、另一层说不行。
+
+    非 gather 项不在此判定：rest / say 无资源概念；craft 的材料由规划层查。
+    位置槽读不到（理论上不该发生）→ 判为可行，把决定权交回规划层，不在这里猜。
+    """
+    if item.get("action") != "gather":
+        return True
+    res = item.get("resource")
+    if not isinstance(res, str) or not res:
+        return True                     # 缺 resource（loader 明许）→ 交给规划层报错
+    actor = (world.get("actors") or {}).get(npc.actor_id)
+    if not isinstance(actor, dict) or not actor.get("position"):
+        return True
+    return resource_site(world, actor["position"], res) is not None
 
 
 def resource_site(world: Dict, current: str, resource: str) -> Optional[str]:
@@ -375,12 +409,15 @@ def _choose_routine_item(npc, world: Dict, rng: random.Random) -> Optional[Dict]
     if not routine and not goal_mode:
         return None
     now = world["_tick"]
+    probe = availability_enabled()          # 决策层可得性探针（默认关 = 不过滤）
     candidates, weights = [], []
     for item in routine:
         if not isinstance(item, dict):
             continue   # 运行时防线: 手改 JSON 出错 → 跳过该项，NPC 顶多不动
         if npc._blocked.get((item.get("action"), item.get("resource")), 0) > now:
             continue
+        if probe and not _item_available(npc, world, item):
+            continue   # 现在采不到就别排它 —— 免得白撞一次 + 堆一条假失败
         candidates.append(item)
         w = item.get("weight", 1)
         base = w if isinstance(w, (int, float)) and w > 0 else 1
@@ -393,6 +430,8 @@ def _choose_routine_item(npc, world: Dict, rng: random.Random) -> Optional[Dict]
                 continue                  # 这个活 routine 里已有 → 只靠 _goal_factor 抬权
             if npc._blocked.get(_item_key(gi), 0) > now:
                 continue                  # 目标也吃冷却：撞过墙的活别连着撞
+            if probe and not _item_available(npc, world, gi):
+                continue                  # 探针对目标绑定的活同样生效
             candidates.append(gi)
             weights.append(_dynamic_weight(npc, world, gi, float(gi["weight"])))
     if not candidates:

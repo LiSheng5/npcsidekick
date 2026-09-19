@@ -58,6 +58,7 @@ class TestFlagsObservability:
         "goals": "NPC_GOALS",
         "lessons": "NPC_LESSONS",
         "goal_relevance": "NPC_GOAL_RELEVANCE",
+        "availability": "NPC_AVAILABILITY",
         "memory_dedup": "NPC_MEMORY_DEDUP",
         "safety_gate": "NPC_SAFETY_GATE",
     }
