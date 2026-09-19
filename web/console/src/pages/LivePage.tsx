@@ -98,6 +98,8 @@ export function LivePage() {
 
   const actors = Object.entries(state?.actors ?? {})
   const shown = (key: string) => (state?.panels ?? []).includes(key)
+  // 世界级交付累计（后端默认面板里有 delivered，此前前端从未渲染 —— 空转面板）
+  const delivered = Object.entries(state?.delivered ?? {})
   const mode = stats?.mode ?? ''
 
   const switchMode = async (next: string) => {
@@ -226,6 +228,19 @@ export function LivePage() {
               </div>
             ))
           )}
+
+          {shown('delivered') && delivered.length ? (
+            <div className="actor-card card">
+              <div className="sec-title">已交付给主角</div>
+              <div className="chips">
+                {delivered.map(([k, v]) => (
+                  <span className="chip" key={k}>
+                    {k} · {String(v)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="live-feed">
