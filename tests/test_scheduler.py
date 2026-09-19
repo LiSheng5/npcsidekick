@@ -1,9 +1,23 @@
-"""调度测试 — 主角互动优先 + 自主 tick 循环（村民日常）。"""
+"""调度测试 — 主角互动优先 + 自主 tick 循环（村民日常）。
+
+⚠ 本文件全部用例钉的是**决策层可得性探针关态**（= 旧行为，见下方 autouse fixture）。
+   探针（NPC_AVAILABILITY）打开后，采不到的活会在**候选阶段**就被跳过，
+   与这里断言的"抽中 → 规划期优雅放弃 → 记一条失败 → 冷却 5 tick"不是同一套行为；
+   开态行为锚在 `tests/test_availability_probe.py`。
+"""
 import random
+
+import pytest
 
 from npc.npc import NPC
 from npc.scheduler import BLOCK_AFTER_FAIL_TICKS, interaction_priority, tick_round
 from npc.world import default_world
+
+
+@pytest.fixture(autouse=True)
+def _probe_off(monkeypatch):
+    """强制探针关态 —— 本文件的用例都是为"旧行为"写的，不该受环境变量影响。"""
+    monkeypatch.delenv("NPC_AVAILABILITY", raising=False)
 
 
 def _village_world():

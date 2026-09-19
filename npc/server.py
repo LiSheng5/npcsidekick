@@ -59,8 +59,8 @@ from npc.reviewer import (approval_table, set_approval, get_manifest,
                           load_manifest, manifest_is_default,
                           parse_manifest_doc, set_manifest_places,
                           set_manifest_resources, get_manifest_resources)
-from npc.scheduler import (SCHED, P_TALK, SchedulerTimeout, goals_enabled,
-                            lessons_enabled, tick_round)
+from npc.scheduler import (SCHED, P_TALK, SchedulerTimeout, availability_enabled,
+                            goals_enabled, lessons_enabled, tick_round)
 from npc.world import autonomy_mode
 
 from npc.tts import available as tts_available
@@ -1056,6 +1056,9 @@ def create_npc_server(npcs: Optional[Dict[str, NPC]] = None,
                     # P-6(2026-09-16): 检索是否按"与活动目标的相关度"加分
                     # （NPC_GOAL_RELEVANCE，默认关；关时与旧版逐字节同分）
                     "goal_relevance": goal_relevance_enabled(),
+                    # 决策层可得性探针(2026-09-19): 候选是否过滤掉"当前采不到"的活
+                    # （NPC_AVAILABILITY，默认关；关时候选不过滤 = 与旧版逐字节一致）
+                    "availability": availability_enabled(),
                     "approval_policy": os.environ.get("NPC_APPROVAL_POLICY", "auto"),
                     "dialogue_model": os.environ.get("NPC_DIALOGUE_MODEL",
                                                      "deepseek-v4-flash"),
