@@ -266,7 +266,7 @@ export function CharacterEditor({ persona, isNew, onBack, onSaved }: Props) {
               <textarea
                 className="input"
                 rows={3}
-                placeholder={'每行一条，如：\n修好渡口 = 3'}
+                placeholder={'每行一条，如：\n备齐物资 = 3'}
                 value={kvToText(draft.goals)}
                 onChange={(e) =>
                   set('goals', textToKv(e.target.value) as Persona['goals'])
@@ -291,7 +291,7 @@ export function CharacterEditor({ persona, isNew, onBack, onSaved }: Props) {
               <textarea
                 className="input"
                 rows={3}
-                placeholder={'每行一条，如：\n给木材 = 好，我去砍'}
+                placeholder={'每行一条，如：\n帮我个忙 = 好，我来办'}
                 value={kvToText(rules.replies)}
                 onChange={(e) =>
                   set('rules', { ...rules, replies: textToKv(e.target.value) as never })

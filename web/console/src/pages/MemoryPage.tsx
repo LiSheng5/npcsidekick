@@ -201,7 +201,7 @@ export function MemoryPage({ focus }: { focus?: string }) {
 
       {query ? (
         <div className="hint search-hint">
-          检索模式：按加权相关度（时效 × 0.5 + 相关度 × 3 + 重要度 × 2）召回最多 20 条，
+          检索模式：按加权相关度（时效 / 相关度 / 重要度加权）召回相关记忆，
           <b>不是</b>全量过滤 —— 显示条数少于卡上总数是正常的。
         </div>
       ) : null}
@@ -352,7 +352,7 @@ function MemoryComposer({
           className="input"
           rows={2}
           value={content}
-          placeholder="例如：玩家把最后一块铁料让给了我"
+          placeholder="例如：有人把最后一份口粮让给了我"
           onChange={(e) => setContent(e.target.value)}
         />
       </div>
