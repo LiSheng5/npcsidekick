@@ -35,3 +35,18 @@ web/console/node_modules/
 web/console/dist/
 web/console/dist-ssr/
 *.tsbuildinfo
+
+# ── 商议/协作文档（内部过程产物，不入公开仓库）──
+# 这类文档是"过程"而非"产品"：方案稿/设计稿/评审报告/待办台账/审计快照等。
+# 归档在仓库外 D:/NPCSidekick/_协作文档/（保留仓库内相对路径，可原样搬回）。
+docs/待办与缺口清单*.md
+docs/*_方案稿.md
+docs/*_设计稿.md
+docs/评审/
+docs/全面审查报告*.md
+docs/同类项目调研*.md
+docs/NPC_RUNTIME_AUDIT.md
+docs/WEB_CONSOLE_架构理解.md
+docs/本地模型.md
+docs/参考_agent好货/
+docs/任务书*.md

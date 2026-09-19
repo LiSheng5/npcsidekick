@@ -78,9 +78,8 @@ Then point your game at `http://127.0.0.1:8765`. See **[docs/游戏接入.md](do
 - [API 参考](docs/API.md) — full endpoint contract (all 42 endpoints)
 - [角色制作 — Making NPCs with JSON](docs/角色制作.md) — persona fields, routine table, example
 - [世界声明键](docs/世界声明键.md) — every `_`-prefixed world field + what happens when left undeclared
-- [本地模型接入](docs/本地模型.md) — Ollama, env vars, v4 plan
 - [NPC 大脑架构](docs/NPC大脑架构.md) — the brain itself: roles, memory, safety tiers, capability audit (Chinese)
-- [Web Console](docs/WEB_CONSOLE_架构理解.md) — the developer console (Graph / Characters / Live / Memory / Activity / Playground / Settings)
+- [Web Console](docs/Console架构.md) — the developer console: architecture, pages, data models, red lines
 - [协议契约](engine-clients/common/PROTOCOL.md) — game-side protocol v1 (capability negotiation + mirror face)
 - [ARCHITECTURE.md](ARCHITECTURE.md) — agent engine internals
 - [QUICKSTART.md](QUICKSTART.md) — the underlying agent engine CLI
@@ -166,9 +165,8 @@ curl -X POST http://127.0.0.1:8765/api/talk \
 - [API 参考](docs/API.md) — 全量 42 条端点契约
 - [角色制作 — 用 JSON 做 NPC](docs/角色制作.md)
 - [世界声明键](docs/世界声明键.md) — 世界 JSON 的全部声明字段 + 未声明时的三态行为
-- [本地模型接入](docs/本地模型.md)
 - [NPC 大脑架构](docs/NPC大脑架构.md) — 大脑本体：三角色/记忆/安全分级/能力审计与演进路线图
-- [Web Console](docs/WEB_CONSOLE_架构理解.md) — 开发者控制台（Graph/Characters/Live/Memory/Activity/Playground/Settings）
+- [Web Console](docs/Console架构.md) — 开发者控制台：架构、页面、数据模型与红线
 - [协议契约](engine-clients/common/PROTOCOL.md) — 游戏侧协议 v1（能力协商 + 镜像面）
 - [ARCHITECTURE.md](ARCHITECTURE.md) — agent 引擎内部设计
 - [QUICKSTART.md](QUICKSTART.md) — 底层 agent 引擎 CLI
