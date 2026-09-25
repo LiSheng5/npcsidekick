@@ -1,100 +1,252 @@
-"""语音系统测试 — 音色映射 / 端点形状 / 降级安全（不依赖真实 edge-tts）。"""
+"""语音系统测试 —— 音色映射 / SSE audio 帧 / 独立端点 / 降级安全（零网络）。
+
+不依赖真实 edge-tts：`tts.available` 与 `tts.synthesize` 一律 monkeypatch。
+"""
+from __future__ import annotations
+
+import asyncio
 import base64
+import json
 
 import pytest
-from fastapi.testclient import TestClient
 
-from npc.npc import NPC
-from npc.server import create_npc_server
-from npc.tts import DEFAULT_VOICE, to_base64, voice_for
+import server
+import tts
 
 
-class TestVoiceFor:
-    """音色映射: persona["voice"] > 默认表 > 全局默认。"""
-
-    def test_default_mapping(self):
-        assert voice_for({"id": "cang"}, "cang") == "zh-CN-YunjianNeural"
-        assert voice_for({"id": "ali"}, "ali") == "zh-CN-XiaoxiaoNeural"
-        assert voice_for({"id": "x"}, "x") == DEFAULT_VOICE
-
-    def test_persona_override(self):
-        assert voice_for({"id": "cang", "voice": "zh-CN-XiaoyiNeural"}, "cang") == "zh-CN-XiaoyiNeural"
+CAPS = {"mod": "sims4", "actions": [
+    {"name": "cook", "desc": "用厨房做饭", "params": {"dish": "菜名(字符串)"}}]}
 
 
-class TestToBase64:
-    def test_roundtrip(self):
-        raw = b"\x00\x01\x02abc"
-        assert base64.b64decode(to_base64(raw)) == raw
+def _frames(res) -> list:
+    """把 SSE 响应体解析成帧列表。"""
+    out = []
+    for line in res.text.splitlines():
+        if line.startswith("data: "):
+            out.append(json.loads(line[6:]))
+    return out
 
 
-@pytest.fixture
-def client():
-    npc = NPC(store_dir="npc/store_test")
-    npc.use_llm = False
-    return TestClient(create_npc_server({"cang": npc}))
+def _types(res) -> list:
+    return [f["type"] for f in _frames(res)]
 
 
-class TestTalkWithVoice:
-    """语音 = 按需输出通道: 默认纯文本（零回归），带 voice=true 才合成。"""
+# ── 音色映射 / 编解码 ────────────────────────────────────
 
-    def test_talk_default_no_audio(self, client, monkeypatch):
-        import npc.server as srv
-        monkeypatch.setattr(srv, "tts_available", lambda: True)   # 即便已安装，默认也不合成
-        r = client.post("/api/talk", json={"message": "你好"})
-        assert r.status_code == 200
-        assert "audio" not in r.json()
-
-    def test_talk_with_voice_returns_audio(self, client, monkeypatch):
-        import npc.server as srv
-
-        async def fake_synth(text, voice):
-            return b"fake-mp3"
-
-        monkeypatch.setattr(srv, "tts_available", lambda: True)
-        monkeypatch.setattr(srv, "tts_synthesize", fake_synth)
-        r = client.post("/api/talk", json={"message": "你好", "voice": True})
-        assert r.status_code == 200
-        data = r.json()
-        assert data["reply"]
-        assert "audio" in data
-        assert base64.b64decode(data["audio"]) == b"fake-mp3"
-
-    def test_talk_voice_failure_falls_back_text(self, client, monkeypatch):
-        import npc.server as srv
-
-        async def failing_synth(text, voice):
-            raise RuntimeError("edge-tts 挂了")
-
-        monkeypatch.setattr(srv, "tts_available", lambda: True)
-        monkeypatch.setattr(srv, "tts_synthesize", failing_synth)
-        r = client.post("/api/talk", json={"message": "你好", "voice": True})
-        assert r.status_code == 200
-        assert "audio" not in r.json()   # 语音失败 → 纯文本保底，不卡对话
+def test_voice_for_persona_overrides_default():
+    assert tts.voice_for({"voice": "zh-CN-YunjianNeural"}) == "zh-CN-YunjianNeural"
+    assert tts.voice_for({"voice": "  zh-CN-XiaoyiNeural  "}) == "zh-CN-XiaoyiNeural"
 
 
-class TestTtsEndpoint:
-    """独立 /api/tts: 给任意文本配音。"""
+def test_voice_for_falls_back_to_global_default():
+    assert tts.voice_for({}) == tts.DEFAULT_VOICE
+    assert tts.voice_for({"voice": ""}) == tts.DEFAULT_VOICE
+    assert tts.voice_for({"voice": 123}) == tts.DEFAULT_VOICE
+    assert tts.voice_for(None) == tts.DEFAULT_VOICE
 
-    def test_tts_503_without_package(self, client, monkeypatch):
-        import npc.server as srv
-        monkeypatch.setattr(srv, "tts_available", lambda: False)
-        r = client.post("/api/tts", json={"text": "你好"})
-        assert r.status_code == 503
 
-    def test_tts_returns_audio(self, client, monkeypatch):
-        import npc.server as srv
+def test_to_base64_roundtrip():
+    raw = b"\x00\x01\x02abc"
+    assert base64.b64decode(tts.to_base64(raw)) == raw
 
-        async def fake_synth(text, voice):
-            return b"fake-mp3"
 
-        monkeypatch.setattr(srv, "tts_available", lambda: True)
-        monkeypatch.setattr(srv, "tts_synthesize", fake_synth)
-        r = client.post("/api/tts", json={"text": "你好"})
-        assert r.status_code == 200
-        assert base64.b64decode(r.json()["audio"]) == b"fake-mp3"
+def test_synthesize_empty_text_returns_none():
+    """空文本不合成、也不碰 edge-tts（零网络）。"""
+    assert asyncio.run(tts.synthesize("   ", tts.DEFAULT_VOICE)) is None
 
-    def test_tts_empty_text_400(self, client, monkeypatch):
-        import npc.server as srv
-        monkeypatch.setattr(srv, "tts_available", lambda: True)
-        r = client.post("/api/tts", json={"text": "   "})
-        assert r.status_code == 400
+
+# ── /api/talk 的 audio 帧 ────────────────────────────────
+
+def test_talk_default_has_no_audio(tmp_store, write_persona, make_app_client,
+                                   make_provider, monkeypatch):
+    """默认纯文本（零回归）—— 即便 edge-tts 可用也不合成。"""
+    monkeypatch.setattr(tts, "available", lambda: True)
+    write_persona("cang")
+    client = make_app_client(provider=make_provider(turns=[{"text": "行啊。"}]))
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好"})
+
+    assert res.status_code == 200
+    types = _types(res)
+    assert "audio" not in types
+    assert types[-1] == "done"
+
+
+def test_talk_with_voice_appends_audio_frame(tmp_store, write_persona, make_app_client,
+                                             make_provider, monkeypatch):
+    """voice=true → done 之前多一个 audio 帧，音色取自 persona["voice"]。"""
+    seen = {}
+
+    async def fake_synth(text, voice):
+        seen["text"], seen["voice"] = text, voice
+        return b"fake-mp3"
+
+    monkeypatch.setattr(tts, "available", lambda: True)
+    monkeypatch.setattr(tts, "synthesize", fake_synth)
+    write_persona("cang", voice="zh-CN-YunjianNeural")
+    client = make_app_client(provider=make_provider(turns=[{"text": "行啊。"}]))
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好", "voice": True})
+
+    frames = _frames(res)
+    assert [f["type"] for f in frames][-2:] == ["audio", "done"]
+    audio = frames[-2]
+    assert base64.b64decode(audio["audio"]) == b"fake-mp3"
+    assert audio["voice"] == "zh-CN-YunjianNeural"
+    assert seen == {"text": "行啊。", "voice": "zh-CN-YunjianNeural"}
+
+
+def test_talk_voice_synthesis_failure_falls_back_to_text(tmp_store, write_persona,
+                                                         make_app_client, make_provider,
+                                                         monkeypatch):
+    """合成抛异常 → 不出 audio 帧，台词照常（绝不卡对话）。"""
+    async def boom(text, voice):
+        raise RuntimeError("edge-tts 挂了")
+
+    monkeypatch.setattr(tts, "available", lambda: True)
+    monkeypatch.setattr(tts, "synthesize", boom)
+    write_persona("cang")
+    client = make_app_client(provider=make_provider(turns=[{"text": "行啊。"}]))
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好", "voice": True})
+
+    types = _types(res)
+    assert "audio" not in types and "delta" in types and types[-1] == "done"
+
+
+def test_talk_voice_timeout_falls_back_to_text(tmp_store, write_persona, make_app_client,
+                                               make_provider, monkeypatch):
+    """合成超时（TTS_TIMEOUT_SEC）→ 不出 audio 帧。"""
+    async def slow(text, voice):
+        await asyncio.sleep(5)
+        return b"late"
+
+    monkeypatch.setattr(tts, "available", lambda: True)
+    monkeypatch.setattr(tts, "synthesize", slow)
+    monkeypatch.setattr(server, "TTS_TIMEOUT_SEC", 0.05)
+    write_persona("cang")
+    client = make_app_client(provider=make_provider(turns=[{"text": "行啊。"}]))
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好", "voice": True})
+
+    assert "audio" not in _types(res)
+
+
+def test_talk_without_tts_package_skips_audio(tmp_store, write_persona, make_app_client,
+                                              make_provider, monkeypatch):
+    """未装 edge-tts → 请求带 voice=true 也静默降级为纯文本。"""
+    monkeypatch.setattr(tts, "available", lambda: False)
+    write_persona("cang")
+    client = make_app_client(provider=make_provider(turns=[{"text": "行啊。"}]))
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好", "voice": True})
+
+    assert "audio" not in _types(res)
+
+
+# ── 独立端点 /api/tts ────────────────────────────────────
+
+def test_tts_endpoint_503_without_package(tmp_store, persona_dir, make_app_client, monkeypatch):
+    monkeypatch.setattr(tts, "available", lambda: False)
+    client = make_app_client()
+    assert client.post("/api/tts", json={"text": "你好"}).status_code == 503
+
+
+def test_tts_endpoint_400_on_empty_text(tmp_store, persona_dir, make_app_client, monkeypatch):
+    monkeypatch.setattr(tts, "available", lambda: True)
+    client = make_app_client()
+    assert client.post("/api/tts", json={"text": "   "}).status_code == 400
+    assert client.post("/api/tts", json={}).status_code == 400
+
+
+def test_tts_endpoint_uses_persona_voice(tmp_store, write_persona, make_app_client, monkeypatch):
+    seen = {}
+
+    async def fake_synth(text, voice):
+        seen["voice"] = voice
+        return b"fake-mp3"
+
+    monkeypatch.setattr(tts, "available", lambda: True)
+    monkeypatch.setattr(tts, "synthesize", fake_synth)
+    write_persona("cang", voice="zh-CN-YunjianNeural")
+    client = make_app_client()
+
+    data = client.post("/api/tts", json={"text": "你好", "npc_id": "cang"}).json()
+
+    assert base64.b64decode(data["audio"]) == b"fake-mp3"
+    assert data["voice"] == "zh-CN-YunjianNeural"
+    assert seen["voice"] == "zh-CN-YunjianNeural"
+
+
+def test_tts_endpoint_explicit_voice_wins(tmp_store, write_persona, make_app_client, monkeypatch):
+    seen = {}
+
+    async def fake_synth(text, voice):
+        seen["voice"] = voice
+        return b"fake-mp3"
+
+    monkeypatch.setattr(tts, "available", lambda: True)
+    monkeypatch.setattr(tts, "synthesize", fake_synth)
+    write_persona("cang", voice="zh-CN-YunjianNeural")
+    client = make_app_client()
+
+    data = client.post("/api/tts",
+                       json={"text": "你好", "npc_id": "cang", "voice": "zh-CN-XiaoyiNeural"}).json()
+
+    assert data["voice"] == "zh-CN-XiaoyiNeural"
+    assert seen["voice"] == "zh-CN-XiaoyiNeural"
+
+
+def test_tts_endpoint_unknown_npc_falls_back_to_default(tmp_store, persona_dir,
+                                                        make_app_client, monkeypatch):
+    seen = {}
+
+    async def fake_synth(text, voice):
+        seen["voice"] = voice
+        return b"fake-mp3"
+
+    monkeypatch.setattr(tts, "available", lambda: True)
+    monkeypatch.setattr(tts, "synthesize", fake_synth)
+    client = make_app_client()
+
+    data = client.post("/api/tts", json={"text": "你好", "npc_id": "nobody"}).json()
+
+    assert data["voice"] == tts.DEFAULT_VOICE
+
+
+def test_tts_endpoint_empty_audio_when_synthesis_fails(tmp_store, persona_dir,
+                                                       make_app_client, monkeypatch):
+    """合成失败 → audio 为空串（不是 5xx，游戏端照常回退纯文本）。"""
+    async def boom(text, voice):
+        raise RuntimeError("挂了")
+
+    monkeypatch.setattr(tts, "available", lambda: True)
+    monkeypatch.setattr(tts, "synthesize", boom)
+    client = make_app_client()
+
+    res = client.post("/api/tts", json={"text": "你好"})
+
+    assert res.status_code == 200
+    assert res.json()["audio"] == ""
+
+
+# ── 状态暴露 ─────────────────────────────────────────────
+
+def test_state_exposes_tts_availability(tmp_store, persona_dir, make_app_client, monkeypatch):
+    monkeypatch.setattr(tts, "available", lambda: True)
+    assert make_app_client().get("/api/state").json()["tts"] is True
+    monkeypatch.setattr(tts, "available", lambda: False)
+    assert make_app_client().get("/api/state").json()["tts"] is False
+
+
+def test_game_endpoints_unaffected_by_tts(tmp_store, write_persona, make_app_client,
+                                          make_provider, monkeypatch):
+    """语音不改变协议四端点：不带 voice 的 talk 帧序列与从前一致。"""
+    monkeypatch.setattr(tts, "available", lambda: False)
+    write_persona("cang")
+    client = make_app_client(provider=make_provider(turns=[{"text": "嗯。"}]))
+    client.post("/api/capabilities", json=CAPS)
+
+    assert client.post("/api/action_result",
+                       json={"npc_id": "cang", "action": "cook", "ok": True}).status_code == 200
+    assert _types(client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"}))[-1] == "done"

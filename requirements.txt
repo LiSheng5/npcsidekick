@@ -1,38 +1,14 @@
-# NPCSidekick Production Dependencies
-# Install: pip install -r requirements.txt
+# NPCSidekick v4 运行时依赖（第三方库，各自带许可证：多为 MIT / Apache / BSD，按依赖使用即合规）
+fastapi
+uvicorn
+openai
+structlog
+httpx
+pydantic
 
-# LLM
-openai>=1.0
+# 测试
+pytest
 
-# Structured Logging
-structlog>=24.0
-
-# Terminal UI
-rich>=13.0
-
-# HTTP (streaming)
-httpx>=0.28
-
-# Config & Validation
-pydantic>=2.0
-
-# Web UI
-fastapi>=0.115
-uvicorn>=0.34
-
-# Voice (NPC TTS) — 免费微软 TTS; 未安装时语音自动降级纯文本
-edge-tts>=6.1
-
-# ── 可选：语义向量记忆 ──────────────────────────────────────
-# 未安装时自动降级（关键词匹配 / 粗估 token），主流程不受影响。
-# 需要完整向量检索时再单独装：
-#   pip install "chromadb>=0.5" "tiktoken>=0.5"
-# （等价于 pip install ".[memory]"）
-# chromadb>=0.5
-# tiktoken>=0.5
-
-# Dev & Test (install separately: pip install -r requirements-dev.txt)
-# pytest>=8.0
-# pytest-asyncio>=0.24
-# pytest-mock>=3.14
-# pytest-cov>=5.0
+# 可选依赖（缺失时自动降级，不装也能跑）：
+# jieba          — 中文分词，装了检索召回更准（memory.py 里 try import）
+# chromadb       — 向量检索（core/vector_store.py 里 try import）
