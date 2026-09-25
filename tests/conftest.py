@@ -1,202 +1,217 @@
-"""
-Pytest fixtures — Mock LLM, Memory, Tools 供所有测试使用。
+"""pytest 共享夹具。
 
-每个 fixture 返回独立实例，测试之间不共享状态。
+- 把工程根插入 sys.path，使 `import core.*` / `import memory` 等可用
+- 所有测试零网络：LLM 一律用 FakeProvider 注入
 """
-
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+import sys
+from pathlib import Path
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import pytest
 
-# ── Fake data classes (matching project structure) ─────────
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.base import ProviderProtocol          # noqa: E402
+from core.client import LLMClient, LLMResponse  # noqa: E402
+from core.types import StreamChunk              # noqa: E402
 
 
-@dataclass
-class FakeToolCall:
-    """Minimal fake for OpenAI tool_calls."""
-    id: str = "fake_call_1"
-    type: str = "function"
-    function: FakeFunctionCall = field(default_factory=lambda: FakeFunctionCall())
+# ── 假 Provider ───────────────────────────────────────────
 
+class FakeProvider(ProviderProtocol):
+    """脚本化 Provider：按 turns 顺序回放，不碰网络。
 
-@dataclass
-class FakeFunctionCall:
-    name: str = "emit_task_plan"
-    arguments: str = '{"goal":"test","steps":[]}'
+    每个 turn 形如:
+      {"text": "行啊，", "tool_calls": [{"name": "remember", "arguments": {...}}]}
+    turns 用尽后回放 {"text": "嗯。"}。
 
+    stream() 会把 text 切成 chunk_size 大小的多片；tool_call 的
+    function_name / function_arguments 分两个 chunk 吐出，用于验证分片拼装。
+    """
 
-@dataclass
-class FakeLLMResponse:
-    """Mock LLMClient.chat() return."""
-    content: Optional[str] = None
-    tool_calls: Optional[List[FakeToolCall]] = None
-    finish_reason: str = "stop"
-    usage: Optional[dict] = None
+    def __init__(self, turns: Optional[List[dict]] = None, chunk_size: int = 2):
+        self.turns = list(turns or [])
+        self.chunk_size = max(1, chunk_size)
+        self.chat_calls: List[dict] = []
+        self.stream_calls: List[dict] = []
+        self._used = 0
 
     @property
-    def has_tool_calls(self) -> bool:
-        return bool(self.tool_calls)
+    def model_name(self) -> str:
+        return "fake-model"
+
+    def _next_turn(self) -> dict:
+        if self._used < len(self.turns):
+            turn = self.turns[self._used]
+        else:
+            turn = {"text": "嗯。"}
+        self._used += 1
+        return turn
+
+    def _tool_calls(self, turn: dict):
+        calls = []
+        for i, tc in enumerate(turn.get("tool_calls") or []):
+            calls.append(_FakeToolCall(f"call_{i + 1}", tc.get("name", ""), tc.get("arguments") or {}))
+        return calls
+
+    def chat(self, messages, tools=None, tool_choice="auto", temperature=None,
+             max_tokens=None, response_format=None, reasoning_effort=None) -> LLMResponse:
+        self.chat_calls.append({"messages": messages, "tools": tools,
+                                "reasoning_effort": reasoning_effort})
+        turn = self._next_turn()
+        calls = self._tool_calls(turn)
+        return LLMResponse(
+            content=turn.get("text", ""),
+            tool_calls=calls,
+            finish_reason="tool_calls" if calls else "stop",
+            model=self.model_name,
+            usage=None,
+        )
+
+    async def stream(self, messages, tools=None, tool_choice="auto", temperature=None,
+                     max_tokens=None, reasoning_effort=None) -> AsyncGenerator[StreamChunk, None]:
+        self.stream_calls.append({"messages": messages, "tools": tools,
+                                  "reasoning_effort": reasoning_effort})
+        turn = self._next_turn()
+        idx = 0
+        text = turn.get("text", "")
+        for i in range(0, len(text), self.chunk_size):
+            idx += 1
+            yield StreamChunk(content=text[i:i + self.chunk_size], model=self.model_name, index=idx)
+
+        for i, tc in enumerate(turn.get("tool_calls") or []):
+            args = json.dumps(tc.get("arguments") or {}, ensure_ascii=False)
+            idx += 1
+            yield StreamChunk(
+                tool_call_delta={"index": i, "id": f"call_{i + 1}",
+                                 "function_name": tc.get("name", ""), "function_arguments": None},
+                model=self.model_name, index=idx)
+            idx += 1
+            yield StreamChunk(
+                tool_call_delta={"index": i, "id": None,
+                                 "function_name": None, "function_arguments": args},
+                model=self.model_name, index=idx)
+
+        idx += 1
+        yield StreamChunk(finish_reason="tool_calls" if turn.get("tool_calls") else "stop",
+                          model=self.model_name, index=idx)
 
 
-# ── Core Fixtures ──────────────────────────────────────────
+class _FakeToolCall:
+    def __init__(self, call_id: str, name: str, arguments: dict):
+        self.id = call_id
+        self.function = _FakeFunction(name, json.dumps(arguments, ensure_ascii=False))
+
+
+class _FakeFunction:
+    def __init__(self, name: str, arguments: str):
+        self.name = name
+        self.arguments = arguments
+
+
+class BoomProvider(FakeProvider):
+    """每次调用都抛异常 —— 用于验证 LLM 不可用时的降级。"""
+
+    def chat(self, *a, **kw):
+        raise RuntimeError("boom")
+
+    async def stream(self, *a, **kw):
+        raise RuntimeError("boom")
+        yield  # pragma: no cover
+
+
+# ── 夹具 ─────────────────────────────────────────────────
+
+@pytest.fixture
+def make_provider():
+    """FakeProvider 工厂：make_provider(turns=[...])。"""
+    def _make(turns=None, chunk_size: int = 2):
+        return FakeProvider(turns=turns, chunk_size=chunk_size)
+    return _make
 
 
 @pytest.fixture
-def mock_llm_client():
-    """Mock LLMClient that returns standard responses."""
-    client = MagicMock()
-    client.chat.return_value = FakeLLMResponse(
-        content="Mock LLM 响应",
-        tool_calls=None,
-        finish_reason="stop",
-    )
-    return client
+def make_client():
+    """LLMClient 工厂（provider 注入，零网络）。"""
+    def _make(provider=None):
+        return LLMClient(provider=provider or FakeProvider())
+    return _make
 
 
 @pytest.fixture
-def mock_memory_manager():
-    """Mock MemoryManager with minimal behavior."""
-    mm = MagicMock()
-    mm.retrieve_for_planning.return_value = "## 对话历史 (最近)\n[user] 测试消息"
-    mm.get_history_for_context.return_value = "[user] 测试消息"
-    mm.retrieve.return_value = {
-        "query": "test",
-        "short_term": [],
-        "long_term": {"facts": [], "learnings": [], "executions": []},
-        "summary": "",
-    }
-    mm.maybe_compress.return_value = 0
-    mm.recent_messages.return_value = []
-    mm.get_conversation_context.return_value = ""
-    return mm
+def tmp_store(tmp_path, monkeypatch):
+    """把 memory / chatlog 的 store 指到临时目录。"""
+    import memory
+
+    store = tmp_path / "store"
+    store.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(memory, "STORE_DIR", store)
+    try:
+        import chatlog
+    except ImportError:
+        pass
+    else:
+        monkeypatch.setattr(chatlog, "STORE_DIR", store)
+    return store
 
 
 @pytest.fixture
-def mock_tool_registry():
-    """Mock ToolRegistry with a few fake tools."""
-    from agent.tools.schema import ToolSchema
+def persona_dir(tmp_path, monkeypatch):
+    """把 server 的角色卡目录指到临时目录。"""
+    import server
 
-    registry = MagicMock()
-
-    # Setup basic tool schemas
-    read_schema = ToolSchema(
-        name="read_file",
-        description="读取文件内容",
-        parameters={
-            "type": "object",
-            "properties": {"path": {"type": "string", "description": "文件路径"}},
-            "required": ["path"],
-        },
-        tags=["file", "read"],
-        category="file",
-    )
-
-    write_schema = ToolSchema(
-        name="write_file",
-        description="写入文件",
-        parameters={
-            "type": "object",
-            "properties": {
-                "path": {"type": "string"},
-                "content": {"type": "string"},
-            },
-            "required": ["path", "content"],
-        },
-        tags=["file", "write"],
-        category="file",
-    )
-
-    search_schema = ToolSchema(
-        name="web_search",
-        description="搜索网页",
-        parameters={
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-        },
-        tags=["web", "search"],
-        category="web",
-    )
-
-    registry.list_all.return_value = [
-        MagicMock(schema=read_schema),
-        MagicMock(schema=write_schema),
-        MagicMock(schema=search_schema),
-    ]
-    registry.to_tool_descriptions.return_value = (
-        "- read_file: 读取文件内容\n"
-        "- write_file: 写入文件\n"
-        "- web_search: 搜索网页"
-    )
-    registry.validate_call.return_value = None  # No error = valid
-    registry.get.return_value = MagicMock()
-    registry.get_schema.return_value = read_schema
-    registry.__len__ = MagicMock(return_value=3)
-
-    return registry
+    d = tmp_path / "personas"
+    d.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "PERSONA_DIR", d)
+    return d
 
 
 @pytest.fixture
-def mock_tool_router(mock_tool_registry):
-    """Mock ToolRouter that returns success results."""
-    router = MagicMock()
-    router.dispatch.return_value = MagicMock(
-        call_id="tc_test",
-        tool="test_tool",
-        status="success",
-        ok=True,
-        data={"result": "mock data"},
-        error=None,
-    )
-    router.recommend_for_step.return_value = ["read_file", "web_search"]
-    router.total_calls.return_value = 0
-    return router
+def avatar_dir(tmp_path, monkeypatch):
+    """把 server 的头像目录指到临时目录（create_app 会自己 mkdir）。"""
+    import server
 
-
-# ── Project-specific fixtures ─────────────────────────────
+    d = tmp_path / "avatars"
+    monkeypatch.setattr(server, "AVATAR_DIR", d)
+    return d
 
 
 @pytest.fixture
-def valid_step():
-    """Create a valid Step for testing."""
-    from agent.planner.task_plan import Step, StepStatus
-    return Step(
-        step_id=1,
-        description="读取配置文件",
-        tool="read_file",
-        tool_input={"path": "config.yaml"},
-        depends_on=[],
-        is_parallel=False,
-        success_criteria="成功读取文件内容",
-        fallback="手动指定路径",
-        status=StepStatus.PENDING,
-    )
+def write_persona(persona_dir):
+    """往临时角色卡目录写一张角色卡 JSON。"""
+    def _write(npc_id: str = "cang", **overrides) -> Dict[str, Any]:
+        data = {
+            "id": npc_id,
+            "name": "苍",
+            "identity": "部落的老猎手",
+            "personality": "寡言直接",
+            "speech_style": "短句，不废话",
+            "rules": {"replies": {"狩猎": "别追跑得快的。"}, "fallback": "嗯，火塘边坐着说。"},
+        }
+        data.update(overrides)
+        (persona_dir / f"{npc_id}.json").write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return data
+    return _write
 
 
 @pytest.fixture
-def valid_plan(valid_step):
-    """Create a valid TaskPlan with 2 steps."""
-    from agent.planner.task_plan import TaskPlan, Step
-    step2 = Step(
-        step_id=2,
-        description="分析文件内容",
-        tool="",
-        depends_on=[1],
-        is_parallel=False,
-        success_criteria="得出分析结论",
-        fallback="",
-    )
-    return TaskPlan(
-        task_id="task_test_001",
-        goal="测试目标",
-        steps=[valid_step, step2],
-        context={"retrieved_context": ""},
-        estimated_tools=["read_file"],
-    )
+def make_app_client(tmp_store, persona_dir, avatar_dir):
+    """FastAPI TestClient 工厂：make_app_client(provider=..., **state)。
 
+    avatar_dir 也让 make_app_client 依赖 —— 保证任何测试都不会写到工程里真实的 avatars/。
+    """
+    from fastapi.testclient import TestClient
 
+    import server
+
+    def _make(provider=None, **state_kwargs):
+        app = server.create_app(llm_client=LLMClient(provider=provider or FakeProvider()),
+                                **state_kwargs)
+        return TestClient(app)
+    return _make

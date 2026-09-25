@@ -3,10 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>NPCSidekick Console</title>
+    <title>NPCSidekick v4 · Console</title>
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div id="root">
+      <div class="app">
+        <nav class="sidebar">
+          <div class="brand">
+            <span class="brand-mark">N</span>
+            <span class="brand-text">
+              NPCSidekick
+              <div class="brand-sub">v4 Console</div>
+            </span>
+          </div>
+          <div id="nav"></div>
+          <div class="sidebar-foot">
+            <div class="kv"><span class="k">模型</span><span class="v" id="foot-model">—</span></div>
+            <div class="kv"><span class="k">思考</span><span class="v" id="foot-effort">—</span></div>
+            <div class="kv"><span class="k">Mod</span><span class="v" id="foot-mod">—</span></div>
+          </div>
+        </nav>
+        <main class="main" id="view"></main>
+      </div>
+    </div>
+    <script src="app.js"></script>
   </body>
 </html>

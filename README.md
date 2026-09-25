@@ -1,191 +1,126 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/version-3.2-9b59b6?style=flat-square" alt="version">
-  <img src="https://img.shields.io/badge/python-3.10+-purple?style=flat-square" alt="python">
-  <img src="https://img.shields.io/badge/tests-1043%20passed-brightgreen?style=flat-square" alt="tests">
-  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
-  <img src="https://img.shields.io/badge/game-Godot%204.x-orange?style=flat-square" alt="godot">
-</p>
+# NPCSidekick v4
 
-<h1 align="center">NPCSidekick</h1>
+通用游戏 AI NPC 系统的大脑（本地 Python 服务器）。任何能发 HTTP 的游戏（通过 mod）都能接入。
 
-<p align="center"><b>AI-driven game NPC framework</b> — villagers who work, follow orders, and remember.</p>
+**核心原则 —— 大脑提议，游戏执行**：大脑只提议动作，执行归游戏；动作经结构化字段提议，
+与对话文字完全分离；大脑侧唯一闸门是**能力白名单**（只有 mod 声明过的动作可被提议）。
 
-<p align="center"><b>English</b> &nbsp;|&nbsp; <a href="#中文文档">中文文档</a></p>
+> 设计权威：[设计.md](设计.md)（内部怎么想）· 对接契约：[协议.md](协议.md)（两边怎么说话）
+> 未决事项：[待办.md](待办.md)
 
 ---
 
-## 🎬 Demo
-
-<video src="docs/demo.mp4" controls width="100%"></video>
-
----
-
-## What is it?
-
-**NPCSidekick** is the brain for game characters. A small local Python server drives NPCs in any game that can speak HTTP:
-
-- **NPCs actually work** — they autonomously gather resources and bring them back to the camp. The routine runs on a tick-driven world simulation, *no LLM in the loop* — fast and deterministic
-- 💬**Orders in plain dialogue** — say `give me 2 wood` and the NPC replies honestly (accept or refuse), then *really does it*: walks to the forest, chops, comes back, and hands the wood to your inventory
-- 🧠**They remember** — memory cards are plain editable JSON files; restart the server and progress survives
-- 🎨**Add an NPC by dropping one JSON file** — personality, speech style, daily routine table. Zero game code
-- **Game integration = 3 HTTP endpoints** — `/api/talk`, `/api/state`, `/api/task`. A reference Godot integration pattern is in [docs/游戏接入.md](docs/游戏接入.md)
-- **Hybrid architecture** — LLM is used only for dialogue and decisions; game mechanics stay in deterministic code. No API key? The village still lives (rule fallback)
-
-## How it works
+## 目录
 
 ```
-┌─────────────┐   HTTP (3 endpoints)   ┌──────────────────────────────────┐
-│  Your game  │ ◄────────────────────► │   NPCSidekick server (local)     │
-│ (Godot/…)   │   talk / state / task  │                                  │
-│  mirrors &  │                        │  ┌────────────────────────────┐  │
-│  performs   │                        │  │ tick loop (every 3s)       │  │
-└─────────────┘                        │  │  · one step per NPC/tick   │  │
-                                       │  │  · routine table (weighted)│  │
-                                       │  │  · player orders win       │  │
-                                       │  │  · resource regen          │  │
-                                       │  └────────────────────────────┘  │
-                                       │  ┌────────────────────────────┐  │
-                                       │  │ dialogue (LLM, optional)   │  │
-                                       │  │ rules fast-path fallback   │  │
-                                       │  └────────────────────────────┘  │
-                                       │  memory cards = editable JSON    │
-                                       └──────────────────────────────────┘
+NPCSidekick_v4/
+├── 设计.md / 协议.md / 待办.md
+├── MOD_交接简报.md  交给 mod 侧开发者的交接文档（只讲契约与验收）
+├── core/           基础设施（LLM 客户端 / 配置 / 日志 / provider 工厂 / 向量封装 / 工具 schema），自包含
+├── memory.py       记忆卡 + AI Town 加权检索 + 半衰期修剪
+├── tools.py        remember / recall + 由能力清单生成的动作工具
+├── chatlog.py      持久聊天记录（{id}_chat.jsonl）+ 滚动摘要
+├── tts.py          语音合成（edge-tts，可选输出通道；缺依赖自动降级）
+├── server.py       HTTP 服务（/api/talk 流式 等）
+├── console_api.py  控制台（调试面）端点，与 mod 契约分开
+├── web/console/    控制台前端（零构建：index.html + app.js + styles.css）
+├── personas/       角色卡 JSON（加一个文件就多一个 NPC；`_模板.json` 是空白模板）
+├── avatars/        关系网节点头像（avatars/{id}.<ext>，控制台里点节点就能上传）
+├── store/          运行时数据（记忆卡 + 聊天记录，已 gitignore）
+├── tests/          pytest
+└── requirements.txt
 ```
 
-**Design lineage**: AI Town–style tick loop · Stanford Generative Agents memory · complexity tiers (ordinary NPCs = rules + small LLM; the full agent loop is reserved for NPCSidekick v4).
-
-## Quick start
+## 安装
 
 ```bash
-# 1. install (not yet on PyPI — clone and install for now)
-git clone https://github.com/LiSheng5/npcsidekick.git && cd npcsidekick
-pip install -e .
-
-# 2. run the brain (loads the paleolithic demo villagers 苍/阿黎)
-python -m npc.server --adapter paleolithic --no-browser
-
-# 3. talk to it
-curl -X POST http://127.0.0.1:8765/api/talk \
-  -H "Content-Type: application/json" \
-  -d '{"npc_id":"cang","message":"给我两根木材"}'
+pip install -r requirements.txt
 ```
 
-Then point your game at `http://127.0.0.1:8765`. See **[docs/游戏接入.md](docs/游戏接入.md)** for the full 3-endpoint contract and the Godot reference pattern.
+API Key 按优先级读取：环境变量 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY`
+→ 工程根 `api_key.txt`。没有 key 也能起服务，此时 `/api/talk` 回退角色卡里的 `rules` 回复，不提议动作。
 
-## Documentation
+可选依赖（缺失自动降级，不装也能跑）：`jieba`（中文分词，检索更准）、`chromadb`（向量封装，v4 检索未用到）、`edge-tts`（语音合成，装了才有 `audio` 帧）。
 
-- [游戏接入](docs/游戏接入.md) — endpoints, curl examples, Godot integration pattern
-- [API 参考](docs/API.md) — full endpoint contract (all 42 endpoints)
-- [角色制作 — Making NPCs with JSON](docs/角色制作.md) — persona fields, routine table, example
-- [世界声明键](docs/世界声明键.md) — every `_`-prefixed world field + what happens when left undeclared
-- [NPC 大脑架构](docs/NPC大脑架构.md) — the brain itself: roles, memory, safety tiers, capability audit (Chinese)
-- [Web Console](docs/Console架构.md) — the developer console: architecture, pages, data models, red lines
-- [协议契约](engine-clients/common/PROTOCOL.md) — game-side protocol v1 (capability negotiation + mirror face)
-- [ARCHITECTURE.md](ARCHITECTURE.md) — agent engine internals
-- [QUICKSTART.md](QUICKSTART.md) — the underlying agent engine CLI
-
-## Design notes
-
-- **Player orders beat autonomous routines** — and the NPC refuses honestly when resources are depleted ("木材现在弄不到了，采空了，等它长回来吧" — *reference world wording, declared via `_review_tpl`*)
-- **Anti-hallucination** — factual recall answers come from memory cards verbatim; the LLM context only states world facts, never invented ones
-- **Short-term dialogue history in memory only** — chat logs never pollute the memory cards
-- **Resource regen** — trees grow back (every tick +1 up to cap), matching the game-side 60s respawn
-
-## Built with
-
-- **DeepSeek** — the NPCs' dialogue & decision brain (V4 Flash)
-- **Claude Code** — development, review, debugging
-- **Trae** — feature work, bug fixing
-- **WorkBuddy** — feature development, bug fixing
-- **ChatGPT** — research & reference
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
----
-
-# 中文文档
-
-## 这是什么？
-
-**NPCSidekick** 是游戏 NPC 的大脑——一个跑在本地的小型 Python 服务器，通过 HTTP 驱动游戏里的角色：
-
-- **村民真的会干活** — 自主采集资源运回营地（tick 驱动的世界模拟，日常行动**不经过 LLM**，快且确定）
-- 💬 **对话下指令** — 说"给我两根木材"，村民诚实回答（接受或拒绝），然后**真的去做**：走去森林、砍树、回来、把木头递进你的背包
-- 🧠 **他们记得住** — 记忆卡是纯 JSON 文件，可打开直接改；重启服务器进度不丢
-- 🎨 **丢一个 JSON 就多一个 NPC** — 人设、说话风格、日常作息表，零游戏代码
-- **游戏接入 = 3 个 HTTP 端点** — `/api/talk`、`/api/state`、`/api/task`；Godot 接入模式见 [docs/游戏接入.md](docs/游戏接入.md)
-- **混合架构** — LLM 只用于对话和决策，游戏机制全在确定性代码里；没有 API key 村庄照样运转（规则回退）
-
-## 工作原理
-
-```
-┌─────────────┐   HTTP(3 个端点)    ┌──────────────────────────────────┐
-│  你的游戏    │ ◄────────────────► │   NPCSidekick 服务器(本地)        │
-│ (Godot/….)  │  talk / state /task │                                  │
-│  镜像+表演   │                     │  ┌────────────────────────────┐  │
-└─────────────┘                     │  │ tick 循环(每 3 秒)          │  │
-                                    │  │  · 每 tick 每 NPC 一步      │  │
-                                    │  │  · 日常作息表(加权随机)     │  │
-                                    │  │  · 玩家指令优先             │  │
-                                    │  │  · 资源回补                 │  │
-                                    │  └────────────────────────────┘  │
-                                    │  ┌────────────────────────────┐  │
-                                    │  │ 对话(LLM,可选)              │  │
-                                    │  │ 规则快路径回退              │  │
-                                    │  └────────────────────────────┘  │
-                                    │  记忆卡 = 可编辑 JSON            │
-                                    └──────────────────────────────────┘
-```
-
-**设计血统**：AI Town 式 tick 循环 · 斯坦福 Generative Agents 记忆 · 复杂度分级（普通 NPC = 规则 + 小模型；完整 agent 循环留给NPCSidekick v4）。
-
-## 快速开始
+## 启动
 
 ```bash
-# 1. 安装(尚未发布 PyPI,先 clone 安装)
-git clone https://github.com/LiSheng5/npcsidekick.git && cd npcsidekick
-pip install -e .
-
-# 2. 启动大脑(加载旧石器演示村民 苍/阿黎)
-python -m npc.server --adapter paleolithic --no-browser
-
-# 3. 和它说话
-curl -X POST http://127.0.0.1:8765/api/talk \
-  -H "Content-Type: application/json" \
-  -d '{"npc_id":"cang","message":"给我两根木材"}'
+python -m uvicorn server:app --host 127.0.0.1 --port 8765
 ```
 
-然后把游戏接到 `http://127.0.0.1:8765` 即可。完整端点契约和 Godot 接入模式见 **[docs/游戏接入.md](docs/游戏接入.md)**。
+服务器只绑 `127.0.0.1`（本地，不出机器）。默认模型 `deepseek-v4-flash`。
 
-## 文档
+## 走一遍四个端点
 
-- [游戏接入](docs/游戏接入.md)
-- [API 参考](docs/API.md) — 全量 42 条端点契约
-- [角色制作 — 用 JSON 做 NPC](docs/角色制作.md)
-- [世界声明键](docs/世界声明键.md) — 世界 JSON 的全部声明字段 + 未声明时的三态行为
-- [NPC 大脑架构](docs/NPC大脑架构.md) — 大脑本体：三角色/记忆/安全分级/能力审计与演进路线图
-- [Web Console](docs/Console架构.md) — 开发者控制台：架构、页面、数据模型与红线
-- [协议契约](engine-clients/common/PROTOCOL.md) — 游戏侧协议 v1（能力协商 + 镜像面）
-- [ARCHITECTURE.md](ARCHITECTURE.md) — agent 引擎内部设计
-- [QUICKSTART.md](QUICKSTART.md) — 底层 agent 引擎 CLI
+```bash
+# 1) mod 报到：声明能力清单（白名单即唯一闸门）+ 心跳
+curl -X POST http://127.0.0.1:8765/api/capabilities \
+  -H "Content-Type: application/json" \
+  -d '{"mod":"sims4","actions":[{"name":"cook","desc":"用厨房做饭","params":{"dish":"菜名(字符串)"}}]}'
 
-## 设计要点
+# 2) 对话（SSE：delta / action / audio / done 帧；带 "voice":true 才有 audio 帧）
+curl -X POST http://127.0.0.1:8765/api/talk \
+  -H "Content-Type: application/json" \
+  -d '{"npc_id":"cang","message":"你能帮我做顿饭吗","mod":"sims4",
+       "observation":{"summary":"玩家在厨房，刚下班，有点饿"}}'
 
-- **玩家指令 > 自主日常** — 资源采空时诚实拒绝（"木材现在弄不到了，采空了，等它长回来吧" —— *该措辞由参考世界经 `_review_tpl` 声明；引擎中性默认是"……{resource}现在弄不到了。"，不含"长回来"这类属于世界的假设*）
-- **防幻觉** — 事实回忆从记忆卡逐字回答；LLM 上下文只放世界事实，禁止编造
-- **短期对话历史只在内存** — 聊天记录绝不污染记忆卡
-- **资源回补** — 由世界 `_resource_regen` 声明每 tick 回补多少（参考世界 = 1，上限 `_resource_caps`）；**引擎不持有再生设定，未声明则不回补（会真的采空）**
+# 3) 动作结果回报（确定性写记忆卡："完成: …" / "没做成: …"）
+curl -X POST http://127.0.0.1:8765/api/action_result \
+  -H "Content-Type: application/json" \
+  -d '{"npc_id":"cang","action":"cook","ok":true,"note":"面煮好了，玩家吃了说不错"}'
 
-## 开发工具
+# 4) 状态查询（调试）
+curl http://127.0.0.1:8765/api/state
+curl http://127.0.0.1:8765/api/npcs
+```
 
-- **DeepSeek** — 村民的对话与决策大脑（V4 Flash）
-- **Claude Code** — 开发、审查、调试
-- **Trae** — 功能开发、修 bug
-- **WorkBuddy** — 功能开发、修 bug
-- **ChatGPT** — 查资料
+## 控制台（调试面）
 
-## 开源协议
+浏览器打开 **http://127.0.0.1:8765/console/**（根路径 `/` 自动跳转）——零构建前端，不需要 node。
 
-MIT — 见 [LICENSE](LICENSE)。
+| 面板 | 能干什么 |
+|---|---|
+| 总览 | 模型 / 思考档位 / mod 在线 / 各 NPC 的记忆与聊天体量 |
+| 关系网 | 角色卡的 `relations` 字段画成图（零依赖 SVG，分层布局）；**滚轮缩放 / 拖拽平移 / 拖节点调位置 / 双击节点聚焦看邻居**；点节点里的「+」上传头像；没填就显示空态，不编造关系 |
+| Mod / 能力 | 看已声明的动作清单与心跳状态；**可模拟一次 mod 报到**（不用进游戏就能联调） |
+| 记忆卡 | 条目增删改、钉住、按"当前强度"可视化（谁快被遗忘一目了然）、手动修剪 |
+| 聊天记录 | 逐轮查看 + 摘要状态与 token 进度 |
+| 试对话 | `POST /api/talk` 真流式（delta / action / audio / done 帧序列可见）+ 一键回报结果；可勾选语音播报 |
+| 角色卡 | `personas/{id}.json` 查看与编辑（保存即生效）；页内可展开**逐字段中文说明表**，空白模板 `personas/_模板.json`，填写说明 `personas/_角色卡说明.md` |
+
+控制台用的调试端点见 `协议.md` §8 —— 它们**不属于 mod 契约**，mod 不需要调用。
+
+## 测试
+
+```bash
+python -m pytest tests -q
+```
+
+测试全零网络：LLM 一律用 `tests/conftest.py` 里的 `FakeProvider` 注入。
+
+## 环境变量（全部现读，可热切）
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `AGENT_MODEL` | `deepseek-v4-flash` | 模型名（`deepseek-v4-pro` 更强） |
+| `DEEPSEEK_API_KEY` 等 | 无 | API Key（无 key → 回退角色卡 `rules` 回复） |
+| `NPC_REASONING_EFFORT` | 未设置 | 思考模式：`off`/`disabled`/`none` 显式关；`low`/`medium`/`high`/`max` 开；未设置 = 服务端默认（实测 `deepseek-flash` 默认返回 reasoning） |
+| `NPC_SUMMARY_TOKEN_THRESHOLD` | `20000` | 滚动摘要触发阈值（绝对 token 数） |
+| `NPC_SUMMARY_KEEP_RECENT` | `8` | 摘要后仍逐字保留的最近轮数 |
+| `NPC_MOD_HEARTBEAT_TIMEOUT` | `60` | mod 心跳超时（秒）：超时视离线，不再提议动作 |
+| `NPC_LLM_RETRY` / `NPC_LLM_RETRY_DELAYS` | 关 | LLM 网关抖动重试（见 `core/client.py`） |
+
+## 记忆卡（可直接手改）
+
+`store/{id}_memory.json` —— JSON 条目列表：
+
+```json
+[{"id": "<uuid>", "content": "玩家爱吃面", "importance": 7,
+  "category": "preference", "created_at": 1790260168.1, "pinned": true}]
+```
+
+- 写入口只有三个：`remember` 工具、动作结果回报、人工手改
+- `pinned: true` = 人工钉住，豁免一切自动修剪
+- 遗忘（确定性、零 LLM）：`强度 = importance × 0.5 ^ (小时/72)`，低于 1.0 移除；
+  豁免 `importance ≥ 8`、`pinned`、`category` 为 `reflection` / `consolidated`
+- 兼容读旧版记忆卡（`content` / `importance` / `created_at` 字段相同）
