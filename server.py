@@ -73,11 +73,20 @@ async def _tts_synthesize_safe(text: str, voice: str) -> Optional[bytes]:
 
 
 def reasoning_effort() -> Optional[str]:
-    """思考模式档位（现读环境变量，可热切）。未设置/空白 → None（服务端默认）。"""
-    raw = os.environ.get(_ENV_REASONING_EFFORT)
-    if raw is None or not raw.strip():
+    """思考档位（现读，可热切）：页面设置 > 落盘配置 > 环境变量。空白 → None（不指定）。"""
+    raw = str(llm_settings().get("reasoning_effort") or "").strip()
+    return raw or None
+
+
+def thinking_effort() -> Optional[str]:
+    """实际发给模型的档位 —— 勾了"该模型不认思考参数"就一律 None（一个参数都不发）。
+
+    对不认这些字段的端点，连 `thinking:{type:disabled}` 都是未知参数会 400，
+    所以"不支持思考的模型"要映射到"不指定"，而不是显式关闭。
+    """
+    if llm_settings().get("thinking_unsupported"):
         return None
-    return raw.strip()
+    return reasoning_effort()
 
 
 def heartbeat_timeout() -> float:
@@ -262,6 +271,8 @@ def create_app(llm_client: Optional[LLMClient] = None,
     registry = Registry(timeout=heartbeat_timeout_override)
     locks: Dict[str, asyncio.Lock] = {}
     started_at = time.time()
+    # 大脑可被页面热换：端点一律读 holder["client"]，而不是闭包里那一份
+    llm_holder: Dict[str, Any] = {"client": llm_client}
 
     if llm_client is None:
         try:
@@ -315,7 +326,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
 
         persona = load_persona(npc_id)
         capabilities = registry.actions(mod)
-        llm = llm_client
+        llm = llm_holder["client"]          # 页面换过脑就拿到新的
         timeout = registry.timeout()
         wants_voice = bool(body.get("voice"))        # 按需输出通道：默认纯文本
 
@@ -339,7 +350,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
                         buffers: Dict[int, _ToolCallBuffer] = {}
                         round_text: List[str] = []
                         async for chunk in llm.stream(messages, tools=tool_defs,
-                                                      reasoning_effort=reasoning_effort()):
+                                                      reasoning_effort=thinking_effort()):
                             if chunk.has_content:
                                 round_text.append(chunk.content)
                                 full_parts.append(chunk.content)
@@ -458,7 +469,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
     @app.get("/api/state")
     async def state():
         return {
-            "model": getattr(llm_client, "model", None),
+            "model": getattr(llm_holder["client"], "model", None),
             "llm": llm_config_status(),          # 三件套状态：缺什么写什么
             "reasoning_effort": reasoning_effort(),
             "tts": tts.available(),
@@ -485,11 +496,17 @@ def create_app(llm_client: Optional[LLMClient] = None,
         return {"npcs": result}
 
     app.state.registry = registry
-    app.state.llm = llm_client
+    app.state.llm_holder = llm_holder
 
     # ── 控制台（调试面，见 console_api.py，不属于 mod 契约）──
     AVATAR_DIR.mkdir(parents=True, exist_ok=True)
-    app.include_router(console_api.build_router(PERSONA_DIR, lock_for, registry, AVATAR_DIR))
+    app.include_router(console_api.build_router(
+        PERSONA_DIR, lock_for, registry, AVATAR_DIR,
+        llm_api={
+            "status": llm_config_status,
+            "apply": lambda patch: apply_llm_settings(patch, llm_holder),
+            "reset": lambda: reset_llm_settings(llm_holder),
+        }))
     app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR)), name="avatars")
     if CONSOLE_DIR.is_dir():
         app.mount("/console", StaticFiles(directory=str(CONSOLE_DIR), html=True), name="console")
@@ -520,11 +537,113 @@ def _persona_ids() -> List[str]:
     return sorted(p.stem for p in PERSONA_DIR.glob("*.json") if not p.name.startswith("_"))
 
 
-def llm_config_status() -> Dict[str, Any]:
-    """当前 LLM 三件套状态（现读环境变量，可热切）：缺什么就写在 missing 里。"""
-    from core.factory import current_llm_config
+# ── LLM 设置（页面可改，落 store/llm_config.json；key 不在这里）──
 
-    return current_llm_config()
+_LLM_FIELDS = ("model", "base_url", "reasoning_effort", "thinking_unsupported")
+_EFFORT_VALUES = ("off", "disabled", "none", "low", "medium", "high", "max")
+
+_LLM_RUNTIME: Dict[str, Any] = {}          # 页面改过的值（优先级最高，进程内有效）
+
+
+def llm_config_path() -> Path:
+    """页面设置的落盘位置（与记忆卡同级的运行时目录，已 gitignore）。"""
+    return memory.STORE_DIR / "llm_config.json"
+
+
+def _load_llm_file() -> Dict[str, Any]:
+    try:
+        data = json.loads(llm_config_path().read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_llm_file(cfg: Dict[str, Any]) -> None:
+    path = llm_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _env_llm_config() -> Dict[str, Any]:
+    """环境变量那一层 —— 页面与文件都没设时的起点。"""
+    from core import config
+
+    return {
+        "model": os.environ.get("AGENT_MODEL") or os.environ.get("NPC_MODEL") or "",
+        "base_url": os.environ.get("NPC_BASE_URL") or config.BASE_URL or "",
+        "reasoning_effort": os.environ.get(_ENV_REASONING_EFFORT) or "",
+        "thinking_unsupported": False,
+    }
+
+
+def llm_settings() -> Dict[str, Any]:
+    """生效中的设置：页面改的 > store/llm_config.json > 环境变量。"""
+    merged = _env_llm_config()
+    merged.update({k: v for k, v in _load_llm_file().items() if k in _LLM_FIELDS})
+    merged.update(_LLM_RUNTIME)
+    return merged
+
+
+def _llm_origin() -> str:
+    """当前值来自哪一层（页面上要说清，免得用户以为改了没生效）。"""
+    if _LLM_RUNTIME:
+        return "runtime"
+    if _load_llm_file():
+        return "file"
+    return "env"
+
+
+def llm_config_status() -> Dict[str, Any]:
+    """当前 LLM 设置与状态：缺什么写什么，并标明值来自哪一层。"""
+    from core import config
+    from core.factory import resolve_llm_config
+
+    cfg = llm_settings()
+    status = resolve_llm_config(api_key=config.API_KEY or "", model_name=cfg["model"],
+                                base_url=cfg["base_url"])
+    status["reasoning_effort"] = reasoning_effort()      # 用户设的档位
+    status["thinking_effort"] = thinking_effort()        # 实际下发的（None = 一个都不发）
+    status["thinking_unsupported"] = bool(cfg["thinking_unsupported"])
+    status["origin"] = _llm_origin()
+    return status
+
+
+def apply_llm_settings(patch: Dict[str, Any],
+                       holder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """改设置 → 落盘 → 换脑。校验不通过抛 ValueError（调用方转 400）。"""
+    clean: Dict[str, Any] = {}
+    for key in ("model", "base_url", "reasoning_effort"):
+        if key not in patch or patch[key] is None:
+            continue
+        value = str(patch[key]).strip()
+        if key == "reasoning_effort" and value and value not in _EFFORT_VALUES:
+            raise ValueError(f"思考档位只能是 {'/'.join(_EFFORT_VALUES)} 或留空（不指定）")
+        clean[key] = value
+    if patch.get("thinking_unsupported") is not None:
+        clean["thinking_unsupported"] = bool(patch["thinking_unsupported"])
+
+    _LLM_RUNTIME.update(clean)
+    _save_llm_file({k: v for k, v in llm_settings().items() if k in _LLM_FIELDS})
+    if holder is not None:
+        rebuild_llm(holder)
+    return llm_config_status()
+
+
+def reset_llm_settings(holder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """清掉页面设置与落盘文件，回到环境变量那一层。"""
+    _LLM_RUNTIME.clear()
+    try:
+        llm_config_path().unlink()
+    except OSError:
+        pass
+    if holder is not None:
+        rebuild_llm(holder)
+    return llm_config_status()
+
+
+def rebuild_llm(holder: Dict[str, Any]) -> None:
+    """按生效设置重建大脑；没配齐 → None（/api/talk 走角色卡 rules 兜底）。"""
+    holder["client"] = build_default_client()
 
 
 def build_default_client() -> Optional[LLMClient]:
@@ -532,7 +651,7 @@ def build_default_client() -> Optional[LLMClient]:
     status = llm_config_status()
     if not status["ready"]:
         log.warning("llm_not_configured", missing=",".join(status["missing"]),
-                    hint="配齐后重启即生效；未配齐时 /api/talk 走角色卡 rules 回复")
+                    hint="可在控制台「模型」页直接填；未配齐时 /api/talk 走角色卡 rules 回复")
         return None
     if status["source"] == "inferred":
         log.info("llm_base_url_inferred", model=status["model"], base_url=status["base_url"],

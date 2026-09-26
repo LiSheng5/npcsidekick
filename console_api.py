@@ -43,11 +43,14 @@ _ID_RE = re.compile(r"^[\w.-]{1,64}$", re.UNICODE)
 def build_router(persona_dir: Path,
                  lock_for: Callable[[str], Any],
                  registry: Any = None,
-                 avatar_dir: Optional[Path] = None) -> APIRouter:
+                 avatar_dir: Optional[Path] = None,
+                 llm_api: Optional[Dict[str, Callable[..., Any]]] = None) -> APIRouter:
     """组装控制台路由。lock_for = 每 NPC 的 asyncio.Lock（与 talk 共用，防并发写覆盖）。
 
     registry = server 的 Registry（能力清单 + 心跳）；给了才挂 GET /api/capabilities。
     avatar_dir = 头像存放目录（server 里静态挂在 /avatars）；None 表示不启用头像。
+    llm_api = 模型设置的读写回调 {status, apply, reset}；给了才挂 /api/llm 三个端点
+    （**key 不在其中** —— key 只走环境变量 / api_key.txt，不落这里、不进前端）。
     """
     router = APIRouter(prefix="/api", tags=["console"])
 
@@ -117,6 +120,27 @@ def build_router(persona_dir: Path,
                     "actions": entry["actions"],
                 }
             return {"mods": mods, "heartbeat_timeout_s": registry.timeout()}
+
+    # ── 模型 / 端点 / 思考档位（页面可改，落 store/llm_config.json）──
+
+    if llm_api:
+        @router.get("/llm")
+        async def get_llm():
+            return llm_api["status"]()
+
+        @router.put("/llm")
+        async def put_llm(request: Request):
+            """改设置并立即换脑；非法档位 → 400。key 不在这里改。"""
+            body = await _body(request)
+            try:
+                return llm_api["apply"](body)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        @router.delete("/llm")
+        async def delete_llm():
+            """清掉页面设置与落盘文件，回到环境变量那一层。"""
+            return llm_api["reset"]()
 
     # ── 角色卡（personas/*.json）───────────────────────────
 

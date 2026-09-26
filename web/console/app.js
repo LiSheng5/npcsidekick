@@ -60,7 +60,8 @@ async function api(path, { method = 'GET', body } = {}) {
 
 // ── 全局状态（跨页共享）───────────────────────────────────
 
-const store = { state: null, personas: [], npcId: null }
+// flash = 跨页一次性提示（改完配置重渲染后还能看见结果）
+const store = { state: null, personas: [], npcId: null, flash: null }
 
 // 模型与端点由用户自配（AGENT_MODEL / NPC_API_KEY / NPC_BASE_URL）：
 // 配齐 → 显示模型名（悬浮看端点）；没配齐 → 显示"未配置"并说清缺哪几项。
@@ -1182,8 +1183,123 @@ async function openPersona(box, npcId, tpl) {
 
 // ── 路由 ─────────────────────────────────────────────────
 
+// ── 页面：模型（谁来当大脑）───────────────────────────────
+
+const EFFORT_OPTIONS = [
+  ['', '自动（不指定，服务端默认）'],
+  ['off', '关闭（显式关掉思考）'],
+  ['low', '开启 · 低'],
+  ['medium', '开启 · 中'],
+  ['high', '开启 · 高'],
+  ['max', '开启 · 最高'],
+]
+
+const VENDOR_EXAMPLES = [
+  ['DeepSeek', 'https://api.deepseek.com'],
+  ['OpenAI', 'https://api.openai.com/v1'],
+  ['通义千问（百炼）', 'https://dashscope.aliyuncs.com/compatible-mode/v1'],
+  ['Kimi / Moonshot', 'https://api.moonshot.cn/v1'],
+  ['智谱 GLM', 'https://open.bigmodel.cn/api/paas/v4'],
+  ['本地 Ollama', 'http://localhost:11434/v1'],
+  ['OpenRouter（含 Claude / Gemini）', 'https://openrouter.ai/api/v1'],
+]
+
+const ORIGIN_TEXT = {
+  env: '环境变量',
+  file: 'store/llm_config.json（上次保存的）',
+  runtime: '本次改的（还没重启）',
+}
+
+async function renderModel(view) {
+  view.replaceChildren(pageHead('模型', '谁来当大脑：模型名 / OpenAI 兼容端点 / 深度思考 —— 改完立即生效，并记进 store/llm_config.json',
+    h('button', { class: 'btn', text: '刷新', onclick: () => route() })))
+  const box = h('div', { class: 'mem-list' }, stateBlock('', '加载中…'))
+  view.append(box)
+
+  let cur
+  try {
+    cur = await api('/api/llm')
+  } catch (e) {
+    box.replaceChildren(banner(`加载失败：${e.message}`, 'error'))
+    return
+  }
+
+  const model = h('input', { class: 'input', placeholder: '模型名，例：deepseek-v4-flash' })
+  model.value = cur.model || ''
+  const base = h('input', { class: 'input', placeholder: 'OpenAI 兼容端点，例：https://api.deepseek.com' })
+  base.value = cur.base_url || ''
+  const effort = h('select', { class: 'input narrow' },
+    EFFORT_OPTIONS.map(([v, t]) => h('option', { value: v, text: t })))
+  effort.value = cur.reasoning_effort || ''
+  const noThink = h('input', { type: 'checkbox' })
+  noThink.checked = !!cur.thinking_unsupported
+
+  const reload = async () => { await refreshGlobals(); route() }
+
+  const apply = async () => {
+    try {
+      const next = await api('/api/llm', {
+        method: 'PUT',
+        body: {
+          model: model.value, base_url: base.value,
+          reasoning_effort: effort.value, thinking_unsupported: noThink.checked,
+        },
+      })
+      store.flash = next.ready
+        ? { text: `已切到 ${next.model}（${next.base_url}）—— 下一个请求就用新的`, kind: 'ok' }
+        : { text: `已保存，但仍缺 ${(next.missing || []).join('、')} —— /api/talk 走角色卡 rules 回复`, kind: 'error' }
+    } catch (e) {
+      store.flash = { text: `保存失败：${e.message}`, kind: 'error' }
+    }
+    await reload()
+  }
+
+  const reset = async () => {
+    try {
+      await api('/api/llm', { method: 'DELETE' })
+      store.flash = { text: '已清掉页面设置，回到环境变量那一层', kind: 'ok' }
+    } catch (e) {
+      store.flash = { text: `清除失败：${e.message}`, kind: 'error' }
+    }
+    await reload()
+  }
+
+  const kids = []
+  if (store.flash) { kids.push(banner(store.flash.text, store.flash.kind)); store.flash = null }
+  kids.push(
+    h('div', { class: 'card', style: 'padding:16px 18px' },
+      h('div', { class: 'sec-title', text: '当前状态' }),
+      h('div', { class: 'kv' }, h('span', { class: 'k', text: '接上了吗' }),
+        h('span', { class: 'v', text: cur.ready
+          ? `是（端点为${cur.source === 'inferred' ? '按模型名推断值' : '配置值'}）`
+          : `否 —— 缺 ${(cur.missing || []).join('、')}` })),
+      h('div', { class: 'kv' }, h('span', { class: 'k', text: '值来自' }),
+        h('span', { class: 'v', text: ORIGIN_TEXT[cur.origin] || cur.origin })),
+      h('div', { class: 'kv' }, h('span', { class: 'k', text: '深度思考' }),
+        h('span', { class: 'v', text: cur.reasoning_effort || '不指定' })),
+      h('div', { class: 'kv' }, h('span', { class: 'k', text: '实际下发' }),
+        h('span', { class: 'v', text: cur.thinking_effort ? `发 ${cur.thinking_effort}` : '一个思考参数都不发' }))),
+    h('div', { class: 'card', style: 'padding:16px 18px' },
+      h('div', { class: 'sec-title', text: '改配置' }),
+      h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '模型名：' }), model),
+      h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '端点：' }), base),
+      h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '深度思考：' }), effort),
+      h('label', { class: 'filter-row' }, noThink,
+        h('span', { class: 'hint', text: '该模型不认思考参数 —— 勾上后一律不下发（不支持深度思考的模型选这个，效果等于关闭且不会报错）' })),
+      h('div', { class: 'filter-row' },
+        h('button', { class: 'btn primary', text: '保存并应用', onclick: apply }),
+        h('button', { class: 'btn', text: '恢复环境变量默认', onclick: reset }))),
+    h('div', { class: 'card', style: 'padding:16px 18px' },
+      h('div', { class: 'sec-title', text: '常见厂商的端点（以厂商最新文档为准）' }),
+      ...VENDOR_EXAMPLES.map(([name, url]) => h('div', { class: 'kv' },
+        h('span', { class: 'k', text: name }), h('span', { class: 'v', text: url }))),
+      h('p', { class: 'hint', text: 'API Key 不在这里填：放环境变量 NPC_API_KEY（旧名 DEEPSEEK_API_KEY / OPENAI_API_KEY / ZHIPU_API_KEY 也认）或工程根 api_key.txt —— 明文 key 不进页面、也不进 store/llm_config.json。' })))
+  box.replaceChildren(...kids)
+}
+
 const PAGES = [
   { key: 'overview', label: '总览', render: renderOverview },
+  { key: 'model', label: '模型', render: renderModel },
   { key: 'graph', label: '关系网', render: renderGraph },
   { key: 'mods', label: 'Mod / 能力', render: renderMods },
   { key: 'memory', label: '记忆卡', render: renderMemory },
