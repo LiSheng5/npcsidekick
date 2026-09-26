@@ -11,4 +11,3 @@ pytest
 
 # 可选依赖（缺失时自动降级，不装也能跑）：
 # jieba          — 中文分词，装了检索召回更准（memory.py 里 try import）
-# chromadb       — 向量检索（core/vector_store.py 里 try import）

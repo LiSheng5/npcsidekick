@@ -73,7 +73,7 @@ def _tokenize(text: str) -> List[str]:
     return [w for w in cleaned.split() if w]
 
 
-# ── 同义词族（声明驱动：由角色卡/世界声明，引擎保持游戏无关，§3.3）──
+# ── 同义词族（声明驱动：由角色卡 entity_synonyms 声明，引擎保持游戏无关，§3.3）──
 _ACTIVE_SYNONYMS: Dict[str, frozenset] = {}
 
 
