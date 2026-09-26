@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -254,3 +255,73 @@ def test_console_llm_endpoints(tmp_store, write_persona, make_app_client, clean_
 
     assert client.delete("/api/llm").status_code == 200
     assert client.get("/api/llm").json()["origin"] == "env"
+
+
+# ── key 安全（业界共识：敏感分离 / 掩码不回原文 / 不进仓库）──
+
+def test_mask_secret_keeps_head_tail():
+    import server
+
+    assert server.mask_secret("") == ""
+    assert server.mask_secret("short") == "sh…"
+    assert server.mask_secret("sk-1234567890abcdef") == "sk-…cdef"
+
+
+def test_scrub_removes_key_from_text(monkeypatch):
+    import server
+    from core import config
+
+    monkeypatch.setattr(config, "API_KEY", "sk-SUPERSECRET123456")
+    assert "SUPERSECRET" not in server.scrub("失败: Bearer sk-SUPERSECRET123456 无效")
+    assert server.scrub("普通错误") == "普通错误"
+
+
+def test_api_key_status_never_returns_raw(monkeypatch):
+    import server
+    from core import config
+
+    monkeypatch.setattr(config, "API_KEY", "sk-SUPERSECRET123456")
+    status = server.api_key_status()
+
+    assert status["present"] is True
+    assert status["masked"] != "sk-SUPERSECRET123456"
+    assert "SUPERSECRET" not in json.dumps(status)
+
+
+def test_apply_rejects_api_key_field(clean_llm):
+    """护栏：收到 key 类字段要响亮拒绝，不能静默忽略。"""
+    with pytest.raises(ValueError):
+        clean_llm.apply_llm_settings({"api_key": "sk-xxx"})
+
+
+def test_saved_llm_file_has_no_secret(clean_llm, monkeypatch, tmp_store):
+    from core import config
+
+    monkeypatch.setattr(config, "API_KEY", "sk-SUPERSECRET123456")
+    clean_llm.apply_llm_settings({"model": "qwen-plus", "base_url": "https://dash.example/v1"})
+
+    raw = (tmp_store / "llm_config.json").read_text("utf-8")
+    assert "SUPERSECRET" not in raw
+    assert set(json.loads(raw)) == set(clean_llm._LLM_FIELDS)
+
+
+def test_endpoints_never_echo_key(tmp_store, write_persona, make_app_client, clean_llm,
+                                  monkeypatch):
+    from core import config
+
+    monkeypatch.setattr(config, "API_KEY", "sk-SUPERSECRET123456")
+    client = make_app_client()
+
+    for path in ("/api/state", "/api/llm"):
+        assert "SUPERSECRET" not in client.get(path).text
+
+    bad = client.put("/api/llm", json={"api_key": "sk-xxx"})
+    assert bad.status_code == 400
+    assert "key 不在这里改" in bad.json()["detail"]
+
+
+def test_gitignore_covers_secret_files():
+    """防回归：这几个文件绝不能进仓库（以后误删 .gitignore 行会红）。"""
+    text = (Path(__file__).resolve().parents[1] / ".gitignore").read_text("utf-8")
+    for name in ("api_key.txt", "store/"):
+        assert name in text

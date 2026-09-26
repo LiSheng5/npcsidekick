@@ -49,6 +49,16 @@ def _load_api_key() -> str:
     return ""
 
 
+def api_key_source() -> str:
+    """当前 key 来自哪个环境变量 / 文件 —— 只报来源，绝不报内容。"""
+    for name in ("NPC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ZHIPU_API_KEY"):
+        if os.getenv(name):
+            return name
+    if (_default_base_dir() / "api_key.txt").exists():
+        return "api_key.txt"
+    return ""
+
+
 @dataclass
 class AgentSettings:
     """

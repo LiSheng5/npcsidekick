@@ -1282,7 +1282,11 @@ async function renderModel(view) {
       h('div', { class: 'kv' }, h('span', { class: 'k', text: '深度思考' }),
         h('span', { class: 'v', text: cur.reasoning_effort || '不指定' })),
       h('div', { class: 'kv' }, h('span', { class: 'k', text: '实际下发' }),
-        h('span', { class: 'v', text: cur.thinking_effort ? `发 ${cur.thinking_effort}` : '一个思考参数都不发' }))),
+        h('span', { class: 'v', text: cur.thinking_effort ? `发 ${cur.thinking_effort}` : '一个思考参数都不发' })),
+      h('div', { class: 'kv' }, h('span', { class: 'k', text: 'API Key' }),
+        h('span', { class: 'v', text: cur.api_key && cur.api_key.present
+          ? `${cur.api_key.masked}（来自 ${cur.api_key.source || '未知'}）`
+          : '未配置 —— 放环境变量 NPC_API_KEY 或工程根 api_key.txt' }))),
     h('div', { class: 'card', style: 'padding:16px 18px' },
       h('div', { class: 'sec-title', text: '改配置' }),
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '模型名：' }), model),
