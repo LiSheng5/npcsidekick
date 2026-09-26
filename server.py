@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -273,6 +274,10 @@ def create_app(llm_client: Optional[LLMClient] = None,
     started_at = time.time()
     # 大脑可被页面热换：端点一律读 holder["client"]，而不是闭包里那一份
     llm_holder: Dict[str, Any] = {"client": llm_client}
+
+    perm_hint = key_perm_hint()             # 只检测 api_key.txt 权限，不改文件
+    if perm_hint:
+        log.warning("api_key_file_permission", hint=perm_hint)
 
     if llm_client is None:
         try:
@@ -577,7 +582,67 @@ def api_key_status() -> Dict[str, Any]:
         "present": bool(key),
         "masked": mask_secret(key) or None,
         "source": api_key_source() or None,
+        "perm_hint": key_perm_hint(),     # api_key.txt 权限太松时的提示（Windows 才有）
     }
+
+
+# ── api_key.txt 权限：只检测，不自动改 ────────────────────
+
+_KEY_PERM_HINT: Optional[str] = None
+_KEY_PERM_CHECKED = False
+
+
+def _world_readable_lines(icacls_output: str, path: str = "") -> List[str]:
+    """从 icacls 输出里挑"其他账户也能读/写"的行（Everyone / Users / Authenticated Users）。
+
+    先把文件名本身从行首去掉 —— 否则 `C:\\Users\\...` 这种路径会被误判成 Users 账户。
+    """
+    hits: List[str] = []
+    prefix = (path or "").strip().lower()
+    for raw in (icacls_output or "").splitlines():
+        line = raw.strip()
+        if prefix and line.lower().startswith(prefix):
+            line = line[len(prefix):]
+        low = line.lower()
+        if not any(name in low for name in ("everyone", "users", "authenticated users")):
+            continue
+        if any(right in low for right in ("(r)", "(rx)", "(rw)", "(w)", "(m)", "(f)")):
+            hits.append(raw.strip())
+    return hits
+
+
+def scan_key_file_perm(path: Optional[Path] = None) -> Optional[str]:
+    """看看 api_key.txt 是不是对其他账户也可读 —— **只检测，绝不改文件**。
+
+    只在 Windows + 文件存在时跑一次 icacls；非 Windows / 没这文件 / icacls 失败 → None（静默）。
+    返回一段可直接复制的收紧命令，由用户自己决定跑不跑。
+    """
+    if os.name != "nt":
+        return None
+    target = Path(path) if path else Path(__file__).resolve().parent / "api_key.txt"
+    if not target.exists():
+        return None
+    try:
+        proc = subprocess.run(["icacls", str(target)],
+                              capture_output=True, text=True, timeout=3)
+    except Exception:                                   # 命令缺失/超时/被拦 → 一律闭嘴
+        return None
+    hits = _world_readable_lines(proc.stdout, str(target))
+    if not hits:
+        return None
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or "当前用户"
+    return (f"api_key.txt 对其他账户也可读（{hits[0]}）—— v4 不会自动改你的文件，"
+            f'要收紧请自己跑：icacls "{target}" /inheritance:r '
+            f'/grant:r "{user}:(R,W)" "SYSTEM:(F)" "Administrators:(F)"')
+
+
+def key_perm_hint(refresh: bool = False) -> Optional[str]:
+    """给日志与页面用的提示（只算一次，重启才刷新）。"""
+    global _KEY_PERM_HINT, _KEY_PERM_CHECKED
+    if refresh or not _KEY_PERM_CHECKED:
+        _KEY_PERM_HINT = scan_key_file_perm()
+        _KEY_PERM_CHECKED = True
+    return _KEY_PERM_HINT
 
 _LLM_RUNTIME: Dict[str, Any] = {}          # 页面改过的值（优先级最高，进程内有效）
 
