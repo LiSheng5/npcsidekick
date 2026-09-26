@@ -1,14 +1,14 @@
-"""HTTP 服务 —— 大脑 ↔ mod 的契约实现（协议.md 全文）。
+"""HTTP 服务 —— 大脑 ↔ mod 的契约实现。
 
 端点：
   POST /api/capabilities   mod 报到：声明能力清单（白名单唯一闸门）+ 心跳
   POST /api/talk           对话：SSE 流式（delta / action / audio / done 帧）
   POST /api/action_result  动作结果回报 → 确定性写记忆卡
-  POST /api/tts            语音合成（独立输出通道，协议.md §8）
+  POST /api/tts            语音合成（独立输出通道，不属于 mod 契约）
   GET  /api/state          服务器概况（调试）
   GET  /api/npcs           各 NPC 状态摘要（调试）
 
-两条通道严格分离（设计.md §2.2 / §5）：
+两条通道严格分离（台词只走 delta 帧，动作只在流末尾出 action 帧）：
   · 台词通道 = SSE 的 delta 帧，只有角色说的话
   · 结构化通道 = action 帧，在流末尾，mod 自己决定执不执行
   · 语音通道 = audio 帧（仅 voice=true 时），在 done 之前，缺依赖/超时则不出帧
@@ -35,7 +35,7 @@ import memory
 import tools
 import tts
 
-# 角色卡目录（设计.md §7：加一个文件就多一个 NPC）
+# 角色卡目录（加一个文件就多一个 NPC）
 PERSONA_DIR = Path(__file__).resolve().parent / "personas"
 
 # 控制台静态资源（零构建：index.html + app.js + styles.css）
@@ -44,17 +44,17 @@ CONSOLE_DIR = Path(__file__).resolve().parent / "web" / "console"
 # 关系网节点头像（avatars/{id}.<ext>，静态挂在 /avatars；与控制台同属调试面）
 AVATAR_DIR = Path(__file__).resolve().parent / "avatars"
 
-# 默认模型（设计.md §6：deepseek-v4-flash 便宜，deepseek-v4-pro 更强）
+# 默认模型（deepseek-v4-flash 便宜，deepseek-v4-pro 更强）
 DEFAULT_MODEL = "deepseek-v4-flash"
 
 # 单次对话内的记忆工具循环上限（防死循环）
 MAX_TOOL_ROUNDS = 4
 
-# mod 心跳超时（秒）：超时视该 mod 离线，不再提议动作（协议.md §1）
+# mod 心跳超时（秒）：超时视该 mod 离线，不再提议动作
 DEFAULT_HEARTBEAT_TIMEOUT = 60.0
 _ENV_HEARTBEAT_TIMEOUT = "NPC_MOD_HEARTBEAT_TIMEOUT"
 
-# 思考模式档位（设计.md §6）：未设置 → 不指定，用服务端默认；
+# 思考模式档位：未设置 → 不指定，用服务端默认；
 # off/disabled/none → 显式关闭；low/medium/high/max → 开启
 _ENV_REASONING_EFFORT = "NPC_REASONING_EFFORT"
 
@@ -108,7 +108,7 @@ def load_persona(npc_id: str) -> Dict[str, Any]:
 
 
 def build_system_prompt(persona: Dict[str, Any], observation: Any = None) -> str:
-    """角色卡 JSON 编译成系统提示词（设计.md §4.2 + §2.2 台词纪律 + §4.4 接地）。"""
+    """角色卡 JSON 编译成系统提示词（含台词纪律与"查不到就说不知道"的接地要求）。"""
     lines = [
         f"你是{persona.get('identity') or '一个游戏角色'}。",
         f"性格: {persona.get('personality') or '友善'}。",
@@ -141,7 +141,7 @@ def build_system_prompt(persona: Dict[str, Any], observation: Any = None) -> str
 
 
 def rule_reply(persona: Dict[str, Any], message: str) -> str:
-    """LLM 不可用时的规则回复（协议.md §6：回退角色卡 rules 字段）。"""
+    """LLM 不可用时的规则回复（按角色卡 rules.replies 的关键词命中，兜底用 rules.fallback）。"""
     rules = persona.get("rules") or {}
     replies = rules.get("replies") or {}
     if isinstance(replies, dict):
@@ -202,7 +202,7 @@ class Registry:
         }
 
 
-# ── 请求校验（§6：字段缺失/非法 → 400，响亮失败）────────────
+# ── 请求校验（字段缺失/非法 → 400，响亮失败）────────────────
 
 async def _json_body(request: Request) -> Dict[str, Any]:
     try:
@@ -274,7 +274,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
     def lock_for(npc_id: str) -> asyncio.Lock:
         return locks.setdefault(npc_id, asyncio.Lock())
 
-    # ── 能力清单（协议.md §1）──────────────────────────
+    # ── 能力清单（mod 报到 + 心跳）──────────────────────
     @app.post("/api/capabilities")
     async def capabilities(request: Request):
         body = await _json_body(request)
@@ -300,7 +300,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
         log.info("capabilities_declared", mod=mod, actions=len(clean))
         return {"ok": True, "mod": mod, "actions": [a["name"] for a in clean]}
 
-    # ── 对话（协议.md §2）──────────────────────────────
+    # ── 对话（SSE 流式：delta / action / audio / done）──
     @app.post("/api/talk")
     async def talk(request: Request):
         body = await _json_body(request)
@@ -328,8 +328,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
                 try:
                     if llm is None:
                         raise RuntimeError("LLM 不可用")
-                    memory.prune(npc_id)                       # 确定性遗忘（§3.4，零 LLM）
-                    memory.set_synonyms(persona.get("entity_synonyms"))
+                    memory.prune(npc_id)                       # 确定性遗忘（半衰期修剪，不走 LLM）
                     history = chatlog.build_history(npc_id, llm)
                     messages = [{"role": "system",
                                  "content": build_system_prompt(persona, observation)}]
@@ -374,15 +373,18 @@ def create_app(llm_client: Optional[LLMClient] = None,
                             } for c in calls],
                         })
                         for c in calls:
-                            result = tools.run_tool(c["name"], c["args"], npc_id,
-                                                    capabilities, top_k=RECALL_TOP_K)
+                            # 同义词族**按请求显式传入**（取自本 NPC 的角色卡）——
+                            # 不走 memory 的进程级全局表，多 NPC 并发时互不污染
+                            result = tools.run_tool(c["name"], c["args"], npc_id, capabilities,
+                                                    top_k=RECALL_TOP_K,
+                                                    synonyms=persona.get("entity_synonyms"))
                             messages.append({
                                 "role": "tool", "tool_call_id": c["id"],
                                 "content": str(result.data if result.ok else (result.error or "")),
                             })
                         if round_no == MAX_TOOL_ROUNDS - 1:
                             log.warning("talk_tool_rounds_exhausted", npc_id=npc_id)
-                except Exception as exc:                            # §6 降级：回退角色卡规则回复
+                except Exception as exc:                            # 降级：LLM 出错就回退角色卡的规则回复
                     log.warning("talk_llm_failed", npc_id=npc_id, error=str(exc)[:160])
                     if not emitted:
                         fallback = rule_reply(persona, message)
@@ -395,7 +397,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
             if proposal:
                 yield _sse({"type": "action", "action": proposal})
             if wants_voice and tts.available():
-                # 台词流已走完，这里才整段合成 —— 不阻塞 delta（设计.md §5）
+                # 台词流已走完，这里才整段合成 —— 不阻塞 delta 的逐字输出
                 voice = tts.voice_for(persona)
                 audio = await _tts_synthesize_safe("".join(full_parts), voice)
                 if audio:
@@ -409,7 +411,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
                      "X-Mod-Heartbeat-Timeout": str(timeout)},
         )
 
-    # ── 动作结果回报（协议.md §4）───────────────────────
+    # ── 动作结果回报（游戏执行完回报 → 写记忆卡）─────────
     @app.post("/api/action_result")
     async def action_result(request: Request):
         body = await _json_body(request)
@@ -429,7 +431,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
         log.info("action_result_recorded", npc_id=npc_id, action=action, ok=ok)
         return {"ok": True, "npc_id": npc_id, "entry": entry}
 
-    # ── 语音合成（协议.md §8：独立输出通道，非 mod 契约）──
+    # ── 语音合成（独立输出通道，不属于 mod 契约）─────────
     @app.post("/api/tts")
     async def tts_endpoint(request: Request):
         """给任意文本配音（含本地对话表 / 头顶气泡）。未装 edge-tts → 503。
@@ -453,7 +455,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
         audio = await _tts_synthesize_safe(text, voice)
         return {"audio": tts.to_base64(audio) if audio else "", "voice": voice}
 
-    # ── 状态查询（协议.md §5）──────────────────────────
+    # ── 状态查询（/api/state、/api/npcs，调试用）─────────
     @app.get("/api/state")
     async def state():
         return {
@@ -485,7 +487,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
     app.state.registry = registry
     app.state.llm = llm_client
 
-    # ── 控制台（调试面，见 console_api.py / 协议.md §8）──
+    # ── 控制台（调试面，见 console_api.py，不属于 mod 契约）──
     AVATAR_DIR.mkdir(parents=True, exist_ok=True)
     app.include_router(console_api.build_router(PERSONA_DIR, lock_for, registry, AVATAR_DIR))
     app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR)), name="avatars")
@@ -519,7 +521,7 @@ def _persona_ids() -> List[str]:
 
 
 def build_default_client() -> Optional[LLMClient]:
-    """按 设计.md §6 的默认模型创建客户端；无 key → None。"""
+    """按 DEFAULT_MODEL 创建 LLM 客户端；无 key → None。"""
     if _api_key() is None:
         return None
     from core import config

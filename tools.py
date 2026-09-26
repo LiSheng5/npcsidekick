@@ -1,10 +1,10 @@
-"""工具定义与执行 —— remember / recall + 动作工具（设计.md §2、§3.1）。
+"""工具定义与执行 —— remember / recall + 动作工具（记忆通道 + 动作提议通道）。
 
-两条通道严格分离（§2.2 台词纪律）：
+两条通道严格分离（台词纪律：模型只输出角色说的话，不暴露工具痕迹）：
   · remember / recall —— 记忆通道，服务器**自己执行**（memory.py）
-  · 动作工具 —— 提议通道，服务器**只提议不执行**，由游戏侧执行后回报（协议.md §3）
+  · 动作工具 —— 提议通道，服务器**只提议不执行**，由游戏侧执行后回报（走 /api/action_result）
 
-白名单即唯一闸门（§1）：只有 mod 在 /api/capabilities 声明过的动作才会
+白名单即唯一闸门：只有 mod 在 /api/capabilities 声明过的动作才会
 变成工具定义，LLM 不可能提议未声明的动作。
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ TOOL_REMEMBER = "remember"
 TOOL_RECALL = "recall"
 _RESERVED_TOOLS = frozenset({TOOL_REMEMBER, TOOL_RECALL})
 
-# 动作工具的参数一律按"字符串 + 声明说明"进 schema（协议.md §1 的 params 形态）
+# 动作工具的参数一律按"字符串 + 声明说明"进 schema（mod 报到的 params 形态：{参数名: 说明}）
 _PARAM_TYPE = "string"
 
 REMEMBER_TOOL = ToolSchema(
@@ -57,7 +57,7 @@ RECALL_TOOL = ToolSchema(
 
 
 def action_tool_schema(action: Dict[str, Any]) -> ToolSchema:
-    """把 mod 声明的动作变成工具定义（协议.md §1）。"""
+    """把 mod 声明的动作变成工具定义（只认 /api/capabilities 报上来的动作）。"""
     params = action.get("params") or {}
     if not isinstance(params, dict):
         params = {}
@@ -91,7 +91,7 @@ def is_action_tool(name: str, capabilities: Optional[List[dict]]) -> bool:
 def build_tool_definitions(capabilities: Optional[List[dict]] = None) -> List[dict]:
     """组装进 LLM 上下文的工具数组：remember + recall + 声明过的动作。
 
-    capabilities 为空（mod 离线 / 未报到）→ 只给记忆工具（§6：离线不提议动作）。
+    capabilities 为空（mod 离线 / 未报到）→ 只给记忆工具（离线就不提议动作）。
     """
     tools = [REMEMBER_TOOL.to_openai_function(), RECALL_TOOL.to_openai_function()]
     for action in capabilities or []:
@@ -135,7 +135,7 @@ def run_tool(name: str, args: Dict[str, Any], npc_id: str,
                        data=memory.format_for_context(entries), started=started)
 
     if is_action_tool(name, capabilities):
-        # 提议通道：执行权在游戏（协议.md §3），服务器不代劳
+        # 提议通道：执行权在游戏，服务器只提议不代劳
         return _result(name, ToolResultStatus.REJECTED,
                        error="动作由游戏侧执行，服务器只提议", started=started)
 

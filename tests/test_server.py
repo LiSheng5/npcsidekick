@@ -1,4 +1,4 @@
-"""server.py 测试 —— 协议.md 四端点的契约行为（全零网络）。"""
+"""server.py 测试 —— 游戏面四端点的契约行为（全零网络）。"""
 from __future__ import annotations
 
 import json
@@ -37,7 +37,7 @@ def text_of(response) -> str:
     return "".join(f.get("text", "") for f in frames(response) if f["type"] == "delta")
 
 
-# ── /api/capabilities（协议.md §1）───────────────────────
+# ── /api/capabilities（mod 报到：声明动作 + 心跳）─────────
 
 def test_capabilities_ok(tmp_store, write_persona, make_app_client):
     client = make_app_client()
@@ -71,7 +71,7 @@ def test_malformed_json_body_400(tmp_store, write_persona, make_app_client):
     assert res.status_code == 400
 
 
-# ── /api/talk：纯聊天（协议.md §2）───────────────────────
+# ── /api/talk：纯聊天（只出 delta 帧）─────────────────────
 
 def test_talk_plain_text(tmp_store, write_persona, make_app_client, make_provider):
     write_persona("cang")
@@ -84,7 +84,7 @@ def test_talk_plain_text(tmp_store, write_persona, make_app_client, make_provide
     assert res.headers["content-type"].startswith("text/event-stream")
     assert kinds(res)[-1] == "done" and set(kinds(res)) == {"delta", "done"}
     assert text_of(res) == "行啊，我去给你煮碗面。"
-    # 台词进了持久聊天记录（§4.1）
+    # 台词进了持久聊天记录（每轮两行：用户一行 + 助手一行）
     assert [m["content"] for m in __import__("chatlog").load_turns("cang")] == [
         "你能帮我做顿饭吗", "行啊，我去给你煮碗面。"]
 
@@ -101,7 +101,7 @@ def test_talk_observation_reaches_prompt(tmp_store, write_persona, make_app_clie
     system = provider.stream_calls[0]["messages"][0]
     assert system["role"] == "system"
     assert "玩家在厨房，刚下班" in system["content"]
-    assert "台词" in system["content"]                     # §2.2 台词纪律进了提示词
+    assert "台词" in system["content"]                     # 台词纪律（只输出角色说的话）进了提示词
 
 
 def test_talk_missing_fields_400(tmp_store, write_persona, make_app_client):
@@ -165,7 +165,34 @@ def test_talk_recall_loop(tmp_store, write_persona, make_app_client, make_provid
     assert "玩家上次说爱吃面" in tool_msg["content"]              # 逐字记忆进了上下文
 
 
-# ── /api/talk：动作提议（协议.md §3）──────────────────────
+def test_talk_uses_persona_synonyms_without_touching_global(tmp_store, write_persona,
+                                                           make_app_client, make_provider):
+    """同义词族按角色卡**显式传参**：本次 talk 既不写、也不读进程级全局表。
+
+    多 NPC 并发对话时，A 的同义词表不会污染 B 的检索（回归：以前 server 每请求
+    `memory.set_synonyms(...)` 写全局表，而 run_tool 没传 synonyms，落到全局回退）。
+    """
+    write_persona("cang", entity_synonyms={"木材": ["木材", "柴", "木头"]})
+    memory.add_entry("cang", "存着过冬的木材", importance=5)
+    memory.add_entry("cang", "灶边的石头", importance=5)
+    memory.set_synonyms({"石头": ["石头", "柴"]})   # 别人留下的全局表：会把「柴」算到石头上
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "recall", "arguments": {"query": "柴"}}]},
+        {"text": "木头在棚里。"},
+    ])
+    client = make_app_client(provider=provider)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "柴呢"})
+
+    tool_msg = provider.stream_calls[1]["messages"][-1]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["content"].splitlines()[0] == "- 存着过冬的木材"   # 用的是角色卡里的表
+    assert memory._ACTIVE_SYNONYMS == {"石头": frozenset({"石头", "柴"})}   # 全局表原样没被动过
+    memory.set_synonyms(None)
+    assert kinds(res)[-1] == "done"
+
+
+# ── /api/talk：动作提议（只提议，不执行）──────────────────
 
 def test_talk_action_proposal(tmp_store, write_persona, make_app_client, make_provider):
     write_persona("cang")
@@ -178,11 +205,11 @@ def test_talk_action_proposal(tmp_store, write_persona, make_app_client, make_pr
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "你能帮我做顿饭吗",
                                          "mod": "sims4"})
 
-    assert kinds(res) == ["delta", "delta", "action", "done"]     # 动作帧在流末尾（§5）
+    assert kinds(res) == ["delta", "delta", "action", "done"]     # action 帧在流末尾（台词走完才出）
     action_frame = frames(res)[-2]
     assert action_frame["action"] == {"name": "cook", "params": {"dish": "面"}}
     assert text_of(res) == "行啊，"
-    assert memory.load_card("cang") == []                          # 只提议，不执行（§3）
+    assert memory.load_card("cang") == []                          # 只提议，不执行（执行权在游戏侧）
 
 
 def test_talk_tool_definitions_follow_whitelist(tmp_store, write_persona, make_app_client,
@@ -211,7 +238,7 @@ def test_talk_offline_mod_gets_no_action_tools(tmp_store, write_persona, make_ap
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "sims4"})
 
     names = [t["function"]["name"] for t in provider.stream_calls[0]["tools"]]
-    assert names == ["remember", "recall"]                         # §6：离线不提议动作
+    assert names == ["remember", "recall"]                         # mod 离线 → 不给动作工具
     assert "action" not in kinds(res)
 
 
@@ -225,10 +252,10 @@ def test_talk_heartbeat_kept_alive_by_request(tmp_store, write_persona, make_app
     client.post("/api/talk", json={"npc_id": "cang", "message": "在吗", "mod": "sims4"})
 
     names = [t["function"]["name"] for t in provider.stream_calls[0]["tools"]]
-    assert "cook" in names                                         # 捎带 mod 即视为活着（§1）
+    assert "cook" in names                                         # 请求里捎带 mod 即刷新心跳，视为活着
 
 
-# ── /api/talk：LLM 不可用降级（协议.md §6）───────────────
+# ── /api/talk：LLM 不可用降级（回退角色卡规则回复）────────
 
 def test_talk_falls_back_to_persona_rules(tmp_store, write_persona, make_app_client):
     from conftest import BoomProvider
@@ -255,7 +282,7 @@ def test_talk_fallback_uses_default_when_no_keyword(tmp_store, write_persona, ma
     assert text_of(res) == "嗯，火塘边坐着说。"
 
 
-# ── /api/action_result（协议.md §4）──────────────────────
+# ── /api/action_result（游戏回报 → 写记忆卡）──────────────
 
 def test_action_result_writes_memory(tmp_store, write_persona, make_app_client):
     write_persona("cang")
@@ -291,7 +318,7 @@ def test_action_result_invalid_400(tmp_store, write_persona, make_app_client, ba
     assert client.post("/api/action_result", json=bad).status_code == 400
 
 
-# ── 状态查询（协议.md §5）───────────────────────────────
+# ── 状态查询（/api/state、/api/npcs）─────────────────────
 
 def test_state_endpoint(tmp_store, write_persona, make_app_client):
     write_persona("cang")
@@ -338,8 +365,8 @@ def test_build_system_prompt_includes_persona_fields():
     assert "别追跑得快的。" in prompt
     assert "你绝不会烧湿柴" in prompt
     assert "玩家在厨房" in prompt
-    assert "recall" in prompt                     # §4.4：回忆类问题优先走 recall 的逐字结果
-    assert "不知道" in prompt                     # §4.4：接地，不知道就说不知道
+    assert "recall" in prompt                     # 接地：涉及往事先 recall，按逐字结果回答
+    assert "不知道" in prompt                     # 接地：查不到就说不知道，绝不编造
 
 
 def test_reasoning_effort_env(monkeypatch):

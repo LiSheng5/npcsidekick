@@ -1,6 +1,6 @@
-"""记忆卡 — 条目 + 加权检索 + 半衰期修剪（设计.md §3）。
+"""记忆卡 — 条目 + 加权检索 + 半衰期修剪。
 
-设计出处（合规，见 设计.md §10①）：
+加权公式与半衰期思想的出处（合规留档）：
   · 加权检索公式与参数 —— AI Town (a16z, MIT License,
     https://github.com/a16z-infra/ai-town):
         score = recency × 0.5 + relevance × 3 + importance × 2
@@ -8,10 +8,10 @@
   · 半衰期遗忘思想 —— hippo-memory (https://github.com/kitfunso/hippo-memory):
         强度 = importance × 0.5 ^ (小时 / 72)，强度 < 1.0 的旧条目移除
 
-记忆卡的写入口只有三个（设计.md §3.1）：remember 工具、动作结果回报
+记忆卡的写入口只有三个：remember 工具、动作结果回报
 （add_action_result）、人工手改 JSON 文件。本模块不提供其他写通道。
 
-存储格式（设计.md §3.2）：store/{id}_memory.json —— JSON 条目列表，可直接手改。
+存储格式：store/{id}_memory.json —— JSON 条目列表，可直接手改。
 条目: {id, content, importance, category, created_at, pinned?}
   · id 用 uuid；pinned 为 True 时豁免一切自动修剪（红线）
   · 兼容读旧版记忆卡（content / importance / created_at 字段相同）
@@ -27,10 +27,10 @@ from typing import Any, Dict, List, Optional
 
 from core.logging_config import log
 
-# 运行时数据目录（工程根/store，见 设计.md §8；测试用 monkeypatch 替换）
+# 运行时数据目录（工程根/store；测试用 monkeypatch 替换）
 STORE_DIR = Path(__file__).resolve().parent / "store"
 
-# ── 记忆卡事件文案单一来源（设计.md §3.1）──────────────────
+# ── 记忆卡事件文案单一来源（写卡文案只在此处定义）──────────
 EV_DONE = "完成: "
 EV_FAIL = "没做成: "
 
@@ -43,7 +43,7 @@ _HOUR_SECONDS = 3600.0
 _HALF_LIFE_HOURS = 72.0
 _PRUNE_STRENGTH = 1.0
 
-# 修剪豁免（设计.md §3.4）：高重要度 / 人工钉住 / 反思与合并产物
+# 修剪豁免：高重要度 / 人工钉住 / 反思与合并产物
 _EXEMPT_CATEGORIES = frozenset({"reflection", "consolidated"})
 _EXEMPT_IMPORTANCE = 8
 
@@ -73,7 +73,7 @@ def _tokenize(text: str) -> List[str]:
     return [w for w in cleaned.split() if w]
 
 
-# ── 同义词族（声明驱动：由角色卡 entity_synonyms 声明，引擎保持游戏无关，§3.3）──
+# ── 同义词族（声明驱动：由角色卡 entity_synonyms 声明，引擎保持游戏无关）──
 _ACTIVE_SYNONYMS: Dict[str, frozenset] = {}
 
 
@@ -122,7 +122,7 @@ def _relevance_score(content: str, query: str,
                      query_tokens: Optional[List[str]] = None,
                      q_canon: Optional[set] = None,
                      c_canon: Optional[set] = None) -> float:
-    """相关度 = 分词命中比例 + 同义词族命中比例（归一 0~1，设计.md §3.3）。"""
+    """相关度 = 分词命中比例 + 同义词族命中比例（归一 0~1）。"""
     tokens = query_tokens if query_tokens is not None else _tokenize(query)
     hit = sum(1 for w in tokens if w in content) / len(tokens) if tokens else 0.0
     if q_canon is None:
@@ -143,7 +143,7 @@ def card_path(npc_id: str) -> Path:
 
 
 def _normalize_entry(raw: Any, index: int) -> Dict[str, Any]:
-    """归一单条记忆：补 uuid / 默认字段，兼容旧版卡（§3.2）。"""
+    """归一单条记忆：补 uuid / 默认字段，兼容旧版卡。"""
     if not isinstance(raw, dict):
         raise ValueError(f"记忆卡第 {index} 条不是 JSON 对象: {type(raw).__name__}")
     content = raw.get("content")
@@ -163,7 +163,7 @@ def _normalize_entry(raw: Any, index: int) -> Dict[str, Any]:
     if isinstance(created, bool) or not isinstance(created, (int, float)):
         created = time.time()
     entry["created_at"] = float(created)
-    # pinned 只在为真时保留（§3.2 的可选键）
+    # pinned 只在为真时保留（可选键：为假就不落这个键）
     if not raw.get("pinned"):
         entry.pop("pinned", None)
     return entry
@@ -192,7 +192,7 @@ def save_card(npc_id: str, entries: List[Dict[str, Any]]) -> None:
     os.replace(tmp, path)
 
 
-# ── 写入口（§3.1 的三个通道之一/之二）─────────────────────
+# ── 写入口（三个通道中的两个：remember 工具 / 动作结果回报）─
 
 def add_entry(npc_id: str, content: str, importance: int = DEFAULT_IMPORTANCE,
               category: str = DEFAULT_CATEGORY, pinned: bool = False) -> Dict[str, Any]:
@@ -216,7 +216,7 @@ def add_entry(npc_id: str, content: str, importance: int = DEFAULT_IMPORTANCE,
 
 
 def add_action_result(npc_id: str, action: str, ok: bool, note: str = "") -> Dict[str, Any]:
-    """动作结果确定性写卡（§3.1）："完成: …" / "没做成: …"。"""
+    """动作结果确定性写卡："完成: …" / "没做成: …"。"""
     text = (note or "").strip() or action
     content = f"{EV_DONE if ok else EV_FAIL}{text}"
     return add_entry(
@@ -227,7 +227,7 @@ def add_action_result(npc_id: str, action: str, ok: bool, note: str = "") -> Dic
     )
 
 
-# ── 检索（AI Town 加权公式，§3.3）─────────────────────────
+# ── 检索（AI Town 加权公式）───────────────────────────────
 
 def retrieve(npc_id: str, query: str, top_k: int = 5,
              synonyms: Optional[Dict[str, Any]] = None,
@@ -254,13 +254,13 @@ def retrieve(npc_id: str, query: str, top_k: int = 5,
 
 
 def format_for_context(entries: List[Dict[str, Any]]) -> str:
-    """把检索结果格式化成给模型的逐字文本（§4.4：回忆优先用逐字结果）。"""
+    """把检索结果格式化成给模型的逐字文本（回忆类回答照原文说，不改写）。"""
     if not entries:
         return "（没有想起相关的事）"
     return "\n".join(f"- {e['content']}" for e in entries)
 
 
-# ── 遗忘（确定性半衰期修剪，零 LLM，§3.4）─────────────────
+# ── 遗忘（确定性半衰期修剪，不走 LLM）─────────────────────
 
 def is_exempt(entry: Dict[str, Any]) -> bool:
     """是否豁免自动修剪：人工钉住 / importance ≥ 8 / 反思与合并产物。"""
@@ -294,7 +294,7 @@ def prune(npc_id: str, now: Optional[float] = None) -> int:
     return removed
 
 
-# ── 条目级人工编辑（控制台 = §3.1「人工手改」通道的界面化）──
+# ── 条目级人工编辑（控制台用的就是"直接手改记忆卡"这条通道）─
 
 def find_entry(npc_id: str, entry_id: str) -> Optional[Dict[str, Any]]:
     for e in load_card(npc_id):
