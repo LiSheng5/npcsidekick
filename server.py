@@ -278,7 +278,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
         try:
             llm_client = build_default_client()
         except Exception as exc:                 # 无 key / 初始化失败 → 规则回复兜底
-            log.warning("llm_unavailable", error=str(exc)[:160])
+            log.warning("llm_unavailable", error=scrub(str(exc))[:160])
             llm_client = None
 
     def lock_for(npc_id: str) -> asyncio.Lock:
@@ -395,7 +395,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
                         if round_no == MAX_TOOL_ROUNDS - 1:
                             log.warning("talk_tool_rounds_exhausted", npc_id=npc_id)
                 except Exception as exc:                            # 降级：LLM 出错就回退角色卡的规则回复
-                    log.warning("talk_llm_failed", npc_id=npc_id, error=str(exc)[:160])
+                    log.warning("talk_llm_failed", npc_id=npc_id, error=scrub(str(exc))[:160])
                     if not emitted:
                         fallback = rule_reply(persona, message)
                         full_parts.append(fallback)
@@ -542,6 +542,43 @@ def _persona_ids() -> List[str]:
 _LLM_FIELDS = ("model", "base_url", "reasoning_effort", "thinking_unsupported")
 _EFFORT_VALUES = ("off", "disabled", "none", "low", "medium", "high", "max")
 
+# 敏感字段名：这些绝不进页面、绝不进 store/llm_config.json（收到就响亮拒绝）
+_SENSITIVE_KEYS = ("api_key", "key", "token", "authorization", "secret")
+
+
+def mask_secret(value: str) -> str:
+    """只留头尾：`sk-abc…wxyz`。页面与接口只给掩码，绝不回原文。"""
+    value = value or ""
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return f"{value[:2]}…"
+    return f"{value[:3]}…{value[-4:]}"
+
+
+def scrub(text: str) -> str:
+    """日志/报错脱敏：把当前 key 的原文换成掩码（异常里偶尔会带出请求头/URL）。"""
+    from core import config
+
+    key = config.API_KEY or ""
+    out = text or ""
+    if len(key) >= 6 and key in out:
+        out = out.replace(key, mask_secret(key))
+    return out
+
+
+def api_key_status() -> Dict[str, Any]:
+    """key 的只读状态：有没有、来自哪、掩码 —— 内容一个字都不回。"""
+    from core import config
+    from core.settings import api_key_source
+
+    key = config.API_KEY or ""
+    return {
+        "present": bool(key),
+        "masked": mask_secret(key) or None,
+        "source": api_key_source() or None,
+    }
+
 _LLM_RUNTIME: Dict[str, Any] = {}          # 页面改过的值（优先级最高，进程内有效）
 
 
@@ -605,12 +642,17 @@ def llm_config_status() -> Dict[str, Any]:
     status["thinking_effort"] = thinking_effort()        # 实际下发的（None = 一个都不发）
     status["thinking_unsupported"] = bool(cfg["thinking_unsupported"])
     status["origin"] = _llm_origin()
+    status["api_key"] = api_key_status()      # 只有掩码，没有原文
     return status
 
 
 def apply_llm_settings(patch: Dict[str, Any],
                        holder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """改设置 → 落盘 → 换脑。校验不通过抛 ValueError（调用方转 400）。"""
+    for key in patch:                       # 护栏：key 类字段一律拒绝，别被静默吞掉
+        if str(key).lower() in _SENSITIVE_KEYS:
+            raise ValueError(f"key 不在这里改（收到字段 {key}）—— 请放环境变量 NPC_API_KEY 或工程根 api_key.txt")
+
     clean: Dict[str, Any] = {}
     for key in ("model", "base_url", "reasoning_effort"):
         if key not in patch or patch[key] is None:
