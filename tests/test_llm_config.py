@@ -5,10 +5,27 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from core import factory
 from core.openai_provider import OpenAIProvider
+
+
+@pytest.fixture
+def clean_llm(tmp_store):
+    """每个用例前后都清掉页面设置与落盘文件（不污染别的用例）。"""
+    import server
+
+    server._LLM_RUNTIME.clear()
+    path = server.llm_config_path()
+    if path.exists():
+        path.unlink()
+    yield server
+    server._LLM_RUNTIME.clear()
+    if path.exists():
+        path.unlink()
 
 
 def _provider(**kwargs) -> OpenAIProvider:
@@ -162,3 +179,78 @@ def test_build_default_client_uses_configured_endpoint(monkeypatch):
 
     assert client is not None
     assert client.provider.base_url == "https://gateway.local/v1"
+
+
+# ── 页面改配置：立即生效 + 落盘保留 ───────────────────────
+
+def test_apply_llm_settings_switches_brain(clean_llm, monkeypatch, tmp_store):
+    from core import config
+
+    server = clean_llm
+    monkeypatch.setattr(config, "API_KEY", "sk-test")
+    holder: dict = {"client": None}
+
+    status = server.apply_llm_settings(
+        {"model": "qwen-plus", "base_url": "https://dash.example/v1", "reasoning_effort": "high"},
+        holder)
+
+    assert status["ready"] is True and status["model"] == "qwen-plus"
+    assert status["reasoning_effort"] == "high"
+    assert holder["client"] is not None                     # 立即换脑
+    assert holder["client"].provider.base_url == "https://dash.example/v1"
+    assert holder["client"].model == "qwen-plus"
+
+    saved = json.loads((tmp_store / "llm_config.json").read_text("utf-8"))
+    assert saved["model"] == "qwen-plus" and saved["reasoning_effort"] == "high"
+
+
+def test_settings_survive_runtime_clear(clean_llm, monkeypatch):
+    """用户要求：页面改的值下次启动还在 —— 清掉内存（模拟重启）后应来自文件。"""
+    from core import config
+
+    server = clean_llm
+    monkeypatch.setattr(config, "API_KEY", "sk-test")
+    server.apply_llm_settings({"model": "qwen-plus", "base_url": "https://dash.example/v1"})
+
+    assert server.llm_config_status()["origin"] == "runtime"
+    server._LLM_RUNTIME.clear()                             # 模拟重启
+    status = server.llm_config_status()
+
+    assert status["origin"] == "file"
+    assert status["model"] == "qwen-plus"
+
+
+def test_thinking_unsupported_sends_nothing(clean_llm, monkeypatch):
+    """不支持深度思考的模型 → 实际一个思考参数都不发（= 安全的关闭）。"""
+    server = clean_llm
+    server.apply_llm_settings({"reasoning_effort": "high", "thinking_unsupported": True})
+
+    assert server.reasoning_effort() == "high"              # 页面上仍显示用户的选择
+    assert server.thinking_effort() is None                 # 但下发时一个都不发
+
+
+def test_apply_rejects_bad_effort(clean_llm):
+    with pytest.raises(ValueError):
+        clean_llm.apply_llm_settings({"reasoning_effort": "超强"})
+
+
+def test_console_llm_endpoints(tmp_store, write_persona, make_app_client, clean_llm, monkeypatch):
+    from core import config
+
+    monkeypatch.setattr(config, "API_KEY", "sk-test")
+    client = make_app_client()
+
+    ok = client.put("/api/llm", json={
+        "model": "qwen-plus", "base_url": "https://dash.example/v1", "reasoning_effort": "low"})
+    assert ok.status_code == 200
+    assert ok.json()["model"] == "qwen-plus"
+    assert ok.json()["reasoning_effort"] == "low"
+
+    bad = client.put("/api/llm", json={"reasoning_effort": "超强"})
+    assert bad.status_code == 400
+
+    got = client.get("/api/llm").json()
+    assert got["model"] == "qwen-plus" and got["origin"] == "runtime"
+
+    assert client.delete("/api/llm").status_code == 200
+    assert client.get("/api/llm").json()["origin"] == "env"

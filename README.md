@@ -21,7 +21,7 @@ NPCSidekick_v4/
 ├── web/console/    控制台前端（零构建：index.html + app.js + styles.css）
 ├── personas/       角色卡 JSON（加一个文件就多一个 NPC；`_模板.json` 是空白模板）
 ├── avatars/        关系网节点头像（avatars/{id}.<ext>，控制台里点节点就能上传）
-├── store/          运行时数据（记忆卡 + 聊天记录，已 gitignore）
+├── store/          运行时数据（记忆卡 + 聊天记录 + `llm_config.json` 模型设置，已 gitignore）
 ├── tests/          pytest
 └── requirements.txt
 ```
@@ -65,6 +65,14 @@ v4 只走 OpenAI 兼容端点 —— 国内外主流厂商与本地 Ollama/vLLM 
 端点解析规则：**显式配的 `NPC_BASE_URL` 永远优先**，不会被模型名推断覆盖（接网关时这条是关键）；
 没配端点时才按模型名猜厂商兜底，猜不出就是"未配置"。
 
+**不想改环境变量？** 打开控制台「模型」页直接填模型名 / 端点 / 深度思考档位 —— 改完立即生效（下一个请求就用新的），
+并记进 `store/llm_config.json`，下次启动还在。优先级：**页面改的 > 该文件 > 环境变量**；
+「恢复环境变量默认」一键回到环境变量那一层。**API Key 不在页面里填**（见下），明文 key 不进页面也不进该文件。
+
+**模型没有深度思考怎么办**：勾上「该模型不认思考参数」—— v4 就一个思考参数都不发
+（效果等于关闭，且不会因为发未知字段被拒）。注意不能映射成发 `thinking:{type:disabled}`，
+对不认这个字段的端点它同样会 400。
+
 各家方言（思考参数、长度参数名等）v4 不做猜测 —— 用 `NPC_LLM_EXTRA_BODY` 自己填，
 一段 JSON 原样并入请求体，例如 OpenAI 系思考档位：`NPC_LLM_EXTRA_BODY='{"reasoning":{"effort":"high"}}'`。
 
@@ -99,6 +107,7 @@ curl http://127.0.0.1:8765/api/npcs
 | 面板 | 能干什么 |
 |---|---|
 | 总览 | 模型 + LLM 端点（没配齐三件套时红字写明缺哪几项）/ 思考档位 / mod 在线 / 各 NPC 的记忆与聊天体量 |
+| 模型 | **直接改谁来当大脑**：模型名 / OpenAI 兼容端点 / 深度思考档位，改完立即生效并记进 `store/llm_config.json`（下次启动还在）；带常见厂商端点速查 |
 | 关系网 | 角色卡的 `relations` 字段画成图（零依赖 SVG，分层布局）；**点击刷新按钮刷新 / 滚轮缩放 / 拖拽平移 / 拖节点调位置 / 双击节点聚焦看邻居**；点节点里的「+」上传头像；没填就显示空态，不编造关系 |
 | Mod / 能力 | 看已声明的动作清单与心跳状态；**可模拟一次 mod 报到**（不用进游戏就能联调） |
 | 记忆卡 | 条目增删改、钉住、按"当前强度"可视化（谁快被遗忘一目了然）、手动修剪 |
@@ -120,7 +129,7 @@ python -m pytest tests -q
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `AGENT_MODEL`（或 `NPC_MODEL`） | 无 | 模型名，用户自定（不设 = 未配置，无大脑） |
+| `AGENT_MODEL`（或 `NPC_MODEL`） | 无 | 模型名，用户自定（不设 = 未配置，无大脑；控制台「模型」页可改） |
 | `NPC_API_KEY` | 无 | API Key（旧名 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY` 仍兼容；也可放 `api_key.txt`） |
 | `NPC_BASE_URL` | 无 | OpenAI 兼容端点；不设时按模型名猜厂商兜底，猜不出 = 未配置 |
 | `NPC_LLM_EXTRA_BODY` | 无 | 一段 JSON 原样并入请求体（各家方言自己填，覆盖 v4 的默认参数） |
