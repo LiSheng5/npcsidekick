@@ -104,17 +104,18 @@ class LLMClient:
         if provider is not None:
             self._provider = provider
         else:
-            from core.factory import create_provider
+            from core.factory import create_provider, current_llm_config, hint_list
 
-            api_key = config.API_KEY
-            if not api_key:
+            status = current_llm_config()
+            if not status["ready"]:
+                # 响亮失败：说清缺哪几项（未配齐时服务照常起，走角色卡 rules 兜底）
                 raise RuntimeError(
-                    "请设置 API_KEY (在 config.py) 或环境变量 DEEPSEEK_API_KEY / OPENAI_API_KEY"
+                    "LLM 三件套未配齐，缺: " + "、".join(hint_list(status["missing"]))
                 )
             self._provider = create_provider(
-                api_key=api_key,
-                model_name=config.MODEL_NAME,
-                base_url=config.BASE_URL,
+                api_key=config.API_KEY,
+                model_name=status["model"],
+                base_url=status["base_url"],
                 temperature=config.TEMPERATURE,
                 max_tokens=config.MAX_TOKENS,
             )

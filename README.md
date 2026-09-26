@@ -32,8 +32,10 @@ NPCSidekick_v4/
 pip install -r requirements.txt
 ```
 
-API Key 按优先级读取：环境变量 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY`
-→ 工程根 `api_key.txt`。没有 key 也能起服务，此时 `/api/talk` 回退角色卡里的 `rules` 回复，不提议动作。
+**模型由你自己配，v4 不绑任何厂商**：配 `AGENT_MODEL` + `NPC_API_KEY` + `NPC_BASE_URL` 三件套即可
+（Key 也可放工程根 `api_key.txt`；旧名 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY` 仍兼容）。
+三件套缺任何一项也能起服务 —— 此时 `/api/talk` 回退角色卡里的 `rules` 回复、不提议动作，
+`GET /api/state` 的 `llm.missing` 会写明缺哪几项。接谁当大脑见下方「换模型」。
 
 可选依赖（缺失自动降级，不装也能跑）：`jieba`（中文分词，检索更准）、`edge-tts`（语音合成，装了才有 `audio` 帧）。
 
@@ -43,7 +45,28 @@ API Key 按优先级读取：环境变量 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` 
 python -m uvicorn server:app --host 127.0.0.1 --port 8765
 ```
 
-服务器只绑 `127.0.0.1`（本地，不出机器）。默认模型 `deepseek-v4-flash`。
+服务器只绑 `127.0.0.1`（本地，不出机器）。用哪个模型由环境变量决定（见下方「换模型」）。
+
+### 换模型（三件套）
+
+v4 只走 OpenAI 兼容端点 —— 国内外主流厂商与本地 Ollama/vLLM 基本都提供，换三家变量即可：
+
+| 想接 | `AGENT_MODEL` | `NPC_BASE_URL`（**以厂商最新文档为准**） |
+|---|---|---|
+| DeepSeek | `deepseek-v4-flash` / `deepseek-v4-pro` | `https://api.deepseek.com` |
+| OpenAI | `gpt-5` 等 | `https://api.openai.com/v1` |
+| 通义千问（百炼） | `qwen-plus` 等 | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| Kimi / Moonshot | `kimi-k3` 等 | `https://api.moonshot.cn/v1` |
+| 智谱 GLM | `glm-5.2` 等 | `https://open.bigmodel.cn/api/paas/v4` |
+| 本地 Ollama | `qwen3:8b` 等 | `http://localhost:11434/v1` |
+| OpenRouter（一个端点用多家，含 Claude / Gemini） | `anthropic/claude-...` 等 | `https://openrouter.ai/api/v1` |
+| 其它厂商 / 自建网关 / 代理 | 厂商给的模型名 | 厂商文档里的兼容端点 |
+
+端点解析规则：**显式配的 `NPC_BASE_URL` 永远优先**，不会被模型名推断覆盖（接网关时这条是关键）；
+没配端点时才按模型名猜厂商兜底，猜不出就是"未配置"。
+
+各家方言（思考参数、长度参数名等）v4 不做猜测 —— 用 `NPC_LLM_EXTRA_BODY` 自己填，
+一段 JSON 原样并入请求体，例如 OpenAI 系思考档位：`NPC_LLM_EXTRA_BODY='{"reasoning":{"effort":"high"}}'`。
 
 ## 走一遍四个端点（报到 / 对话 / 回报 / 状态）
 
@@ -97,9 +120,11 @@ python -m pytest tests -q
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `AGENT_MODEL` | `deepseek-v4-flash` | 模型名（`deepseek-v4-pro` 更强） |
-| `DEEPSEEK_API_KEY` 等 | 无 | API Key（无 key → 回退角色卡 `rules` 回复） |
-| `NPC_REASONING_EFFORT` | 未设置 | 思考模式：`off`/`disabled`/`none` 显式关；`low`/`medium`/`high`/`max` 开；未设置 = 服务端默认（实测 `deepseek-flash` 默认返回 reasoning） |
+| `AGENT_MODEL`（或 `NPC_MODEL`） | 无 | 模型名，用户自定（不设 = 未配置，无大脑） |
+| `NPC_API_KEY` | 无 | API Key（旧名 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY` 仍兼容；也可放 `api_key.txt`） |
+| `NPC_BASE_URL` | 无 | OpenAI 兼容端点；不设时按模型名猜厂商兜底，猜不出 = 未配置 |
+| `NPC_LLM_EXTRA_BODY` | 无 | 一段 JSON 原样并入请求体（各家方言自己填，覆盖 v4 的默认参数） |
+| `NPC_REASONING_EFFORT` | 未设置 | 思考模式：`off`/`disabled`/`none` 显式关；`low`/`medium`/`high`/`max` 开；未设置 = 服务端默认 |
 | `NPC_SUMMARY_TOKEN_THRESHOLD` | `20000` | 滚动摘要触发阈值（绝对 token 数） |
 | `NPC_SUMMARY_KEEP_RECENT` | `8` | 摘要后仍逐字保留的最近轮数 |
 | `NPC_MOD_HEARTBEAT_TIMEOUT` | `60` | mod 心跳超时（秒）：超时视离线，不再提议动作 |
