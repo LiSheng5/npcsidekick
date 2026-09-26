@@ -1,10 +1,10 @@
-"""持久聊天记录 + 滚动摘要（设计.md §4.1 / §4.3）。
+"""持久聊天记录 + 滚动摘要。
 
   · 每 NPC 一份 store/{id}_chat.jsonl，逐轮追加（用户/助手各一行）—— 重启不丢
   · 上下文超阈值（默认 20K token，可配）→ 把最旧的轮次让 LLM 压成一段摘要，
     存 store/{id}_summary.json，下次拼上下文时放在最前面
-  · 摘要只保脉络：重要事实由 remember 落进记忆卡（§4.3 原意）
-  · LLM 不可用时摘要失败 → 原聊天记录一行不动（§6 降级精神）
+  · 摘要只保脉络：重要事实由 remember 落进记忆卡（摘要不替代记忆）
+  · LLM 不可用时摘要失败 → 原聊天记录一行不动（降级不丢数据）
 """
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ from typing import Any, Dict, List, Optional
 
 from core.logging_config import log
 
-# 运行时数据目录（工程根/store，见 设计.md §8；测试用 monkeypatch 替换）
+# 运行时数据目录（工程根/store；测试用 monkeypatch 替换）
 STORE_DIR = Path(__file__).resolve().parent / "store"
 
-# 阈值与保留窗口（§4.3：绝对 token 数，默认 20K，可配；现读环境变量可热切）
+# 阈值与保留窗口（按估算的绝对 token 数，默认 20K，可配；现读环境变量可热切）
 DEFAULT_TOKEN_THRESHOLD = 20000
 DEFAULT_KEEP_RECENT_TURNS = 8
 _ENV_THRESHOLD = "NPC_SUMMARY_TOKEN_THRESHOLD"
@@ -66,7 +66,7 @@ def summary_path(npc_id: str) -> Path:
     return STORE_DIR / f"{npc_id}_summary.json"
 
 
-# ── token 估算（纯本地确定性，§4.3 只用于量级判断）──────────
+# ── token 估算（纯本地确定性，只用于量级判断，不求精确）─────
 
 def _is_cjk(ch: str) -> bool:
     code = ord(ch)
@@ -100,7 +100,7 @@ def select_recent(turns: List[Dict[str, Any]], token_budget: int) -> List[Dict[s
 # ── 读写 ─────────────────────────────────────────────────
 
 def append_turn(npc_id: str, user_text: str, assistant_text: str) -> None:
-    """追加一轮：用户一行 + 助手一行（§4.1）。"""
+    """追加一轮：用户一行 + 助手一行。"""
     path = chat_path(npc_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = time.time()
@@ -172,7 +172,7 @@ def _save_summary(npc_id: str, summary: str, covered: int) -> None:
         ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# ── 滚动摘要（§4.3）──────────────────────────────────────
+# ── 滚动摘要（超阈值就把最旧的轮次压成一段）────────────────
 
 def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None) -> Optional[str]:
     """超阈值时把最旧的轮次压成摘要；未超阈值/无内容可压/失败 → None。

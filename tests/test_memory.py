@@ -53,7 +53,7 @@ def test_pinned_entry_survives_prune(tmp_store):
     assert removed == 1
 
 
-# ── 半衰期修剪（§3.4）────────────────────────────────────
+# ── 半衰期修剪（强度 < 1.0 的旧条目被移除）───────────────
 
 def test_prune_half_life_thresholds(tmp_store):
     _add(content="72小时中等", importance=5, created_at=NOW - 72 * HOUR)      # 2.5 保留
@@ -75,7 +75,7 @@ def test_prune_empty_card_is_noop(tmp_store):
     assert memory.prune("nobody", now=NOW) == 0
 
 
-# ── 检索（AI Town 加权公式，§3.3）─────────────────────────
+# ── 检索（AI Town 加权公式）───────────────────────────────
 
 def test_retrieve_recency_wins_on_equal_others(tmp_store):
     memory.set_synonyms(None)
@@ -123,6 +123,22 @@ def test_synonyms_boost_ranking(tmp_store):
     assert memory._relevance_score("木材", "柴", ["柴"], {"木材"}, {"木材"}) == pytest.approx(1.0)
 
 
+def test_synonyms_param_beats_global_table(tmp_store):
+    """多 NPC 并发口径：检索只认显式传入的表，进程级全局表不参与。
+
+    场景 = A 的同义词表留在全局表里，B 检索时不该被它污染（server 每次请求都显式传表）。
+    """
+    _add(content="木材")
+    _add(content="石头")
+    # 两张表都把规范词写进自己的别名表（角色卡的实际写法）——否则谁都不命中，测不出方向
+    memory.set_synonyms({"石头": ["石头", "柴"]})   # 模拟别的 NPC / 别的请求留下的全局表
+    try:
+        entries = memory.retrieve("cang", "柴", synonyms={"木材": ["木材", "柴"]}, now=NOW)
+    finally:
+        memory.set_synonyms(None)
+    assert entries[0]["content"] == "木材"        # 按传入的表召回，而不是全局表里的「石头」
+
+
 def test_retrieve_top_k_and_empty_card(tmp_store):
     for i in range(6):
         _add(content=f"第{i}件")
@@ -141,7 +157,7 @@ def test_tokenize_fallback_without_jieba(monkeypatch):
     assert memory._tokenize("面，汤") == ["面", "汤"]
 
 
-# ── 兼容旧卡 / 往返 / 手改（§3.2）──────────────────────────
+# ── 兼容旧卡 / 往返 / 手改 ─────────────────────────────────
 
 def test_load_legacy_card_assigns_uuid(tmp_store):
     legacy = [
@@ -179,7 +195,7 @@ def test_importance_is_clamped(tmp_store):
     assert memory.add_entry("cang", "负数", importance=-3)["importance"] == 0
 
 
-# ── 动作结果写卡（§3.1）──────────────────────────────────
+# ── 动作结果写卡 ──────────────────────────────────────────
 
 def test_add_action_result_wording(tmp_store):
     ok = memory.add_action_result("cang", "cook", True, "面煮好了，玩家说不错")

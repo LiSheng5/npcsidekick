@@ -1,11 +1,11 @@
 """语音系统（edge-tts，免费微软 TTS）—— **输出通道**，与"说/做"分离。
 
-设计（设计.md §5）：
+输出通道的行为：
   · `/api/talk` 带 `voice=true` → 台词流结束后追加一个 `audio` 帧（base64 mp3）
   · `/api/tts` 独立端点 → 给任意文本配音（本地对话表 / 头顶气泡也能用）
   · 无 edge-tts / 无网 / 超时 → 不出 `audio` 帧，纯文本保底（语音=锦上添花）
 
-音色数据驱动（设计.md §7）：`persona["voice"]` 覆盖，缺省用 `DEFAULT_VOICE`。
+音色由角色卡决定：`persona["voice"]` 覆盖，缺省用 `DEFAULT_VOICE`。
 """
 from __future__ import annotations
 

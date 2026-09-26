@@ -9,7 +9,7 @@ import memory
 import tools
 
 
-# 协议.md §1 的三动作声明
+# mod 报上来的三个动作声明（cook / goto / chat）
 CAPS = [
     {"name": "cook", "desc": "用厨房做饭", "params": {"dish": "菜名(字符串)"}},
     {"name": "goto", "desc": "走到某地", "params": {"place": "地点名(字符串)"}},
@@ -56,7 +56,7 @@ def test_build_tool_definitions_includes_declared_actions():
 
 
 def test_whitelist_red_line():
-    """未声明的动作不可能出现在工具定义里（§1 白名单即唯一闸门）。"""
+    """未声明的动作不可能出现在工具定义里（白名单是唯一闸门）。"""
     defs = _defs_by_name(tools.build_tool_definitions([CAPS[0]]))
     assert "cook" in defs
     assert "goto" not in defs and "chat" not in defs
@@ -110,7 +110,7 @@ def test_run_recall_returns_verbatim_sorted(tmp_store):
     res = tools.run_tool("recall", {"query": "面"}, "cang")
 
     assert res.status == ToolResultStatus.SUCCESS
-    # 逐字返回（§4.4），按相关度排序
+    # 逐字返回（回忆结果照原文给模型），按相关度排序
     assert res.data == "- 锅里煮着面\n- 今天天气不错"
 
 
@@ -130,7 +130,7 @@ def test_run_recall_passes_synonyms(tmp_store):
 
 
 def test_action_tool_is_not_executed(tmp_store):
-    """动作工具走提议通道：不写卡、不执行（协议.md §3）。"""
+    """动作工具走提议通道：不写卡、不执行（执行权在游戏侧）。"""
     res = tools.run_tool("cook", {"dish": "面"}, "cang", capabilities=CAPS)
 
     assert res.status == ToolResultStatus.REJECTED

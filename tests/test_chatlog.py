@@ -14,7 +14,7 @@ def test_append_and_load(tmp_store):
     chatlog.append_turn("cang", "好", "吃吧。")
 
     lines = chatlog.chat_path("cang").read_text("utf-8").splitlines()
-    assert len(lines) == 6                                   # 逐轮两行（§4.1）
+    assert len(lines) == 6                                   # 每轮两行：用户一行 + 助手一行
     msgs = chatlog.load_turns("cang")
     assert [m["role"] for m in msgs] == ["user", "assistant"] * 3
     assert msgs[0]["content"] == "你好" and msgs[1]["content"] == "嗯，坐吧。"
@@ -61,7 +61,7 @@ def test_select_recent_respects_budget():
     assert chatlog.select_recent([], 10) == []
 
 
-# ── 滚动摘要（§4.3）──────────────────────────────────────
+# ── 滚动摘要（超阈值压旧轮次）────────────────────────────
 
 def _fill(npc_id: str, rounds: int, size: int = 10):
     for i in range(rounds):
