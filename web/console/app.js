@@ -62,12 +62,47 @@ async function api(path, { method = 'GET', body } = {}) {
 
 const store = { state: null, personas: [], npcId: null }
 
+// 模型与端点由用户自配（AGENT_MODEL / NPC_API_KEY / NPC_BASE_URL）：
+// 配齐 → 显示模型名（悬浮看端点）；没配齐 → 显示"未配置"并说清缺哪几项。
+function llmSummary(state) {
+  const llm = (state && state.llm) || null
+  if (llm && llm.ready === false) {
+    return {
+      ok: false,
+      text: '未配置',
+      title: `缺 ${(llm.missing || []).join('、')} —— 配齐 AGENT_MODEL / NPC_API_KEY / NPC_BASE_URL 后重启`,
+    }
+  }
+  const model = (llm && llm.model) || (state && state.model) || ''
+  if (model) {
+    const inferred = llm && llm.source === 'inferred' ? '（端点按模型名推断，建议显式配 NPC_BASE_URL）' : ''
+    return { ok: true, text: model, title: (llm && llm.base_url) ? llm.base_url + inferred : '' }
+  }
+  return { ok: false, text: '（无 key，规则回复）', title: '' }
+}
+
+function llmEndpointText(state) {
+  const llm = (state && state.llm) || null
+  if (!llm) return '—'
+  if (!llm.base_url) return `未配置（缺 ${(llm.missing || []).join('、')}）`
+  return llm.source === 'inferred'
+    ? `${llm.base_url}（按模型名推断，建议显式配 NPC_BASE_URL）`
+    : llm.base_url
+}
+
 async function refreshGlobals() {
   try { store.state = await api('/api/state') } catch (_) { store.state = null }
   try { store.personas = (await api('/api/personas')).personas || [] } catch (_) { store.personas = [] }
   if (!store.npcId && store.personas.length) store.npcId = store.personas[0].id
   const s = store.state
-  $('#foot-model').textContent = s ? s.model || '—' : '离线'
+  const footModel = $('#foot-model')
+  if (!s) {
+    footModel.textContent = '离线'
+  } else {
+    const llm = llmSummary(s)
+    footModel.textContent = llm.text
+    if (llm.title) footModel.title = llm.title
+  }
   $('#foot-effort').textContent = s ? (s.reasoning_effort || '默认') : '—'
   const mods = s && s.mods ? Object.keys(s.mods) : []
   const online = mods.filter((m) => s.mods[m].online)
@@ -125,9 +160,10 @@ async function renderOverview(view) {
     const mods = Object.entries(state.mods || {})
     const totalMem = npcs.npcs.reduce((a, n) => a + n.memory_entries, 0)
     const totalMsg = npcs.npcs.reduce((a, n) => a + n.chat_messages, 0)
-    box.replaceChildren(
+    const llm = llmSummary(state)
+    const cards = [
       h('div', { class: 'metrics' },
-        h('div', null, '模型', h('b', { text: state.model || '（无 key，规则回复）' })),
+        h('div', null, '模型', h('b', { text: llm.text, title: llm.title || null })),
         h('div', null, '思考档位', h('b', { text: state.reasoning_effort || '默认' })),
         h('div', null, 'NPC 数', h('b', { text: String(state.npcs) })),
         h('div', null, '记忆条数', h('b', { text: String(totalMem) })),
@@ -137,6 +173,7 @@ async function renderOverview(view) {
         h('div', { class: 'sec-title', text: '运行环境' }),
         h('div', { class: 'kv' }, h('span', { class: 'k', text: 'store' }), h('span', { class: 'v', text: state.store_dir })),
         h('div', { class: 'kv' }, h('span', { class: 'k', text: 'personas' }), h('span', { class: 'v', text: state.persona_dir })),
+        h('div', { class: 'kv' }, h('span', { class: 'k', text: 'LLM 端点' }), h('span', { class: 'v', text: llmEndpointText(state) })),
         h('div', { class: 'kv' }, h('span', { class: 'k', text: '已运行' }), h('span', { class: 'v', text: `${state.uptime_s}s` })),
         h('div', { class: 'kv' }, h('span', { class: 'k', text: 'mod' }),
           h('span', { class: 'v', text: mods.length ? mods.map(([m, v]) => `${m}（${v.online ? '在线' : '离线'}，${v.actions} 动作）`).join('　') : '未报到' }))),
@@ -146,7 +183,15 @@ async function renderOverview(view) {
           ? npcs.npcs.map((n) => h('div', { class: 'kv' },
               h('span', { class: 'k', text: n.npc_id }),
               h('span', { class: 'v', text: `记忆 ${n.memory_entries} 条　聊天 ${n.chat_messages} 条　最后活动 ${fmtClock(n.last_activity)}` })))
-          : h('div', { class: 'hint', text: '还没有 NPC —— personas/ 下加一个 JSON 就多一个' })))
+          : h('div', { class: 'hint', text: '还没有 NPC —— personas/ 下加一个 JSON 就多一个' }))
+    ]
+    // 没配齐三件套 → 顶部一条红字说清缺什么（/api/talk 此时走角色卡 rules 兜底）
+    if (!llm.ok) {
+      cards.unshift(banner(
+        `未接上大脑：${llm.title || llm.text}。未配齐时 /api/talk 走角色卡 rules 回复、不提议动作。`,
+        'error'))
+    }
+    box.replaceChildren(...cards)
   } catch (e) {
     box.replaceChildren(banner(`加载失败：${e.message}`, 'error'))
   }
