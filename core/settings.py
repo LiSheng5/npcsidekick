@@ -29,8 +29,13 @@ def _default_memory_dir() -> Path:
 
 
 def _load_api_key() -> str:
-    """按优先级加载 API Key: 环境变量 > api_key.txt 文件"""
-    key = (os.getenv("DEEPSEEK_API_KEY")
+    """按优先级加载 API Key: 环境变量 > api_key.txt 文件
+
+    通用名 NPC_API_KEY 优先（v4 不绑厂商）；DEEPSEEK_* / OPENAI_* / ZHIPU_* 是旧名，
+    仅为兼容保留。
+    """
+    key = (os.getenv("NPC_API_KEY")
+           or os.getenv("DEEPSEEK_API_KEY")
            or os.getenv("OPENAI_API_KEY")
            or os.getenv("ZHIPU_API_KEY")
            or "")
@@ -61,12 +66,17 @@ class AgentSettings:
     api_key_file: Path = field(default=None)
 
     # ── LLM ────────────────────────────────────────────
+    # 三件套全部由用户自配，v4 不预设厂商：模型名 / key / 端点任缺一项 → 没有大脑
+    # （/api/talk 走角色卡 rules 兜底回复，不提议动作）。
     model_name: str = field(default_factory=lambda:
-        os.getenv("AGENT_MODEL", "deepseek-v4-pro"))
-    provider_name: str = "auto"  # "auto" | "openai" | "deepseek"
+        os.getenv("AGENT_MODEL") or os.getenv("NPC_MODEL") or "")
+    provider_name: str = "auto"  # "auto" | "openai" | "deepseek" | ...
     api_key: str = field(default_factory=_load_api_key)
     base_url: str = field(default_factory=lambda:
-        os.getenv("DEEPSEEK_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.deepseek.com")
+        os.getenv("NPC_BASE_URL")
+        or os.getenv("DEEPSEEK_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or "")
     temperature: float = 0.2
     max_tokens: int = 8192
     reasoning_effort: str | None = None  # None | "low" | "medium" | "high" | "max"

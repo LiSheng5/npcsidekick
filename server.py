@@ -44,8 +44,7 @@ CONSOLE_DIR = Path(__file__).resolve().parent / "web" / "console"
 # 关系网节点头像（avatars/{id}.<ext>，静态挂在 /avatars；与控制台同属调试面）
 AVATAR_DIR = Path(__file__).resolve().parent / "avatars"
 
-# 默认模型（deepseek-v4-flash 便宜，deepseek-v4-pro 更强）
-DEFAULT_MODEL = "deepseek-v4-flash"
+# v4 不预设厂商：模型名 / key / 端点三件套由用户自配（AGENT_MODEL / NPC_API_KEY / NPC_BASE_URL）
 
 # 单次对话内的记忆工具循环上限（防死循环）
 MAX_TOOL_ROUNDS = 4
@@ -460,6 +459,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
     async def state():
         return {
             "model": getattr(llm_client, "model", None),
+            "llm": llm_config_status(),          # 三件套状态：缺什么写什么
             "reasoning_effort": reasoning_effort(),
             "tts": tts.available(),
             "store_dir": str(memory.STORE_DIR),
@@ -520,18 +520,30 @@ def _persona_ids() -> List[str]:
     return sorted(p.stem for p in PERSONA_DIR.glob("*.json") if not p.name.startswith("_"))
 
 
+def llm_config_status() -> Dict[str, Any]:
+    """当前 LLM 三件套状态（现读环境变量，可热切）：缺什么就写在 missing 里。"""
+    from core.factory import current_llm_config
+
+    return current_llm_config()
+
+
 def build_default_client() -> Optional[LLMClient]:
-    """按 DEFAULT_MODEL 创建 LLM 客户端；无 key → None。"""
-    if _api_key() is None:
+    """按用户配置创建 LLM 客户端；三件套缺任何一项 → None（走规则回复兜底）。"""
+    status = llm_config_status()
+    if not status["ready"]:
+        log.warning("llm_not_configured", missing=",".join(status["missing"]),
+                    hint="配齐后重启即生效；未配齐时 /api/talk 走角色卡 rules 回复")
         return None
+    if status["source"] == "inferred":
+        log.info("llm_base_url_inferred", model=status["model"], base_url=status["base_url"],
+                 hint="想换厂商/网关请显式配 NPC_BASE_URL")
     from core import config
     from core.factory import create_provider
 
-    model = os.environ.get("AGENT_MODEL") or DEFAULT_MODEL
     provider = create_provider(
         api_key=config.API_KEY,
-        model_name=model,
-        base_url=config.BASE_URL,
+        model_name=status["model"],
+        base_url=status["base_url"],
         temperature=config.TEMPERATURE,
         max_tokens=config.MAX_TOKENS,
     )

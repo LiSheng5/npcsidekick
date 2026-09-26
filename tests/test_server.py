@@ -431,17 +431,26 @@ def test_tool_call_buffer_tolerates_bad_json():
     assert buf.finalize(0)["args"] == {}
 
 
-def test_build_default_client_uses_flash_by_default(tmp_store, monkeypatch):
+def test_build_default_client_follows_user_config(tmp_store, monkeypatch):
+    """三件套由用户自配：缺模型名/端点 → None（不偷偷用默认厂商）；配齐 → 用配置的那套。"""
     import server
     from core import config
 
     monkeypatch.setattr(config, "API_KEY", "sk-test")
     monkeypatch.delenv("AGENT_MODEL", raising=False)
-    client = server.build_default_client()
-    assert client.model == "deepseek-v4-flash"
+    monkeypatch.delenv("NPC_MODEL", raising=False)
+    monkeypatch.delenv("NPC_BASE_URL", raising=False)
+    assert server.build_default_client() is None
 
+    monkeypatch.setenv("AGENT_MODEL", "qwen-plus")
+    monkeypatch.setenv("NPC_BASE_URL", "https://dashscope.example/v1")
+    client = server.build_default_client()
+    assert client.model == "qwen-plus"
+    assert client.provider.base_url == "https://dashscope.example/v1"
+
+    # 换模型名不改端点：显式配的端点永远优先，不被厂商推断覆盖
     monkeypatch.setenv("AGENT_MODEL", "deepseek-v4-pro")
-    assert server.build_default_client().model == "deepseek-v4-pro"
+    assert server.build_default_client().provider.base_url == "https://dashscope.example/v1"
 
 
 def test_build_default_client_without_key(tmp_store, monkeypatch):

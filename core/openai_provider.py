@@ -9,6 +9,8 @@ OpenAIProvider — OpenAI / DeepSeek / 任何 OpenAI 兼容 API 的 Provider 实
 
 from __future__ import annotations
 
+import json
+import os
 import re
 
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -16,8 +18,17 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from openai import OpenAI, AsyncOpenAI
 
 from core.client import LLMResponse
+from core.logging_config import log
 from core.types import StreamChunk
 from core.base import ProviderProtocol
+
+
+# NPC_LLM_EXTRA_BODY 里允许直接覆盖的 SDK 具名参数（其余字段一律进 extra_body）
+_TOP_LEVEL_KEYS = frozenset({
+    "temperature", "top_p", "max_tokens", "max_completion_tokens",
+    "presence_penalty", "frequency_penalty", "stop", "seed",
+    "parallel_tool_calls", "tool_choice", "response_format", "user",
+})
 
 
 class OpenAIProvider(ProviderProtocol):
@@ -45,6 +56,7 @@ class OpenAIProvider(ProviderProtocol):
         temperature: float = 0.2,
         max_tokens: int = 8192,
         reasoning_effort: str | None = None,
+        extra_body: Optional[dict] = None,
     ):
         if not api_key:
             raise RuntimeError("API Key 不能为空")
@@ -53,6 +65,7 @@ class OpenAIProvider(ProviderProtocol):
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._reasoning_effort = reasoning_effort
+        self._extra_body = extra_body or None
         self._base_url = base_url
         self._api_key = api_key
 
@@ -88,6 +101,46 @@ class OpenAIProvider(ProviderProtocol):
         if not self._glm_supports_effort():
             return {"thinking": {"type": "enabled"}}
         return {"thinking": {"type": "enabled", "reasoning_effort": re_value}}
+
+    def _user_body(self) -> dict:
+        """用户透传的请求体片段（环境变量 NPC_LLM_EXTRA_BODY，现读可热切）。
+
+        各家方言（思考参数、长度参数名…）由用户自己填，v4 不做模型画像；
+        非法 JSON → 记一条 warning 后忽略，绝不因此打断对话。
+        """
+        merged: dict = {}
+        raw = os.environ.get("NPC_LLM_EXTRA_BODY", "").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                log.warning("llm_extra_body_bad_json", raw=raw[:120])
+                parsed = None
+            if isinstance(parsed, dict):
+                merged.update(parsed)
+            elif parsed is not None:
+                log.warning("llm_extra_body_not_object", raw=raw[:120])
+        if self._extra_body:
+            merged.update(self._extra_body)
+        return merged
+
+    def _apply_extra_body(self, kwargs: dict) -> dict:
+        """把透传片段合进请求参数：SDK 具名参数走顶层，其余进 extra_body。
+
+        透传最后合并 —— 可覆盖 v4 自己拼的 thinking / 默认值。
+        """
+        user = self._user_body()
+        if not user:
+            return kwargs
+        body = dict(kwargs.get("extra_body") or {})
+        for key, value in user.items():
+            if key in _TOP_LEVEL_KEYS:
+                kwargs[key] = value
+            else:
+                body[key] = value
+        if body:
+            kwargs["extra_body"] = body
+        return kwargs
 
     def _is_openrouter(self) -> bool:
         """OpenRouter 聚合端点:思考请求/响应字段与 DeepSeek 直连不同。"""
@@ -137,6 +190,8 @@ class OpenAIProvider(ProviderProtocol):
         _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
         if _re:
             kwargs["extra_body"] = self._thinking_body(_re)
+        # 用户透传（NPC_LLM_EXTRA_BODY）最后合并，可覆盖上面拼好的 thinking
+        kwargs = self._apply_extra_body(kwargs)
 
         completion = self._client.chat.completions.create(**kwargs)
         choice = completion.choices[0]
@@ -198,6 +253,8 @@ class OpenAIProvider(ProviderProtocol):
         _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
         if _re:
             kwargs["extra_body"] = self._thinking_body(_re)
+        # 用户透传（NPC_LLM_EXTRA_BODY）最后合并，可覆盖上面拼好的 thinking
+        kwargs = self._apply_extra_body(kwargs)
 
         stream_response = await self._async_client.chat.completions.create(**kwargs)
 
