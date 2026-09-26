@@ -305,6 +305,36 @@ def test_action_result_failure_wording(tmp_store, write_persona, make_app_client
     assert memory.load_card("cang")[0]["content"] == "没做成: goto"
 
 
+def test_action_result_with_mod_refreshes_heartbeat(tmp_store, write_persona, make_app_client):
+    """回报结果时捎带 mod 也算一次心跳（协议 §1 / 简报 §3）。
+
+    场景：mod 执行长动作（>60s 没说话）后回报 —— 不该被判离线，否则大脑不再提议动作。
+    口径：只刷新**已报到过**的 mod；不带 mod 不猜是哪一个，心跳不动。
+    """
+    write_persona("cang")
+    client = make_app_client()
+    client.post("/api/capabilities", json=CAPS)
+    registry = client.app.state.registry
+
+    def online():
+        return client.get("/api/state").json()["mods"]["sims4"]["online"]
+
+    registry._mods["sims4"]["last_seen"] = 0.0            # 伪造成很久以前的心跳 = 已离线
+    assert online() is False
+
+    res = client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "note": "面好了", "mod": "sims4"})
+
+    assert res.status_code == 200
+    assert online() is True                               # 回报捎带 mod → 心跳刷新、重新在线
+
+    registry._mods["sims4"]["last_seen"] = 0.0
+    client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "note": "面好了"})   # 不带 mod
+
+    assert online() is False                              # 不带 mod 不刷新（不猜是哪个 mod）
+
+
 @pytest.mark.parametrize("bad", [
     {},
     {"npc_id": "cang"},
