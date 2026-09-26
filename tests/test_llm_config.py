@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import types
 from pathlib import Path
 
 import pytest
@@ -325,3 +326,69 @@ def test_gitignore_covers_secret_files():
     text = (Path(__file__).resolve().parents[1] / ".gitignore").read_text("utf-8")
     for name in ("api_key.txt", "store/"):
         assert name in text
+
+
+# ── api_key.txt 权限：只检测，不自动改 ────────────────────
+
+def test_perm_check_skips_non_windows(tmp_path, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server.os, "name", "posix")
+    target = tmp_path / "api_key.txt"
+    target.write_text("sk-x", encoding="utf-8")
+
+    assert server.scan_key_file_perm(target) is None
+
+
+def test_perm_check_skips_missing_file(tmp_path, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server.os, "name", "nt")
+    assert server.scan_key_file_perm(tmp_path / "不存在.txt") is None
+
+
+def test_perm_check_detects_world_readable(tmp_path, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server.os, "name", "nt")
+    monkeypatch.setenv("USERNAME", "me")
+    target = tmp_path / "api_key.txt"
+    target.write_text("sk-x", encoding="utf-8")
+    out = f"{target} BUILTIN\\Users:(R)\r\n NT AUTHORITY\\SYSTEM:(F)\r\n"
+    monkeypatch.setattr(server.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(stdout=out, returncode=0))
+
+    hint = server.scan_key_file_perm(target)
+
+    assert hint is not None
+    assert "icacls" in hint and str(target) in hint
+    assert "me:(R,W)" in hint                      # 给的命令是可直接复制的
+    assert "不会自动改" in hint
+
+
+def test_perm_check_quiet_when_private(tmp_path, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server.os, "name", "nt")
+    target = tmp_path / "api_key.txt"
+    target.write_text("sk-x", encoding="utf-8")
+    out = f"{target} NT AUTHORITY\\SYSTEM:(F)\r\n DESKTOP\\me:(F)\r\n"
+    monkeypatch.setattr(server.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(stdout=out, returncode=0))
+
+    assert server.scan_key_file_perm(target) is None
+
+
+def test_perm_check_silent_when_icacls_fails(tmp_path, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server.os, "name", "nt")
+    target = tmp_path / "api_key.txt"
+    target.write_text("sk-x", encoding="utf-8")
+
+    def boom(*a, **k):
+        raise OSError("icacls 不存在")
+
+    monkeypatch.setattr(server.subprocess, "run", boom)
+
+    assert server.scan_key_file_perm(target) is None

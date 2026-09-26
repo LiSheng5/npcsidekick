@@ -1286,7 +1286,10 @@ async function renderModel(view) {
       h('div', { class: 'kv' }, h('span', { class: 'k', text: 'API Key' }),
         h('span', { class: 'v', text: cur.api_key && cur.api_key.present
           ? `${cur.api_key.masked}（来自 ${cur.api_key.source || '未知'}）`
-          : '未配置 —— 放环境变量 NPC_API_KEY 或工程根 api_key.txt' }))),
+          : '未配置 —— 放环境变量 NPC_API_KEY 或工程根 api_key.txt' })),
+      ...(cur.api_key && cur.api_key.perm_hint
+        ? [h('p', { class: 'hint', text: cur.api_key.perm_hint })]
+        : [])),
     h('div', { class: 'card', style: 'padding:16px 18px' },
       h('div', { class: 'sec-title', text: '改配置' }),
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '模型名：' }), model),
