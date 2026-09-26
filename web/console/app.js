@@ -1220,7 +1220,11 @@ async function renderModel(view) {
   try {
     cur = await api('/api/llm')
   } catch (e) {
-    box.replaceChildren(banner(`加载失败：${e.message}`, 'error'))
+    // 404 = 后端是加这个端点之前的旧进程 —— 直接告诉用户该干嘛，别让他自己猜
+    const tip = e.status === 404
+      ? '后端还是旧版本（没有 /api/llm）—— 重启服务（uvicorn server:app）后再打开本页'
+      : e.message
+    box.replaceChildren(banner(`加载失败：${tip}`, 'error'))
     return
   }
 
