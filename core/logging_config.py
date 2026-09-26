@@ -75,7 +75,7 @@ def configure_logging(
     )
 
     # 抑制 noisy 第三方库
-    for noisy in ("httpx", "openai", "chromadb", "urllib3"):
+    for noisy in ("httpx", "openai", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     # ── 选择渲染器 ─────────────────────────────────────

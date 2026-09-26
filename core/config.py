@@ -72,11 +72,6 @@ REFLECTION_ENABLED  = _s.reflection_enabled
 REFLECTION_USE_LLM  = _s.reflection_use_llm
 REFLECTION_DEPTH    = _s.reflection_depth
 
-# Vector Store
-VECTOR_STORE_DIR              = _s.vector_store_dir
-VECTOR_SEARCH_TOP_K           = _s.vector_search_top_k
-VECTOR_SIMILARITY_THRESHOLD   = _s.vector_similarity_threshold
-
 # Context Compression
 COMPRESSION_TOKEN_THRESHOLD     = _s.compression_token_threshold
 COMPRESSION_RATIO               = _s.compression_ratio

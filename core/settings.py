@@ -83,11 +83,6 @@ class AgentSettings:
     reflection_use_llm: bool = True
     reflection_depth: int = 1
 
-    # ── Vector Store ───────────────────────────────────
-    vector_store_dir: Path = field(default=None)
-    vector_search_top_k: int = 15
-    vector_similarity_threshold: float = 0.3
-
     def __post_init__(self):
         # Path defaults that depend on other fields (merged — only one __post_init__ allowed)
         if self.short_term_file is None:
@@ -98,8 +93,6 @@ class AgentSettings:
             self.notes_file = self.base_dir / "notes.txt"
         if self.api_key_file is None:
             self.api_key_file = self.base_dir / "api_key.txt"
-        if self.vector_store_dir is None:
-            self.vector_store_dir = self.memory_dir / "chroma"
 
     # ── Context Compression ────────────────────────────
     compression_token_threshold: int = 4000
