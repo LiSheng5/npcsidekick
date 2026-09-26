@@ -441,6 +441,12 @@ def create_app(llm_client: Optional[LLMClient] = None,
         if not isinstance(note, str):
             raise HTTPException(status_code=400, detail="字段 note 必须是字符串")
 
+        mod = body.get("mod")
+        if isinstance(mod, str) and mod.strip():
+            # 捎带 mod 也算一次心跳（协议 §1）：长动作执行完回报时，mod 不该被判离线。
+            # 只刷新已报到过的 mod；不带 mod 就不猜是哪一个。
+            registry.touch(mod.strip())
+
         async with lock_for(npc_id):
             entry = memory.add_action_result(npc_id, action, ok, note)
         log.info("action_result_recorded", npc_id=npc_id, action=action, ok=ok)
