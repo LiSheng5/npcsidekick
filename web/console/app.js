@@ -1139,17 +1139,48 @@ async function renderPersonas(view) {
     h('button', { class: 'btn', text: '刷新', onclick: () => route() })))
   const box = h('div', { class: 'mem-list' }, stateBlock('', '加载中…'))
   const newId = h('input', { class: 'input narrow', placeholder: '新 NPC id，如 cang' })
-  view.append(h('div', { class: 'filter-row' },
-    h('span', { class: 'hint', text: '打开：' }), npcSelect((id) => openPersona(box, id), store.npcId),
-    h('span', { class: 'spacer' }), newId,
-    h('button', {
-      class: 'btn', text: '新建',
-      onclick: async () => {
-        const id = newId.value.trim()
-        if (!id) return
-        await openPersona(box, id, { ...NEW_PERSONA_TPL, id })
-      },
-    })), box)
+
+  // 删除用的下拉（不复用 npcSelect —— 那个会顺手改掉当前选中的 NPC）
+  const delSel = h('select', { class: 'input narrow' },
+    store.personas.map((p) => h('option', {
+      value: p.id, text: p.name ? `${p.id} · ${p.name}` : p.id,
+    })))
+  if (store.npcId) delSel.value = store.npcId
+
+  view.append(
+    h('div', { class: 'filter-row' },
+      h('span', { class: 'hint', text: '打开：' }), npcSelect((id) => openPersona(box, id), store.npcId),
+      h('span', { class: 'spacer' }), newId,
+      h('button', {
+        class: 'btn', text: '新建',
+        onclick: async () => {
+          const id = newId.value.trim()
+          if (!id) return
+          await openPersona(box, id, { ...NEW_PERSONA_TPL, id })
+        },
+      })),
+    h('div', { class: 'filter-row' },
+      h('span', { class: 'hint', text: '删除：' }), delSel,
+      h('button', {
+        class: 'btn tiny danger', text: '删除这张角色卡',
+        onclick: async () => {
+          const id = delSel.value
+          if (!id) return
+          const ok = confirm(`删掉角色卡「${id}」？\n\n该 NPC 的记忆卡与聊天记录会保留（重建同名卡就能接着用）。\n此操作不可撤销。`)
+          if (!ok) return
+          try {
+            await api(`/api/personas/${encodeURIComponent(id)}`, { method: 'DELETE' })
+            store.flash = { text: `已删除角色卡 ${id} —— 记忆与聊天记录保留`, kind: 'ok' }
+            if (store.npcId === id) store.npcId = null
+          } catch (e) {
+            store.flash = { text: `删除失败：${e.message}`, kind: 'error' }
+          }
+          await refreshGlobals()
+          route()
+        },
+      }),
+      h('span', { class: 'hint', text: '只删 personas/{id}.json，不动 store/ 里的记忆与聊天' })),
+    box)
   await openPersona(box, store.npcId)
 }
 

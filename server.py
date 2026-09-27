@@ -653,16 +653,28 @@ def scan_key_file_perm(path: Optional[Path] = None) -> Optional[str]:
     if not hits:
         return None
     user = os.environ.get("USERNAME") or os.environ.get("USER") or "当前用户"
-    return (f"api_key.txt 对其他账户也可读（{hits[0]}）—— v4 不会自动改你的文件，"
+    return (f"{target.name} 对其他账户也可读（{hits[0]}）—— v4 不会自动改你的文件，"
             f'要收紧请自己跑：icacls "{target}" /inheritance:r '
             f'/grant:r "{user}:(R,W)" "SYSTEM:(F)" "Administrators:(F)"')
 
 
 def key_perm_hint(refresh: bool = False) -> Optional[str]:
-    """给日志与页面用的提示（只算一次，重启才刷新）。"""
+    """给日志与页面用的提示（只算一次，重启才刷新）。
+
+    扫两处明文 key：工程根 `api_key.txt`、以及页面存下来的 `store/llm_config.json`
+    （只在它真存了 key 时才提示）。
+    """
     global _KEY_PERM_HINT, _KEY_PERM_CHECKED
     if refresh or not _KEY_PERM_CHECKED:
-        _KEY_PERM_HINT = scan_key_file_perm()
+        hints: List[str] = []
+        root = scan_key_file_perm()
+        if root:
+            hints.append(root)
+        if _load_llm_file().get("api_key"):
+            stored = scan_key_file_perm(llm_config_path())
+            if stored:
+                hints.append(stored)
+        _KEY_PERM_HINT = "；".join(hints) or None
         _KEY_PERM_CHECKED = True
     return _KEY_PERM_HINT
 

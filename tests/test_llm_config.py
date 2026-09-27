@@ -430,6 +430,29 @@ def test_perm_check_quiet_when_private(tmp_path, monkeypatch):
     assert server.scan_key_file_perm(target) is None
 
 
+def test_perm_check_covers_stored_page_key(tmp_path, monkeypatch):
+    """页面存了明文 key 的文件也要一起提示（方案 C 之后 llm_config.json 也是明文库）。"""
+    import server
+
+    monkeypatch.setattr(server.os, "name", "nt")
+    monkeypatch.setenv("USERNAME", "me")
+    monkeypatch.setattr(server, "llm_config_path", lambda: tmp_path / "llm_config.json")
+    (tmp_path / "llm_config.json").write_text(
+        json.dumps({"api_key": "sk-x", "_warning": "…"}), encoding="utf-8")
+
+    def fake(cmd, *a, **k):
+        target = cmd[1]
+        return types.SimpleNamespace(
+            stdout=f"{target} BUILTIN\\Users:(R)\r\n", returncode=0)
+
+    monkeypatch.setattr(server.subprocess, "run", fake)
+
+    hint = server.key_perm_hint(refresh=True)
+
+    assert hint and "llm_config.json" in hint          # 提示里点名这个文件
+    assert "icacls" in hint
+
+
 def test_perm_check_silent_when_icacls_fails(tmp_path, monkeypatch):
     import server
 

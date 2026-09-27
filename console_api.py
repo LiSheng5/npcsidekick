@@ -187,6 +187,26 @@ def build_router(persona_dir: Path,
         log.info("persona_saved", npc_id=npc_id)
         return {"ok": True, "npc_id": npc_id, "persona": persona}
 
+    @router.delete("/personas/{npc_id}")
+    async def delete_persona(npc_id: str):
+        """删掉一张角色卡（只删 `personas/{id}.json`）。
+
+        `_` 开头的文件是模板/说明，不算 NPC，也不许删。
+        **记忆卡与聊天记录不动**（数据在 store/ 里，重建同名角色卡就能接着用 —— 删卡不该连带删记忆）。
+        """
+        if not _valid_id(npc_id) or npc_id.startswith("_"):
+            raise HTTPException(status_code=400, detail=f"非法的 NPC id: {npc_id}")
+        path = _persona_path(npc_id)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"没有这张角色卡: {npc_id}")
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"删除失败: {exc}") from exc
+        log.info("persona_deleted", npc_id=npc_id)
+        return {"ok": True, "npc_id": npc_id,
+                "kept": "记忆卡与聊天记录保留（重建同名角色卡即可接着用）"}
+
     # ── 关系网（persona 的 relations 字段驱动；无数据 → 诚实空态）──
 
     @router.get("/relationships")

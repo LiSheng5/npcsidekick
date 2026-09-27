@@ -72,6 +72,37 @@ def test_get_persona_and_404(tmp_store, write_persona, make_app_client):
     assert client.get("/api/personas/nobody").status_code == 404
 
 
+def test_delete_persona_keeps_memory_and_chat(tmp_store, persona_dir, write_persona,
+                                              make_app_client):
+    """删卡只删 personas/{id}.json —— 记忆与聊天留在 store/（重建同名卡还能接着用）。"""
+    write_persona("cang")
+    memory.add_entry("cang", "玩家爱吃面")
+    chatlog.append_turn("cang", "在吗", "嗯。")
+    client = make_app_client()
+
+    res = client.delete("/api/personas/cang")
+
+    assert res.status_code == 200 and res.json()["ok"] is True
+    assert not (persona_dir / "cang.json").exists()
+    assert [i["id"] for i in client.get("/api/personas").json()["personas"]] == []
+    assert len(memory.load_card("cang")) == 1        # 记忆还在
+    assert len(chatlog.load_turns("cang")) == 2      # 聊天还在
+    assert client.delete("/api/personas/cang").status_code == 404
+
+
+def test_delete_persona_rejects_template_and_traversal(tmp_store, persona_dir, write_persona,
+                                                       make_app_client):
+    write_persona("cang")
+    (persona_dir / "_模板.json").write_text("{}", encoding="utf-8")
+    client = make_app_client()
+
+    assert client.delete("/api/personas/_模板").status_code == 400      # 模板/说明不许删
+    # 路径穿越：要么被 id 正则挡掉(400)，要么路由压根不匹配(404) —— 关键是文件不能少
+    assert client.delete("/api/personas/..%2F..%2Fserver.py").status_code in (400, 404)
+    assert (persona_dir / "_模板.json").exists()
+    assert (persona_dir / "cang.json").exists()
+
+
 def test_put_persona_creates_and_updates(tmp_store, persona_dir, make_app_client):
     client = make_app_client()
 
