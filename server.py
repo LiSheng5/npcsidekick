@@ -550,11 +550,15 @@ def _persona_ids() -> List[str]:
 
 # ── LLM 设置（页面可改，落 store/llm_config.json；key 不在这里）──
 
-_LLM_FIELDS = ("model", "base_url", "reasoning_effort", "thinking_unsupported")
+_LLM_FIELDS = ("model", "base_url", "api_key", "reasoning_effort", "thinking_unsupported")
 _EFFORT_VALUES = ("off", "disabled", "none", "low", "medium", "high", "max")
 
-# 敏感字段名：这些绝不进页面、绝不进 store/llm_config.json（收到就响亮拒绝）
-_SENSITIVE_KEYS = ("api_key", "key", "token", "authorization", "secret")
+# 只有 api_key 是允许字段（页面可填，明文落盘，见 _PLAIN_KEY_WARNING）；
+# 其余凭据类字段一律响亮拒绝，别被静默吞掉。
+_FORBIDDEN_KEYS = ("token", "authorization", "secret", "password")
+
+_PLAIN_KEY_WARNING = ("页面填的 key 以**明文**存在 store/llm_config.json —— "
+                      "别分享、别提交这个文件；想更安全就清空它，改用环境变量 NPC_API_KEY。")
 
 
 def mask_secret(value: str) -> str:
@@ -567,14 +571,21 @@ def mask_secret(value: str) -> str:
     return f"{value[:3]}…{value[-4:]}"
 
 
-def scrub(text: str) -> str:
-    """日志/报错脱敏：把当前 key 的原文换成掩码（异常里偶尔会带出请求头/URL）。"""
+def effective_api_key() -> str:
+    """生效的 key：页面填的（store/llm_config.json）优先，其次环境变量 / api_key.txt。"""
     from core import config
 
-    key = config.API_KEY or ""
+    return str(llm_settings().get("api_key") or "").strip() or (config.API_KEY or "")
+
+
+def scrub(text: str) -> str:
+    """日志/报错脱敏：把生效 key 与环境变量 key 的原文都换成掩码。"""
+    from core import config
+
     out = text or ""
-    if len(key) >= 6 and key in out:
-        out = out.replace(key, mask_secret(key))
+    for key in {effective_api_key(), config.API_KEY or ""}:
+        if len(key) >= 6 and key in out:
+            out = out.replace(key, mask_secret(key))
     return out
 
 
@@ -583,12 +594,17 @@ def api_key_status() -> Dict[str, Any]:
     from core import config
     from core.settings import api_key_source
 
-    key = config.API_KEY or ""
+    # "页面填的"要看持久化层（文件 + 运行时），不能看合并值 —— 合并值已经回落过环境变量了
+    from_page = str(_persisted_llm_config().get("api_key") or "").strip()
+    env_key = config.API_KEY or ""
+    key = from_page or env_key
     return {
         "present": bool(key),
         "masked": mask_secret(key) or None,
-        "source": api_key_source() or None,
+        "source": "store/llm_config.json（页面填的）" if from_page else (api_key_source() or None),
+        "from_page": bool(from_page),
         "perm_hint": key_perm_hint(),     # api_key.txt 权限太松时的提示（Windows 才有）
+        "plain_warning": _PLAIN_KEY_WARNING if from_page else None,
     }
 
 
@@ -669,7 +685,12 @@ def _load_llm_file() -> Dict[str, Any]:
 def _save_llm_file(cfg: Dict[str, Any]) -> None:
     path = llm_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    blob = {k: v for k, v in cfg.items() if k in _LLM_FIELDS}
+    if blob.get("api_key"):
+        # 明文 key 落盘 —— 文件自带一行警告：万一被拷走/误发，打开就看得见
+        blob["_warning"] = ("本文件含明文 API Key：不要分享、不要提交到仓库；"
+                            "想更安全就删掉它，改用环境变量 NPC_API_KEY。")
+    path.write_text(json.dumps(blob, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _env_llm_config() -> Dict[str, Any]:
@@ -679,6 +700,7 @@ def _env_llm_config() -> Dict[str, Any]:
     return {
         "model": os.environ.get("AGENT_MODEL") or os.environ.get("NPC_MODEL") or "",
         "base_url": os.environ.get("NPC_BASE_URL") or config.BASE_URL or "",
+        "api_key": config.API_KEY or "",
         "reasoning_effort": os.environ.get(_ENV_REASONING_EFFORT) or "",
         "thinking_unsupported": False,
     }
@@ -690,6 +712,16 @@ def llm_settings() -> Dict[str, Any]:
     merged.update({k: v for k, v in _load_llm_file().items() if k in _LLM_FIELDS})
     merged.update(_LLM_RUNTIME)
     return merged
+
+
+def _persisted_llm_config() -> Dict[str, Any]:
+    """要落盘的那份 = 文件里原有的 + 页面改的（**不含环境变量那一层**）。
+
+    否则保存时会把环境变量里的 key 抄进文件 —— 用户没在页面填过也变成明文存一份。
+    """
+    saved = {k: v for k, v in _load_llm_file().items() if k in _LLM_FIELDS}
+    saved.update(_LLM_RUNTIME)
+    return saved
 
 
 def _llm_origin() -> str:
@@ -707,7 +739,7 @@ def llm_config_status() -> Dict[str, Any]:
     from core.factory import resolve_llm_config
 
     cfg = llm_settings()
-    status = resolve_llm_config(api_key=config.API_KEY or "", model_name=cfg["model"],
+    status = resolve_llm_config(api_key=effective_api_key(), model_name=cfg["model"],
                                 base_url=cfg["base_url"])
     status["reasoning_effort"] = reasoning_effort()      # 用户设的档位
     status["thinking_effort"] = thinking_effort()        # 实际下发的（None = 一个都不发）
@@ -719,24 +751,36 @@ def llm_config_status() -> Dict[str, Any]:
 
 def apply_llm_settings(patch: Dict[str, Any],
                        holder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """改设置 → 落盘 → 换脑。校验不通过抛 ValueError（调用方转 400）。"""
-    for key in patch:                       # 护栏：key 类字段一律拒绝，别被静默吞掉
-        if str(key).lower() in _SENSITIVE_KEYS:
-            raise ValueError(f"key 不在这里改（收到字段 {key}）—— 请放环境变量 NPC_API_KEY 或工程根 api_key.txt")
+    """改设置 → 落盘 → 换脑。校验不通过抛 ValueError（调用方转 400）。
 
+    api_key 是唯一允许的凭据字段：填了就明文存 store/llm_config.json（页面优先），
+    传空串 = 删掉它、回到环境变量那一层。
+    """
+    for key in patch:                       # 护栏：凭据类字段（token/secret…）一律拒绝
+        if str(key).lower() in _FORBIDDEN_KEYS:
+            raise ValueError(f"字段 {key} 不接受 —— 要配 key 请用 api_key，或放环境变量 NPC_API_KEY")
+
+    clear_key = False
     clean: Dict[str, Any] = {}
-    for key in ("model", "base_url", "reasoning_effort"):
+    for key in ("model", "base_url", "api_key", "reasoning_effort"):
         if key not in patch or patch[key] is None:
             continue
         value = str(patch[key]).strip()
         if key == "reasoning_effort" and value and value not in _EFFORT_VALUES:
             raise ValueError(f"思考档位只能是 {'/'.join(_EFFORT_VALUES)} 或留空（不指定）")
+        if not value and key == "api_key":
+            _LLM_RUNTIME.pop("api_key", None)    # 清空 = 删掉它，回到环境变量
+            clear_key = True
+            continue
         clean[key] = value
     if patch.get("thinking_unsupported") is not None:
         clean["thinking_unsupported"] = bool(patch["thinking_unsupported"])
 
     _LLM_RUNTIME.update(clean)
-    _save_llm_file({k: v for k, v in llm_settings().items() if k in _LLM_FIELDS})
+    saved = _persisted_llm_config()
+    if clear_key:
+        saved.pop("api_key", None)
+    _save_llm_file(saved)
     if holder is not None:
         rebuild_llm(holder)
     return llm_config_status()
@@ -773,7 +817,7 @@ def build_default_client() -> Optional[LLMClient]:
     from core.factory import create_provider
 
     provider = create_provider(
-        api_key=config.API_KEY,
+        api_key=effective_api_key(),        # 页面填的 key 优先，其次环境变量 / api_key.txt
         model_name=status["model"],
         base_url=status["base_url"],
         temperature=config.TEMPERATURE,

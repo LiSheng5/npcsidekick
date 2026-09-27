@@ -1237,6 +1237,13 @@ async function renderModel(view) {
   effort.value = cur.reasoning_effort || ''
   const noThink = h('input', { type: 'checkbox' })
   noThink.checked = !!cur.thinking_unsupported
+  // key 明文落盘：输入不回显（页面只回掩码），留空 = 不改
+  const apiKey = h('input', {
+    class: 'input', type: 'password', autocomplete: 'off',
+    placeholder: cur.api_key && cur.api_key.masked
+      ? `已保存 ${cur.api_key.masked} —— 留空不改，填写则替换`
+      : '留空 = 用环境变量 / api_key.txt；填写则明文存 store/llm_config.json',
+  })
 
   const reload = async () => { await refreshGlobals(); route() }
 
@@ -1247,6 +1254,7 @@ async function renderModel(view) {
         body: {
           model: model.value, base_url: base.value,
           reasoning_effort: effort.value, thinking_unsupported: noThink.checked,
+          ...(apiKey.value ? { api_key: apiKey.value } : {}),   // 留空 = 不动已保存的
         },
       })
       store.flash = next.ready
@@ -1262,6 +1270,17 @@ async function renderModel(view) {
     try {
       await api('/api/llm', { method: 'DELETE' })
       store.flash = { text: '已清掉页面设置，回到环境变量那一层', kind: 'ok' }
+    } catch (e) {
+      store.flash = { text: `清除失败：${e.message}`, kind: 'error' }
+    }
+    await reload()
+  }
+
+  // 只删 key，模型/端点/思考档位留着
+  const clearKey = async () => {
+    try {
+      await api('/api/llm', { method: 'PUT', body: { api_key: '' } })
+      store.flash = { text: '已删掉明文 key，改回环境变量 / api_key.txt 那一把', kind: 'ok' }
     } catch (e) {
       store.flash = { text: `清除失败：${e.message}`, kind: 'error' }
     }
@@ -1297,6 +1316,12 @@ async function renderModel(view) {
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '深度思考：' }), effort),
       h('label', { class: 'filter-row' }, noThink,
         h('span', { class: 'hint', text: '该模型不认思考参数 —— 勾上后一律不下发（不支持深度思考的模型选这个，效果等于关闭且不会报错）' })),
+      h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: 'API Key：' }), apiKey),
+      ...(cur.api_key && cur.api_key.from_page
+        ? [banner('已保存的 key 是明文存在 store/llm_config.json —— 不要分享、不要提交这个文件（store/ 已在 .gitignore，不会进仓库）', 'error'),
+           h('div', { class: 'filter-row' },
+             h('button', { class: 'btn tiny danger', text: '删掉明文 key（改用环境变量）', onclick: clearKey }))]
+        : [h('p', { class: 'hint', text: '填了就是明文存盘（store/ 不进仓库，但本机能读到）；更安全的是留空、用环境变量 NPC_API_KEY。' })]),
       h('div', { class: 'filter-row' },
         h('button', { class: 'btn primary', text: '保存并应用', onclick: apply }),
         h('button', { class: 'btn', text: '恢复环境变量默认', onclick: reset }))),

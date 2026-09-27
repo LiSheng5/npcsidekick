@@ -289,13 +289,15 @@ def test_api_key_status_never_returns_raw(monkeypatch):
     assert "SUPERSECRET" not in json.dumps(status)
 
 
-def test_apply_rejects_api_key_field(clean_llm):
-    """护栏：收到 key 类字段要响亮拒绝，不能静默忽略。"""
-    with pytest.raises(ValueError):
-        clean_llm.apply_llm_settings({"api_key": "sk-xxx"})
+def test_apply_rejects_credential_fields(clean_llm):
+    """护栏：token/authorization/secret/password 这类字段响亮拒绝（api_key 是唯一例外）。"""
+    for field in ("token", "authorization", "secret", "password"):
+        with pytest.raises(ValueError):
+            clean_llm.apply_llm_settings({field: "xxx"})
 
 
-def test_saved_llm_file_has_no_secret(clean_llm, monkeypatch, tmp_store):
+def test_saved_llm_file_has_no_secret_when_key_not_filled(clean_llm, monkeypatch, tmp_store):
+    """没在页面填 key → 文件里不该出现环境变量那把 key。"""
     from core import config
 
     monkeypatch.setattr(config, "API_KEY", "sk-SUPERSECRET123456")
@@ -303,7 +305,56 @@ def test_saved_llm_file_has_no_secret(clean_llm, monkeypatch, tmp_store):
 
     raw = (tmp_store / "llm_config.json").read_text("utf-8")
     assert "SUPERSECRET" not in raw
-    assert set(json.loads(raw)) == set(clean_llm._LLM_FIELDS)
+    assert set(json.loads(raw)) <= set(clean_llm._LLM_FIELDS)
+
+
+# ── 页面填 key（方案 C：明文落盘 + 醒目提示 + 接口只回掩码）──
+
+def test_page_key_stored_plain_but_never_echoed(clean_llm, monkeypatch, tmp_store):
+    from core import config
+
+    monkeypatch.setattr(config, "API_KEY", "sk-FROMENV000000")
+    status = clean_llm.apply_llm_settings({"api_key": "sk-FROMPAGE999999"})
+
+    assert status["api_key"]["from_page"] is True
+    assert status["api_key"]["masked"] == "sk-…9999"
+    assert "FROMPAGE" not in json.dumps(status)          # 接口绝不回原文
+    assert clean_llm.effective_api_key() == "sk-FROMPAGE999999"   # 页面填的优先
+
+    raw = json.loads((tmp_store / "llm_config.json").read_text("utf-8"))
+    assert raw["api_key"] == "sk-FROMPAGE999999"          # 落盘就是明文（方案 C 的代价）
+    assert "不要分享" in raw["_warning"]                   # 文件自带警告
+
+
+def test_page_key_clear_falls_back_to_env(clean_llm, monkeypatch, tmp_store):
+    from core import config
+
+    monkeypatch.setattr(config, "API_KEY", "sk-FROMENV000000")
+    clean_llm.apply_llm_settings({"api_key": "sk-FROMPAGE999999"})
+    assert clean_llm.effective_api_key() == "sk-FROMPAGE999999"
+
+    status = clean_llm.apply_llm_settings({"api_key": ""})   # 清空 = 回到环境变量
+
+    assert clean_llm.effective_api_key() == "sk-FROMENV000000"
+    assert status["api_key"]["from_page"] is False
+    assert "api_key" not in json.loads((tmp_store / "llm_config.json").read_text("utf-8"))
+
+
+def test_endpoints_never_echo_page_key(tmp_store, write_persona, make_app_client, clean_llm,
+                                       monkeypatch):
+    from core import config
+
+    monkeypatch.setattr(config, "API_KEY", "sk-FROMENV000000")
+    client = make_app_client()
+
+    put = client.put("/api/llm", json={"api_key": "sk-FROMPAGE999999"})
+    assert put.status_code == 200
+    assert "FROMPAGE" not in put.text
+
+    for path in ("/api/state", "/api/llm"):
+        assert "FROMPAGE" not in client.get(path).text
+
+    assert client.put("/api/llm", json={"token": "xxx"}).status_code == 400
 
 
 def test_endpoints_never_echo_key(tmp_store, write_persona, make_app_client, clean_llm,
@@ -316,9 +367,9 @@ def test_endpoints_never_echo_key(tmp_store, write_persona, make_app_client, cle
     for path in ("/api/state", "/api/llm"):
         assert "SUPERSECRET" not in client.get(path).text
 
-    bad = client.put("/api/llm", json={"api_key": "sk-xxx"})
+    bad = client.put("/api/llm", json={"token": "xxx"})
     assert bad.status_code == 400
-    assert "key 不在这里改" in bad.json()["detail"]
+    assert "不接受" in bad.json()["detail"]
 
 
 def test_gitignore_covers_secret_files():

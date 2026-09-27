@@ -20,7 +20,7 @@
 ```bash
 pip install -r requirements.txt
 
-# 配大脑三件套（key 也可放工程根 api_key.txt）
+# 配大脑三件套（key 也可放工程根 api_key.txt，或在控制台「模型」页直接填）
 export AGENT_MODEL=deepseek-flash
 export NPC_API_KEY=sk-xxx
 export NPC_BASE_URL=https://api.deepseek.com

@@ -49,8 +49,10 @@ def build_router(persona_dir: Path,
 
     registry = server 的 Registry（能力清单 + 心跳）；给了才挂 GET /api/capabilities。
     avatar_dir = 头像存放目录（server 里静态挂在 /avatars）；None 表示不启用头像。
-    llm_api = 模型设置的读写回调 {status, apply, reset}；给了才挂 /api/llm 三个端点
-    （**key 不在其中** —— key 只走环境变量 / api_key.txt，不落这里、不进前端）。
+    llm_api = 模型设置的读写回调 {status, apply, reset}；给了才挂 /api/llm 三个端点。
+    可改字段：model / base_url / api_key / reasoning_effort / thinking_unsupported；
+    其中 api_key **明文落 store/llm_config.json**（页面已带醒目提示），接口永远只回掩码。
+    token / authorization / secret / password 这类字段一律 400。
     """
     router = APIRouter(prefix="/api", tags=["console"])
 
