@@ -40,6 +40,11 @@ _AVATAR_DATA_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp|gif);base64,([A-Za
 _ID_RE = re.compile(r"^[\w.-]{1,64}$", re.UNICODE)
 
 
+# 删卡时这句提示前后端同源（前端 confirm 与按钮旁说明照抄它，改就一起改）
+_DELETE_KEPT_NOTE = ("记忆卡与聊天记录保留（数据在 store/，重建同名卡接着用）"
+                     "—— 删卡不该连带删记忆")
+
+
 def build_router(persona_dir: Path,
                  lock_for: Callable[[str], Any],
                  registry: Any = None,
@@ -192,20 +197,28 @@ def build_router(persona_dir: Path,
         """删掉一张角色卡（只删 `personas/{id}.json`）。
 
         `_` 开头的文件是模板/说明，不算 NPC，也不许删。
-        **记忆卡与聊天记录不动**（数据在 store/ 里，重建同名角色卡就能接着用 —— 删卡不该连带删记忆）。
+        **记忆卡与聊天记录不动**（数据在 store/ 里，重建同名角色卡就能接着用 —— 删卡不该连带删记忆）；
+        响应与日志都会写明保留了什么（`_DELETE_KEPT_NOTE`，前端 confirm 用同一句话）。
         """
         if not _valid_id(npc_id) or npc_id.startswith("_"):
             raise HTTPException(status_code=400, detail=f"非法的 NPC id: {npc_id}")
         path = _persona_path(npc_id)
         if not path.exists():
             raise HTTPException(status_code=404, detail=f"没有这张角色卡: {npc_id}")
+
+        kept = {
+            "note": _DELETE_KEPT_NOTE,
+            "memory_entries": len(memory.load_card(npc_id)),
+            "chat_messages": len(chatlog.load_turns(npc_id)),
+            "store_dir": str(memory.STORE_DIR),
+        }
         try:
             path.unlink()
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"删除失败: {exc}") from exc
-        log.info("persona_deleted", npc_id=npc_id)
-        return {"ok": True, "npc_id": npc_id,
-                "kept": "记忆卡与聊天记录保留（重建同名角色卡即可接着用）"}
+        log.info("persona_deleted", npc_id=npc_id, kept_memory=kept["memory_entries"],
+                 kept_chat=kept["chat_messages"], note=_DELETE_KEPT_NOTE)
+        return {"ok": True, "npc_id": npc_id, "kept": kept}
 
     # ── 关系网（persona 的 relations 字段驱动；无数据 → 诚实空态）──
 

@@ -87,6 +87,13 @@ def test_delete_persona_keeps_memory_and_chat(tmp_store, persona_dir, write_pers
     assert [i["id"] for i in client.get("/api/personas").json()["personas"]] == []
     assert len(memory.load_card("cang")) == 1        # 记忆还在
     assert len(chatlog.load_turns("cang")) == 2      # 聊天还在
+
+    # 后端必须把"保留了什么"讲清楚（前端 confirm 用同一句话）
+    kept = res.json()["kept"]
+    assert "删卡不该连带删记忆" in kept["note"]
+    assert kept["memory_entries"] == 1 and kept["chat_messages"] == 2
+    assert kept["store_dir"]
+
     assert client.delete("/api/personas/cang").status_code == 404
 
 

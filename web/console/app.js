@@ -1166,11 +1166,19 @@ async function renderPersonas(view) {
         onclick: async () => {
           const id = delSel.value
           if (!id) return
-          const ok = confirm(`删掉角色卡「${id}」？\n\n该 NPC 的记忆卡与聊天记录会保留（重建同名卡就能接着用）。\n此操作不可撤销。`)
+          // 二次确认必须说清"保留什么" —— 删卡不该连带删记忆
+          const ok = confirm(
+            `删掉角色卡「${id}」？\n\n${DELETE_KEPT_NOTE}\n\n`
+            + `只会删掉 personas/${id}.json，此操作不可撤销。`)
           if (!ok) return
           try {
-            await api(`/api/personas/${encodeURIComponent(id)}`, { method: 'DELETE' })
-            store.flash = { text: `已删除角色卡 ${id} —— 记忆与聊天记录保留`, kind: 'ok' }
+            const res = await api(`/api/personas/${encodeURIComponent(id)}`, { method: 'DELETE' })
+            const kept = res.kept || {}
+            store.flash = {
+              text: `已删除角色卡 ${id} —— 保留了 ${kept.memory_entries ?? '?'} 条记忆、`
+                    + `${kept.chat_messages ?? '?'} 条聊天（重建同名卡接着用）`,
+              kind: 'ok',
+            }
             if (store.npcId === id) store.npcId = null
           } catch (e) {
             store.flash = { text: `删除失败：${e.message}`, kind: 'error' }
@@ -1179,7 +1187,7 @@ async function renderPersonas(view) {
           route()
         },
       }),
-      h('span', { class: 'hint', text: '只删 personas/{id}.json，不动 store/ 里的记忆与聊天' })),
+      h('span', { class: 'hint', text: DELETE_KEPT_NOTE })),
     box)
   await openPersona(box, store.npcId)
 }
@@ -1234,6 +1242,9 @@ const VENDOR_EXAMPLES = [
   ['本地 Ollama', 'http://localhost:11434/v1'],
   ['OpenRouter（含 Claude / Gemini）', 'https://openrouter.ai/api/v1'],
 ]
+
+// 与后端 console_api._DELETE_KEPT_NOTE 同文案 —— 改一处要改两处，别让两边说法漂移
+const DELETE_KEPT_NOTE = '记忆卡与聊天记录保留（数据在 store/，重建同名卡接着用）—— 删卡不该连带删记忆'
 
 const ORIGIN_TEXT = {
   env: '环境变量',
