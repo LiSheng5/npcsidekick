@@ -1,128 +1,64 @@
 # NPCSidekick v4
 
-通用游戏 AI NPC 系统的大脑（本地 Python 服务器）。任何能发 HTTP 的游戏（通过 mod）都能接入。
+[简体中文](./README.md) | [English](./README.en.md)
 
-**核心原则 —— 大脑提议，游戏执行**：大脑只提议动作，执行归游戏；动作经结构化字段提议，
-与对话文字完全分离；大脑侧唯一闸门是**能力白名单**（只有 mod 声明过的动作可被提议）。
+通用游戏 AI NPC 系统的大脑（本地 Python 服务器）——任何能发 HTTP 的游戏（通过 mod）都能接入。
 
----
+**核心原则：大脑提议，游戏执行。** LLM 只提议动作（结构化字段，与对话文字完全分离），执行归游戏；
+唯一闸门是 mod 报到声明的**能力白名单**——大脑只能提议 mod 说过自己能做的事。
 
-## 目录
+## 特性
 
-```
-NPCSidekick_v4/
-├── core/           基础设施（LLM 客户端 / 配置 / 日志 / provider 工厂 / 工具 schema），自包含
-├── memory.py       记忆卡 + AI Town 加权检索 + 半衰期修剪
-├── tools.py        remember / recall + 由能力清单生成的动作工具
-├── chatlog.py      持久聊天记录（{id}_chat.jsonl）+ 滚动摘要
-├── tts.py          语音合成（edge-tts，可选输出通道；缺依赖自动降级）
-├── server.py       HTTP 服务（/api/talk 流式 等）
-├── console_api.py  控制台（调试面）端点，与 mod 契约分开
-├── web/console/    控制台前端（零构建：index.html + app.js + styles.css）
-├── personas/       角色卡 JSON（加一个文件就多一个 NPC；`_模板.json` 是空白模板）
-├── avatars/        关系网节点头像（avatars/{id}.<ext>，控制台里点节点就能上传）
-├── store/          运行时数据（记忆卡 + 聊天记录 + `llm_config.json` 模型设置，已 gitignore）
-├── tests/          pytest
-└── requirements.txt
-```
+- 🧠 **记忆卡**：确定性遗忘（强度按半衰期衰减），可钉住豁免，零 LLM 成本
+- 🔌 **厂商无关**：只走 OpenAI 兼容端点——DeepSeek / OpenAI / 千问 / Kimi / GLM / Ollama / OpenRouter 换三个环境变量即接
+- 🎮 **能力白名单**：mod 报到声明能做什么，大脑就只能提议什么
+- 🖥️ **零构建控制台**：真流式试对话、记忆卡管理、关系网图、模拟 mod 报到（不用进游戏就能联调）
+- 🗣️ 可选语音合成（edge-tts）、滚动摘要、多人格（`personas/` 加一个 JSON 就多一个 NPC）
 
-## 安装
+## 快速开始
 
 ```bash
 pip install -r requirements.txt
-```
 
-**模型由你自己配，v4 不绑任何厂商**：配 `AGENT_MODEL` + `NPC_API_KEY` + `NPC_BASE_URL` 三件套即可
-（Key 也可放工程根 `api_key.txt`；旧名 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY` 仍兼容）。
-三件套缺任何一项也能起服务 —— 此时 `/api/talk` 回退角色卡里的 `rules` 回复、不提议动作，
-`GET /api/state` 的 `llm.missing` 会写明缺哪几项。接谁当大脑见下方「换模型」。
+# 配大脑三件套（key 也可放工程根 api_key.txt）
+export AGENT_MODEL=deepseek-v4-flash
+export NPC_API_KEY=sk-xxx
+export NPC_BASE_URL=https://api.deepseek.com
 
-可选依赖（缺失自动降级，不装也能跑）：`jieba`（中文分词，检索更准）、`edge-tts`（语音合成，装了才有 `audio` 帧）。
-
-## 启动
-
-```bash
 python -m uvicorn server:app --host 127.0.0.1 --port 8765
 ```
 
-服务器只绑 `127.0.0.1`（本地，不出机器）。用哪个模型由环境变量决定（见下方「换模型」）。
+浏览器打开 **http://127.0.0.1:8765/console/** 即是调试控制台。三件套没配齐也能起服务——此时对话回退角色卡里的 `rules` 回复、不提议动作，控制台会用红字写明缺哪几项。服务器只绑 `127.0.0.1`，不出机器。
 
-### 换模型（三件套）
-
-v4 只走 OpenAI 兼容端点 —— 国内外主流厂商与本地 Ollama/vLLM 基本都提供，换三家变量即可：
-
-| 想接 | `AGENT_MODEL` | `NPC_BASE_URL`（**以厂商最新文档为准**） |
-|---|---|---|
-| DeepSeek | `deepseek-v4-flash` / `deepseek-v4-pro` | `https://api.deepseek.com` |
-| OpenAI | `gpt-5` 等 | `https://api.openai.com/v1` |
-| 通义千问（百炼） | `qwen-plus` 等 | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| Kimi / Moonshot | `kimi-k3` 等 | `https://api.moonshot.cn/v1` |
-| 智谱 GLM | `glm-5.2` 等 | `https://open.bigmodel.cn/api/paas/v4` |
-| 本地 Ollama | `qwen3:8b` 等 | `http://localhost:11434/v1` |
-| OpenRouter（一个端点用多家，含 Claude / Gemini） | `anthropic/claude-...` 等 | `https://openrouter.ai/api/v1` |
-| 其它厂商 / 自建网关 / 代理 | 厂商给的模型名 | 厂商文档里的兼容端点 |
-
-端点解析规则：**显式配的 `NPC_BASE_URL` 永远优先**，不会被模型名推断覆盖（接网关时这条是关键）；
-没配端点时才按模型名猜厂商兜底，猜不出就是"未配置"。
-
-**不想改环境变量？** 打开控制台「模型」页直接填模型名 / 端点 / 深度思考档位 —— 改完立即生效（下一个请求就用新的），
-并记进 `store/llm_config.json`，下次启动还在。优先级：**页面改的 > 该文件 > 环境变量**；
-「恢复环境变量默认」一键回到环境变量那一层。**API Key 不在页面里填**（见下），明文 key 不进页面也不进该文件。
-
-**API Key 怎么保护**（对照业界通行做法）：key **不在页面填、不进 `store/llm_config.json`**，只走环境变量
-`NPC_API_KEY` 或工程根 `api_key.txt`；控制台只显示掩码（`sk-…abcd`）与来源，接口与日志**绝不回原文**
-（异常文本会先过一遍脱敏）；`api_key.txt` 与 `store/` 都在 `.gitignore` 里，不会进仓库。
-往 `/api/llm` 塞 `api_key` 之类字段会被 400 拒绝。
-另外，若工程根有 `api_key.txt` 且它对其他账户也可读，启动时日志与控制台「模型」页会给一条**可直接复制的
-`icacls` 收紧命令** —— v4 **只提示，不会自动改你的文件**（改权限的副作用只在你的环境里，该由你决定）。
-
-**模型没有深度思考怎么办**：勾上「该模型不认思考参数」—— v4 就一个思考参数都不发
-（效果等于关闭，且不会因为发未知字段被拒）。注意不能映射成发 `thinking:{type:disabled}`，
-对不认这个字段的端点它同样会 400。
-
-各家方言（思考参数、长度参数名等）v4 不做猜测 —— 用 `NPC_LLM_EXTRA_BODY` 自己填，
-一段 JSON 原样并入请求体，例如 OpenAI 系思考档位：`NPC_LLM_EXTRA_BODY='{"reasoning":{"effort":"high"}}'`。
-
-## 走一遍四个端点（报到 / 对话 / 回报 / 状态）
+## 四个端点
 
 ```bash
-# 1) mod 报到：声明能力清单（白名单即唯一闸门）+ 心跳
-curl -X POST http://127.0.0.1:8765/api/capabilities \
-  -H "Content-Type: application/json" \
+# 1) mod 报到：声明能力白名单 + 心跳
+curl -X POST http://127.0.0.1:8765/api/capabilities -H "Content-Type: application/json" \
   -d '{"mod":"sims4","actions":[{"name":"cook","desc":"用厨房做饭","params":{"dish":"菜名(字符串)"}}]}'
 
-# 2) 对话（SSE：delta / action / audio / done 帧；带 "voice":true 才有 audio 帧）
-curl -X POST http://127.0.0.1:8765/api/talk \
-  -H "Content-Type: application/json" \
+# 2) 对话（SSE：delta / action / audio / done 帧）
+curl -X POST http://127.0.0.1:8765/api/talk -H "Content-Type: application/json" \
   -d '{"npc_id":"cang","message":"你能帮我做顿饭吗","mod":"sims4",
        "observation":{"summary":"玩家在厨房，刚下班，有点饿"}}'
 
 # 3) 动作结果回报（确定性写记忆卡："完成: …" / "没做成: …"）
-curl -X POST http://127.0.0.1:8765/api/action_result \
-  -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:8765/api/action_result -H "Content-Type: application/json" \
   -d '{"npc_id":"cang","action":"cook","ok":true,"note":"面煮好了，玩家吃了说不错"}'
 
-# 4) 状态查询（调试）
+# 4) 状态查询
 curl http://127.0.0.1:8765/api/state
-curl http://127.0.0.1:8765/api/npcs
 ```
 
-## 控制台（调试面）
+## 文档
 
-浏览器打开 **http://127.0.0.1:8765/console/**（根路径 `/` 自动跳转）——零构建前端，不需要 node。
-
-| 面板 | 能干什么 |
+| 文档 | 内容 |
 |---|---|
-| 总览 | 模型 + LLM 端点（没配齐三件套时红字写明缺哪几项）/ 思考档位 / mod 在线 / 各 NPC 的记忆与聊天体量 |
-| 模型 | **直接改谁来当大脑**：模型名 / OpenAI 兼容端点 / 深度思考档位，改完立即生效并记进 `store/llm_config.json`（下次启动还在）；带常见厂商端点速查 |
-| 关系网 | 角色卡的 `relations` 字段画成图（零依赖 SVG，分层布局）；**点击刷新按钮刷新 / 滚轮缩放 / 拖拽平移 / 拖节点调位置 / 双击节点聚焦看邻居**；点节点里的「+」上传头像；没填就显示空态，不编造关系 |
-| Mod / 能力 | 看已声明的动作清单与心跳状态；**可模拟一次 mod 报到**（不用进游戏就能联调） |
-| 记忆卡 | 条目增删改、钉住、按"当前强度"可视化（谁快被遗忘一目了然）、手动修剪 |
-| 聊天记录 | 逐轮查看 + 摘要状态与 token 进度 |
-| 试对话 | `POST /api/talk` 真流式（delta / action / audio / done 帧序列可见）+ 一键回报结果；可勾选语音播报 |
-| 角色卡 | `personas/{id}.json` 查看与编辑（保存即生效）；页内可展开**逐字段中文说明表**，空白模板 `personas/_模板.json`，填写说明 `personas/_角色卡说明.md` |
-
-控制台走的是**独立调试端点**（与 mod 用的游戏面端点分开）—— 它们**不属于 mod 契约**，mod 不需要调用。
+| [配置详解.md](./配置详解.md) | 换模型厂商全表 / API Key 保护 / 全部环境变量 / 记忆卡格式 |
+| [协议.md](./协议.md) | mod ⇄ 大脑的 HTTP 契约（端点与字段权威定义） |
+| [设计.md](./设计.md) | 架构与设计决策 |
+| [MOD_交接简报.md](./MOD_交接简报.md) | 给 mod 开发者的接入简报 |
+| [待办.md](./待办.md) | 路线图 |
 
 ## 测试
 
@@ -132,31 +68,6 @@ python -m pytest tests -q
 
 测试全零网络：LLM 一律用 `tests/conftest.py` 里的 `FakeProvider` 注入。
 
-## 环境变量（全部现读，可热切）
+## License
 
-| 变量 | 默认 | 作用 |
-|---|---|---|
-| `AGENT_MODEL`（或 `NPC_MODEL`） | 无 | 模型名，用户自定（不设 = 未配置，无大脑；控制台「模型」页可改） |
-| `NPC_API_KEY` | 无 | API Key（旧名 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY` 仍兼容；也可放 `api_key.txt`） |
-| `NPC_BASE_URL` | 无 | OpenAI 兼容端点；不设时按模型名猜厂商兜底，猜不出 = 未配置 |
-| `NPC_LLM_EXTRA_BODY` | 无 | 一段 JSON 原样并入请求体（各家方言自己填，覆盖 v4 的默认参数） |
-| `NPC_REASONING_EFFORT` | 未设置 | 思考模式：`off`/`disabled`/`none` 显式关；`low`/`medium`/`high`/`max` 开；未设置 = 服务端默认 |
-| `NPC_SUMMARY_TOKEN_THRESHOLD` | `20000` | 滚动摘要触发阈值（绝对 token 数） |
-| `NPC_SUMMARY_KEEP_RECENT` | `8` | 摘要后仍逐字保留的最近轮数 |
-| `NPC_MOD_HEARTBEAT_TIMEOUT` | `60` | mod 心跳超时（秒）：超时视离线，不再提议动作 |
-| `NPC_LLM_RETRY` / `NPC_LLM_RETRY_DELAYS` | 关 | LLM 网关抖动重试（见 `core/client.py`） |
-
-## 记忆卡（可直接手改）
-
-`store/{id}_memory.json` —— JSON 条目列表：
-
-```json
-[{"id": "<uuid>", "content": "玩家爱吃面", "importance": 7,
-  "category": "preference", "created_at": 1790260168.1, "pinned": true}]
-```
-
-- 写入口只有三个：`remember` 工具、动作结果回报、人工手改
-- `pinned: true` = 人工钉住，豁免一切自动修剪
-- 遗忘（确定性、零 LLM）：`强度 = importance × 0.5 ^ (小时/72)`，低于 1.0 移除；
-  豁免 `importance ≥ 8`、`pinned`、`category` 为 `reflection` / `consolidated`
-- 兼容读旧版记忆卡（`content` / `importance` / `created_at` 字段相同）
+MIT
