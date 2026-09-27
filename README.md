@@ -21,7 +21,7 @@
 pip install -r requirements.txt
 
 # 配大脑三件套（key 也可放工程根 api_key.txt）
-export AGENT_MODEL=deepseek-v4-flash
+export AGENT_MODEL=deepseek-flash
 export NPC_API_KEY=sk-xxx
 export NPC_BASE_URL=https://api.deepseek.com
 
@@ -55,7 +55,6 @@ curl http://127.0.0.1:8765/api/state
 | 文档 | 内容 |
 |---|---|
 | [配置详解.md](./配置详解.md) | 换模型厂商全表 / API Key 保护 / 全部环境变量 / 记忆卡格式 |
-| [MOD_交接简报.md](./MOD_交接简报.md) | 给 mod 开发者的接入简报 |
 
 ## 测试
 

@@ -31,7 +31,7 @@ propose actions the mod said it can perform.
 pip install -r requirements.txt
 
 # Brain trio (the key can also go into api_key.txt at the project root)
-export AGENT_MODEL=deepseek-v4-flash
+export AGENT_MODEL=deepseek-flash
 export NPC_API_KEY=sk-xxx
 export NPC_BASE_URL=https://api.deepseek.com
 
@@ -68,7 +68,6 @@ curl http://127.0.0.1:8765/api/state
 | Doc | Contents |
 |---|---|
 | [配置详解.md](./配置详解.md) | Full model-vendor table / API key protection / all environment variables / memory card format (Chinese) |
-| [MOD_交接简报.md](./MOD_交接简报.md) | Integration brief for mod developers (Chinese) |
 
 > The deep-dive docs are currently Chinese-only. The quick start above plus the
 > four endpoints are enough to integrate; open an issue if you need an
