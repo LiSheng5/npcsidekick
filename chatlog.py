@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.config_flags import env_text
 from core.logging_config import log
 
 # 运行时数据目录（工程根/store；测试用 monkeypatch 替换）
@@ -37,7 +37,7 @@ _CJK_RANGES = ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF), (0x3000, 0x
 
 
 def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
+    raw = env_text(name)
     if raw is None or not str(raw).strip():
         return default
     try:

@@ -18,14 +18,14 @@ from core.openai_provider import OpenAIProvider
 @pytest.fixture
 def clean_llm(tmp_store):
     """每个用例前后都清掉页面设置与落盘文件（不污染别的用例）。"""
-    import server
+    from core import llm_runtime
 
-    server._LLM_RUNTIME.clear()
-    path = server.llm_config_path()
+    llm_runtime._LLM_RUNTIME.clear()
+    path = llm_runtime.llm_config_path()
     if path.exists():
         path.unlink()
-    yield server
-    server._LLM_RUNTIME.clear()
+    yield llm_runtime
+    llm_runtime._LLM_RUNTIME.clear()
     if path.exists():
         path.unlink()
 
@@ -145,7 +145,7 @@ def test_state_reports_missing_llm_config(tmp_store, write_persona, make_app_cli
     from core import config
     import server
 
-    monkeypatch.setattr(config, "API_KEY", "")
+    monkeypatch.setattr(config, "api_key", lambda: "")
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     monkeypatch.delenv("NPC_MODEL", raising=False)
     monkeypatch.delenv("NPC_BASE_URL", raising=False)
@@ -162,7 +162,7 @@ def test_build_default_client_returns_none_when_unconfigured(monkeypatch):
     from core import config
     import server
 
-    monkeypatch.setattr(config, "API_KEY", "")
+    monkeypatch.setattr(config, "api_key", lambda: "")
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     monkeypatch.delenv("NPC_BASE_URL", raising=False)
 
@@ -173,7 +173,7 @@ def test_build_default_client_uses_configured_endpoint(monkeypatch):
     from core import config
     import server
 
-    monkeypatch.setattr(config, "API_KEY", "k")
+    monkeypatch.setattr(config, "api_key", lambda: "k")
     monkeypatch.setenv("AGENT_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("NPC_BASE_URL", "https://gateway.local/v1")
 
@@ -188,11 +188,11 @@ def test_build_default_client_uses_configured_endpoint(monkeypatch):
 def test_apply_llm_settings_switches_brain(clean_llm, monkeypatch, tmp_store):
     from core import config
 
-    server = clean_llm
-    monkeypatch.setattr(config, "API_KEY", "sk-test")
+    llm_runtime = clean_llm
+    monkeypatch.setattr(config, "api_key", lambda: "sk-test")
     holder: dict = {"client": None}
 
-    status = server.apply_llm_settings(
+    status = llm_runtime.apply_llm_settings(
         {"model": "qwen-plus", "base_url": "https://dash.example/v1", "reasoning_effort": "high"},
         holder)
 
@@ -210,13 +210,13 @@ def test_settings_survive_runtime_clear(clean_llm, monkeypatch):
     """用户要求：页面改的值下次启动还在 —— 清掉内存（模拟重启）后应来自文件。"""
     from core import config
 
-    server = clean_llm
-    monkeypatch.setattr(config, "API_KEY", "sk-test")
-    server.apply_llm_settings({"model": "qwen-plus", "base_url": "https://dash.example/v1"})
+    llm_runtime = clean_llm
+    monkeypatch.setattr(config, "api_key", lambda: "sk-test")
+    llm_runtime.apply_llm_settings({"model": "qwen-plus", "base_url": "https://dash.example/v1"})
 
-    assert server.llm_config_status()["origin"] == "runtime"
-    server._LLM_RUNTIME.clear()                             # 模拟重启
-    status = server.llm_config_status()
+    assert llm_runtime.llm_config_status()["origin"] == "runtime"
+    llm_runtime._LLM_RUNTIME.clear()                        # 模拟重启
+    status = llm_runtime.llm_config_status()
 
     assert status["origin"] == "file"
     assert status["model"] == "qwen-plus"
@@ -224,11 +224,11 @@ def test_settings_survive_runtime_clear(clean_llm, monkeypatch):
 
 def test_thinking_unsupported_sends_nothing(clean_llm, monkeypatch):
     """不支持深度思考的模型 → 实际一个思考参数都不发（= 安全的关闭）。"""
-    server = clean_llm
-    server.apply_llm_settings({"reasoning_effort": "high", "thinking_unsupported": True})
+    llm_runtime = clean_llm
+    llm_runtime.apply_llm_settings({"reasoning_effort": "high", "thinking_unsupported": True})
 
-    assert server.reasoning_effort() == "high"              # 页面上仍显示用户的选择
-    assert server.thinking_effort() is None                 # 但下发时一个都不发
+    assert llm_runtime.reasoning_effort() == "high"          # 页面上仍显示用户的选择
+    assert llm_runtime.thinking_effort() is None             # 但下发时一个都不发
 
 
 def test_apply_rejects_bad_effort(clean_llm):
@@ -239,7 +239,7 @@ def test_apply_rejects_bad_effort(clean_llm):
 def test_console_llm_endpoints(tmp_store, write_persona, make_app_client, clean_llm, monkeypatch):
     from core import config
 
-    monkeypatch.setattr(config, "API_KEY", "sk-test")
+    monkeypatch.setattr(config, "api_key", lambda: "sk-test")
     client = make_app_client()
 
     ok = client.put("/api/llm", json={
@@ -261,28 +261,26 @@ def test_console_llm_endpoints(tmp_store, write_persona, make_app_client, clean_
 # ── key 安全（业界共识：敏感分离 / 掩码不回原文 / 不进仓库）──
 
 def test_mask_secret_keeps_head_tail():
-    import server
+    from core import llm_runtime
 
-    assert server.mask_secret("") == ""
-    assert server.mask_secret("short") == "sh…"
-    assert server.mask_secret("sk-1234567890abcdef") == "sk-…cdef"
+    assert llm_runtime.mask_secret("") == ""
+    assert llm_runtime.mask_secret("short") == "sh…"
+    assert llm_runtime.mask_secret("sk-1234567890abcdef") == "sk-…cdef"
 
 
 def test_scrub_removes_key_from_text(monkeypatch):
-    import server
-    from core import config
+    from core import config, llm_runtime
 
-    monkeypatch.setattr(config, "API_KEY", "sk-SUPERSECRET123456")
-    assert "SUPERSECRET" not in server.scrub("失败: Bearer sk-SUPERSECRET123456 无效")
-    assert server.scrub("普通错误") == "普通错误"
+    monkeypatch.setattr(config, "api_key", lambda: "sk-SUPERSECRET123456")
+    assert "SUPERSECRET" not in llm_runtime.scrub("失败: Bearer sk-SUPERSECRET123456 无效")
+    assert llm_runtime.scrub("普通错误") == "普通错误"
 
 
 def test_api_key_status_never_returns_raw(monkeypatch):
-    import server
-    from core import config
+    from core import config, llm_runtime
 
-    monkeypatch.setattr(config, "API_KEY", "sk-SUPERSECRET123456")
-    status = server.api_key_status()
+    monkeypatch.setattr(config, "api_key", lambda: "sk-SUPERSECRET123456")
+    status = llm_runtime.api_key_status()
 
     assert status["present"] is True
     assert status["masked"] != "sk-SUPERSECRET123456"
@@ -300,7 +298,7 @@ def test_saved_llm_file_has_no_secret_when_key_not_filled(clean_llm, monkeypatch
     """没在页面填 key → 文件里不该出现环境变量那把 key。"""
     from core import config
 
-    monkeypatch.setattr(config, "API_KEY", "sk-SUPERSECRET123456")
+    monkeypatch.setattr(config, "api_key", lambda: "sk-SUPERSECRET123456")
     clean_llm.apply_llm_settings({"model": "qwen-plus", "base_url": "https://dash.example/v1"})
 
     raw = (tmp_store / "llm_config.json").read_text("utf-8")
@@ -313,7 +311,7 @@ def test_saved_llm_file_has_no_secret_when_key_not_filled(clean_llm, monkeypatch
 def test_page_key_stored_plain_but_never_echoed(clean_llm, monkeypatch, tmp_store):
     from core import config
 
-    monkeypatch.setattr(config, "API_KEY", "sk-FROMENV000000")
+    monkeypatch.setattr(config, "api_key", lambda: "sk-FROMENV000000")
     status = clean_llm.apply_llm_settings({"api_key": "sk-FROMPAGE999999"})
 
     assert status["api_key"]["from_page"] is True
@@ -329,7 +327,7 @@ def test_page_key_stored_plain_but_never_echoed(clean_llm, monkeypatch, tmp_stor
 def test_page_key_clear_falls_back_to_env(clean_llm, monkeypatch, tmp_store):
     from core import config
 
-    monkeypatch.setattr(config, "API_KEY", "sk-FROMENV000000")
+    monkeypatch.setattr(config, "api_key", lambda: "sk-FROMENV000000")
     clean_llm.apply_llm_settings({"api_key": "sk-FROMPAGE999999"})
     assert clean_llm.effective_api_key() == "sk-FROMPAGE999999"
 
@@ -344,7 +342,7 @@ def test_endpoints_never_echo_page_key(tmp_store, write_persona, make_app_client
                                        monkeypatch):
     from core import config
 
-    monkeypatch.setattr(config, "API_KEY", "sk-FROMENV000000")
+    monkeypatch.setattr(config, "api_key", lambda: "sk-FROMENV000000")
     client = make_app_client()
 
     put = client.put("/api/llm", json={"api_key": "sk-FROMPAGE999999"})
@@ -361,7 +359,7 @@ def test_endpoints_never_echo_key(tmp_store, write_persona, make_app_client, cle
                                   monkeypatch):
     from core import config
 
-    monkeypatch.setattr(config, "API_KEY", "sk-SUPERSECRET123456")
+    monkeypatch.setattr(config, "api_key", lambda: "sk-SUPERSECRET123456")
     client = make_app_client()
 
     for path in ("/api/state", "/api/llm"):
@@ -382,34 +380,34 @@ def test_gitignore_covers_secret_files():
 # ── api_key.txt 权限：只检测，不自动改 ────────────────────
 
 def test_perm_check_skips_non_windows(tmp_path, monkeypatch):
-    import server
+    from core import llm_runtime
 
-    monkeypatch.setattr(server.os, "name", "posix")
+    monkeypatch.setattr(llm_runtime.os, "name", "posix")
     target = tmp_path / "api_key.txt"
     target.write_text("sk-x", encoding="utf-8")
 
-    assert server.scan_key_file_perm(target) is None
+    assert llm_runtime.scan_key_file_perm(target) is None
 
 
 def test_perm_check_skips_missing_file(tmp_path, monkeypatch):
-    import server
+    from core import llm_runtime
 
-    monkeypatch.setattr(server.os, "name", "nt")
-    assert server.scan_key_file_perm(tmp_path / "不存在.txt") is None
+    monkeypatch.setattr(llm_runtime.os, "name", "nt")
+    assert llm_runtime.scan_key_file_perm(tmp_path / "不存在.txt") is None
 
 
 def test_perm_check_detects_world_readable(tmp_path, monkeypatch):
-    import server
+    from core import llm_runtime
 
-    monkeypatch.setattr(server.os, "name", "nt")
+    monkeypatch.setattr(llm_runtime.os, "name", "nt")
     monkeypatch.setenv("USERNAME", "me")
     target = tmp_path / "api_key.txt"
     target.write_text("sk-x", encoding="utf-8")
     out = f"{target} BUILTIN\\Users:(R)\r\n NT AUTHORITY\\SYSTEM:(F)\r\n"
-    monkeypatch.setattr(server.subprocess, "run",
+    monkeypatch.setattr(llm_runtime.subprocess, "run",
                         lambda *a, **k: types.SimpleNamespace(stdout=out, returncode=0))
 
-    hint = server.scan_key_file_perm(target)
+    hint = llm_runtime.scan_key_file_perm(target)
 
     assert hint is not None
     assert "icacls" in hint and str(target) in hint
@@ -418,25 +416,25 @@ def test_perm_check_detects_world_readable(tmp_path, monkeypatch):
 
 
 def test_perm_check_quiet_when_private(tmp_path, monkeypatch):
-    import server
+    from core import llm_runtime
 
-    monkeypatch.setattr(server.os, "name", "nt")
+    monkeypatch.setattr(llm_runtime.os, "name", "nt")
     target = tmp_path / "api_key.txt"
     target.write_text("sk-x", encoding="utf-8")
     out = f"{target} NT AUTHORITY\\SYSTEM:(F)\r\n DESKTOP\\me:(F)\r\n"
-    monkeypatch.setattr(server.subprocess, "run",
+    monkeypatch.setattr(llm_runtime.subprocess, "run",
                         lambda *a, **k: types.SimpleNamespace(stdout=out, returncode=0))
 
-    assert server.scan_key_file_perm(target) is None
+    assert llm_runtime.scan_key_file_perm(target) is None
 
 
 def test_perm_check_covers_stored_page_key(tmp_path, monkeypatch):
     """页面存了明文 key 的文件也要一起提示（方案 C 之后 llm_config.json 也是明文库）。"""
-    import server
+    from core import llm_runtime
 
-    monkeypatch.setattr(server.os, "name", "nt")
+    monkeypatch.setattr(llm_runtime.os, "name", "nt")
     monkeypatch.setenv("USERNAME", "me")
-    monkeypatch.setattr(server, "llm_config_path", lambda: tmp_path / "llm_config.json")
+    monkeypatch.setattr(llm_runtime, "llm_config_path", lambda: tmp_path / "llm_config.json")
     (tmp_path / "llm_config.json").write_text(
         json.dumps({"api_key": "sk-x", "_warning": "…"}), encoding="utf-8")
 
@@ -445,24 +443,45 @@ def test_perm_check_covers_stored_page_key(tmp_path, monkeypatch):
         return types.SimpleNamespace(
             stdout=f"{target} BUILTIN\\Users:(R)\r\n", returncode=0)
 
-    monkeypatch.setattr(server.subprocess, "run", fake)
+    monkeypatch.setattr(llm_runtime.subprocess, "run", fake)
 
-    hint = server.key_perm_hint(refresh=True)
+    hint = llm_runtime.key_perm_hint(refresh=True)
 
     assert hint and "llm_config.json" in hint          # 提示里点名这个文件
     assert "icacls" in hint
 
 
 def test_perm_check_silent_when_icacls_fails(tmp_path, monkeypatch):
-    import server
+    from core import llm_runtime
 
-    monkeypatch.setattr(server.os, "name", "nt")
+    monkeypatch.setattr(llm_runtime.os, "name", "nt")
     target = tmp_path / "api_key.txt"
     target.write_text("sk-x", encoding="utf-8")
 
     def boom(*a, **k):
         raise OSError("icacls 不存在")
 
-    monkeypatch.setattr(server.subprocess, "run", boom)
+    monkeypatch.setattr(llm_runtime.subprocess, "run", boom)
 
-    assert server.scan_key_file_perm(target) is None
+    assert llm_runtime.scan_key_file_perm(target) is None
+
+
+# ── 家规：配置项现读（绝不 import 时缓存）─────────────────
+
+def test_config_is_read_live_not_cached(monkeypatch):
+    """`core/config.py` 每次调用都现读环境变量 —— 旧实现（import 时快照）会在这里失败。"""
+    from core import config
+
+    monkeypatch.setenv("NPC_API_KEY", "sk-first")
+    monkeypatch.setenv("AGENT_MODEL", "model-a")
+    monkeypatch.setenv("NPC_BASE_URL", "https://first.example/v1")
+    assert config.api_key() == "sk-first"
+    assert config.model_name() == "model-a"
+    assert config.base_url() == "https://first.example/v1"
+
+    monkeypatch.setenv("NPC_API_KEY", "sk-second")
+    monkeypatch.setenv("AGENT_MODEL", "model-b")
+    monkeypatch.setenv("NPC_BASE_URL", "https://second.example/v1")
+    assert config.api_key() == "sk-second"          # 快照实现这里仍是 sk-first
+    assert config.model_name() == "model-b"
+    assert config.base_url() == "https://second.example/v1"

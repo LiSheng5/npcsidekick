@@ -10,7 +10,6 @@ OpenAIProvider — OpenAI / DeepSeek / 任何 OpenAI 兼容 API 的 Provider 实
 from __future__ import annotations
 
 import json
-import os
 import re
 
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -18,6 +17,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from openai import OpenAI, AsyncOpenAI
 
 from core.client import LLMResponse
+from core.config_flags import env_text
 from core.logging_config import log
 from core.types import StreamChunk
 from core.base import ProviderProtocol
@@ -109,7 +109,7 @@ class OpenAIProvider(ProviderProtocol):
         非法 JSON → 记一条 warning 后忽略，绝不因此打断对话。
         """
         merged: dict = {}
-        raw = os.environ.get("NPC_LLM_EXTRA_BODY", "").strip()
+        raw = env_text("NPC_LLM_EXTRA_BODY").strip()
         if raw:
             try:
                 parsed = json.loads(raw)

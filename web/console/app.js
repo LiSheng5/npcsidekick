@@ -189,7 +189,7 @@ async function renderOverview(view) {
     // 没配齐三件套 → 顶部一条红字说清缺什么（/api/talk 此时走角色卡 rules 兜底）
     if (!llm.ok) {
       cards.unshift(banner(
-        `未接上大脑：${llm.title || llm.text}。未配齐时 /api/talk 走角色卡 rules 回复、不提议动作。`,
+        `未接上大脑：${llm.title || llm.text}。未配齐时 /api/talk 走角色卡 rules 回复、不调用动作。`,
         'error'))
     }
     box.replaceChildren(...cards)
@@ -715,12 +715,16 @@ function drawGraph(box, data) {
 // ── 页面：Mod / 能力清单 ──────────────────────────────────
 
 async function renderMods(view) {
-  view.replaceChildren(pageHead('Mod / 能力清单', '白名单即唯一闸门：只有这里声明过的动作，大脑才可能提议',
+  view.replaceChildren(pageHead('Mod / 能力清单', '白名单即唯一闸门：只有这里声明过、且给了执行接口的动作，大脑才可能调用',
     h('button', { class: 'btn', text: '刷新', onclick: () => route() })))
   const box = h('div', { class: 'mem-list' }, stateBlock('', '加载中…'))
   view.append(box)
 
-  const modName = h('input', { class: 'input narrow', placeholder: 'mod 名，如 sims4' })
+  const modName = h('input', { class: 'input narrow', placeholder: 'mod 名，如 mygame' })
+  const executeUrl = h('input', {
+    class: 'input',
+    placeholder: 'http://127.0.0.1:8766/execute（执行接口；不填 = 该 mod 没有可执行的动作）',
+  })
   const actionsJson = h('textarea', {
     class: 'input', rows: '6',
     placeholder: '[\n  {"name":"cook","desc":"用厨房做饭","params":{"dish":"菜名(字符串)"}}\n]',
@@ -733,13 +737,16 @@ async function renderMods(view) {
         onclick: async (ev) => {
           try {
             const actions = JSON.parse(actionsJson.value || '[]')
-            const r = await api('/api/capabilities', { method: 'POST', body: { mod: modName.value.trim(), actions } })
+            const body = { mod: modName.value.trim(), actions }
+            if (executeUrl.value.trim()) body.execute_url = executeUrl.value.trim()
+            const r = await api('/api/capabilities', { method: 'POST', body })
             bannerFlash(box, `已登记 ${r.mod}：${r.actions.join(' / ')}`, 'ok')
             await refreshGlobals()
             renderMods(view)
           } catch (e) { bannerFlash(box, e.message, 'error') }
         },
       })),
+    h('label', { class: 'fld' }, h('span', { text: '执行接口地址（可选）' }), executeUrl),
     h('label', { class: 'fld' }, h('span', { text: '动作清单 JSON' }), actionsJson))
 
   try {
@@ -750,7 +757,10 @@ async function renderMods(view) {
       ...(mods.length ? mods.map(([name, m]) => h('div', { class: 'card', style: 'padding:16px 18px' },
         h('div', { class: 'sec-title' },
           h('span', { class: 'dot', style: m.online ? 'background:var(--green)' : 'background:var(--text-faint)' }),
-          ` ${name}　${m.online ? '在线' : '离线（心跳超时 → 不提议动作）'}　最后心跳 ${fmtAgo(m.last_seen_s_ago)}`),
+          ` ${name}　${m.online ? '在线' : '离线（心跳超时 → 不调任何动作）'}　最后心跳 ${fmtAgo(m.last_seen_s_ago)}`),
+        h('div', { class: 'kv' },
+          h('span', { class: 'k', text: '执行接口' }),
+          h('span', { class: 'v', text: m.execute_url || '（没给执行接口 → 大脑不会调它的任何动作）' })),
         h('div', { class: 'chips' }, (m.actions || []).map((a) => h('span', { class: 'chip', text: a.name }))),
         ...(m.actions || []).map((a) => h('div', { class: 'kv' },
           h('span', { class: 'k', text: a.name }),
@@ -940,7 +950,7 @@ async function loadChat(box, npcId, offset) {
 let playBusy = false
 
 async function renderPlay(view) {
-  view.replaceChildren(pageHead('试对话', 'POST /api/talk 真流式（delta / action / done）；动作只提议，执行由游戏回报',
+  view.replaceChildren(pageHead('试对话', 'POST /api/talk 真流式（delta / action / audio / done）；动作由大脑同步调 mod 执行、结果当场写卡',
     h('button', {
       class: 'btn', text: '清屏',
       // 只清对话与帧序列 —— 调试栏（NPC 选择 / observation）要留着
@@ -1007,7 +1017,7 @@ async function renderPlay(view) {
 
     const t0 = performance.now()
     let text = ''
-    let action = null
+    const actions = []
     let audio = null
     try {
       const res = await fetch('/api/talk', {
@@ -1035,7 +1045,7 @@ async function renderPlay(view) {
             const frame = JSON.parse(line.slice(6))
             frameLog.push(frame.type)
             if (frame.type === 'delta') { text += frame.text; npc.textContent = text; turns.scrollTop = turns.scrollHeight }
-            else if (frame.type === 'action') action = frame.action
+            else if (frame.type === 'action') actions.push(frame.action)
             else if (frame.type === 'audio') audio = frame.audio
           }
         }
@@ -1065,22 +1075,23 @@ async function renderPlay(view) {
     let memAfter = memBefore
     try { memAfter = (await api(`/api/npcs/${npcId}/memory`)).count } catch (_) { }
     if (frames && memAfter !== memBefore) {
-      frames.append(h('div', { class: 'hint', text: `记忆卡：${memBefore} → ${memAfter} 条（remember 工具生效）` }))
+      frames.append(h('div', { class: 'hint', text: `记忆卡：${memBefore} → ${memAfter} 条（remember / 动作写卡生效）` }))
     }
 
-    if (action) {
+    for (const act of actions) {
       const note = h('input', { class: 'input', placeholder: 'note（可选，会进记忆卡）' })
       const report = h('div', { class: 'card', style: 'padding:12px 14px;margin-top:10px' },
-        h('div', { class: 'sec-title', text: `动作提议：${action.name}` }),
-        h('div', { class: 'dbg-box', text: JSON.stringify(action.params || {}, null, 2) }),
+        h('div', { class: 'sec-title', text: `本回合已执行的动作记录：${act.name}` }),
+        h('div', { class: 'dbg-box', text: JSON.stringify(act.params || {}, null, 2) }),
+        h('div', { class: 'hint', text: '记忆卡已由大脑当场写入；下面两个按钮是协议 §4 的「长动作异步回报」通道（可选，只有 mod 回了 status:"running" 时才需要）' }),
         h('div', { class: 'fld-row', style: 'margin-top:8px' }, note,
           h('button', {
             class: 'btn tiny', text: '回报成功',
-            onclick: () => reportResult(npcId, action.name, true, note.value, report),
+            onclick: () => reportResult(npcId, act.name, true, note.value, report),
           }),
           h('button', {
             class: 'btn tiny danger', text: '回报失败',
-            onclick: () => reportResult(npcId, action.name, false, note.value, report),
+            onclick: () => reportResult(npcId, act.name, false, note.value, report),
           })))
       turn.append(report)
       turns.scrollTop = turns.scrollHeight
@@ -1347,7 +1358,7 @@ async function renderModel(view) {
       h('div', { class: 'kv' }, h('span', { class: 'k', text: 'API Key' }),
         h('span', { class: 'v', text: cur.api_key && cur.api_key.present
           ? `${cur.api_key.masked}（来自 ${cur.api_key.source || '未知'}）`
-          : '未配置 —— 放环境变量 NPC_API_KEY 或工程根 api_key.txt' })),
+          : '未配置 —— 在本页上方填写，或放环境变量 NPC_API_KEY / 工程根 api_key.txt' })),
       ...(cur.api_key && cur.api_key.perm_hint
         ? [h('p', { class: 'hint', text: cur.api_key.perm_hint })]
         : [])),
@@ -1371,7 +1382,7 @@ async function renderModel(view) {
       h('div', { class: 'sec-title', text: '常见厂商的端点（以厂商最新文档为准）' }),
       ...VENDOR_EXAMPLES.map(([name, url]) => h('div', { class: 'kv' },
         h('span', { class: 'k', text: name }), h('span', { class: 'v', text: url }))),
-      h('p', { class: 'hint', text: 'API Key 不在这里填：放环境变量 NPC_API_KEY（旧名 DEEPSEEK_API_KEY / OPENAI_API_KEY / ZHIPU_API_KEY 也认）或工程根 api_key.txt —— 明文 key 不进页面、也不进 store/llm_config.json。' })))
+      h('p', { class: 'hint', text: 'API Key 两种放法：① 在本页上方填写 —— 明文存 store/llm_config.json（store/ 不进仓库，但本机能读到）；② 留空 —— 用环境变量 NPC_API_KEY（旧名 DEEPSEEK_API_KEY / OPENAI_API_KEY / ZHIPU_API_KEY 也认）或工程根 api_key.txt。页面只显示掩码，接口绝不回原文。' })))
   box.replaceChildren(...kids)
 }
 

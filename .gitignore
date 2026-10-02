@@ -5,9 +5,7 @@ store/
 avatars/
 api_key.txt
 # 内部工作文档：不进公开仓库（本地保留）
-协议.md
+规格.md
 待办.md
-设计.md
-MOD_交接简报.md
 .claude/
 CLAUDE.md

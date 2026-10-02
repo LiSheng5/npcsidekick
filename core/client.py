@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
 
+from core.config_flags import env_text
 from core.types import StreamChunk
 from core.logging_config import log
 from core import config
@@ -34,8 +35,7 @@ if TYPE_CHECKING:
 
 
 def _retry_delays() -> List[float]:
-    import os
-    raw = os.environ.get("NPC_LLM_RETRY_DELAYS", "").strip()
+    raw = env_text("NPC_LLM_RETRY_DELAYS").strip()
     if not raw:
         return [2.0, 6.0]
     try:
@@ -113,17 +113,17 @@ class LLMClient:
                     "LLM 三件套未配齐，缺: " + "、".join(hint_list(status["missing"]))
                 )
             self._provider = create_provider(
-                api_key=config.API_KEY,
+                api_key=config.api_key(),
                 model_name=status["model"],
                 base_url=status["base_url"],
-                temperature=config.TEMPERATURE,
-                max_tokens=config.MAX_TOKENS,
+                temperature=config.temperature(),
+                max_tokens=config.max_tokens(),
             )
 
         # 从 provider 同步属性 (向后兼容)
         self.model = self._provider.model_name
-        self.temperature = getattr(self._provider, '_temperature', config.TEMPERATURE)
-        self.max_tokens = getattr(self._provider, '_max_tokens', config.MAX_TOKENS)
+        self.temperature = getattr(self._provider, '_temperature', config.temperature())
+        self.max_tokens = getattr(self._provider, '_max_tokens', config.max_tokens())
 
     def chat(
         self,
@@ -241,15 +241,6 @@ class LLMResponse:
     @property
     def is_stop(self) -> bool:
         return self.finish_reason == "stop"
-
-    def to_dict(self) -> dict:
-        return {
-            "content": self.content,
-            "tool_calls_count": len(self.tool_calls),
-            "finish_reason": self.finish_reason,
-            "model": self.model,
-            "reasoning": self.reasoning,
-        }
 
     def __repr__(self) -> str:
         tc = f", {len(self.tool_calls)} tool_calls" if self.tool_calls else ""

@@ -29,3 +29,9 @@ def env_num(name: str, default, cast=float):
         return cast(raw)
     except (TypeError, ValueError):
         return cast(default)
+
+
+def env_text(name: str, default: str = "") -> str:
+    """文本项: 未设置 → default; 设置 → 原样返回(与 os.environ.get 同语义, 不 strip)。"""
+    raw = os.environ.get(name)
+    return default if raw is None else raw

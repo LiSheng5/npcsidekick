@@ -1,11 +1,12 @@
-"""工具定义与执行 —— remember / recall + 动作工具（记忆通道 + 动作提议通道）。
+"""工具定义与执行 —— remember / recall + 动作工具（记忆通道 + 动作工具定义）。
 
-两条通道严格分离（台词纪律：模型只输出角色说的话，不暴露工具痕迹）：
-  · remember / recall —— 记忆通道，服务器**自己执行**（memory.py）
-  · 动作工具 —— 提议通道，服务器**只提议不执行**，由游戏侧执行后回报（走 /api/action_result）
+两类工具都以标准工具形态进 LLM 上下文（台词纪律：模型只输出角色说的话，不暴露工具痕迹）：
+  · remember / recall —— 记忆通道，本模块**直接执行**（memory.py）
+  · 动作工具 —— 由 server **同步转发** mod 的 execute_url 执行（协议 §3）；
+    本模块只负责"把声明变成工具定义"，不碰 HTTP
 
 白名单即唯一闸门：只有 mod 在 /api/capabilities 声明过的动作才会
-变成工具定义，LLM 不可能提议未声明的动作。
+变成工具定义，LLM 不可能调用未声明的动作。
 """
 from __future__ import annotations
 
@@ -91,7 +92,7 @@ def is_action_tool(name: str, capabilities: Optional[List[dict]]) -> bool:
 def build_tool_definitions(capabilities: Optional[List[dict]] = None) -> List[dict]:
     """组装进 LLM 上下文的工具数组：remember + recall + 声明过的动作。
 
-    capabilities 为空（mod 离线 / 未报到）→ 只给记忆工具（离线就不提议动作）。
+    capabilities 为空（mod 离线 / 未报到 / 没给执行接口）→ 只给记忆工具（不给动作工具）。
     """
     tools = [REMEMBER_TOOL.to_openai_function(), RECALL_TOOL.to_openai_function()]
     for action in capabilities or []:
@@ -106,10 +107,10 @@ def run_tool(name: str, args: Dict[str, Any], npc_id: str,
              capabilities: Optional[List[dict]] = None,
              top_k: int = 5,
              synonyms: Optional[Dict[str, Any]] = None) -> ToolResult:
-    """执行一次工具调用。
+    """执行一次**非动作**工具调用（server 侧只把记忆工具送到这里）。
 
-    remember / recall 由服务器执行；动作工具**不执行**（返回 REJECTED，
-    由 server 侧生成 action 帧交给游戏）；未知工具返回 ERROR（不抛异常）。
+    remember / recall 由本模块执行；动作工具走 server 的同步转发（协议 §3），
+    误送进来只返回 REJECTED；未知工具返回 ERROR（不抛异常）。
     """
     started = time.perf_counter()
     args = args if isinstance(args, dict) else {}
@@ -135,9 +136,9 @@ def run_tool(name: str, args: Dict[str, Any], npc_id: str,
                        data=memory.format_for_context(entries), started=started)
 
     if is_action_tool(name, capabilities):
-        # 提议通道：执行权在游戏，服务器只提议不代劳
+        # 动作执行由 server 同步转发 mod 的 execute_url（协议 §3）；本模块不碰 HTTP
         return _result(name, ToolResultStatus.REJECTED,
-                       error="动作由游戏侧执行，服务器只提议", started=started)
+                       error="动作由 server 转发给 mod 执行，本模块不代劳", started=started)
 
     return _result(name, ToolResultStatus.ERROR, error=f"未知工具: {name}", started=started)
 

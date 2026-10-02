@@ -10,7 +10,7 @@ import memory
 import server
 
 
-CAPS = {"mod": "sims4", "actions": [
+CAPS = {"mod": "mygame", "actions": [
     {"name": "cook", "desc": "用厨房做饭", "params": {"dish": "菜名(字符串)"}}]}
 
 
@@ -444,8 +444,8 @@ def test_get_capabilities_view(tmp_store, write_persona, make_app_client):
 
     data = client.get("/api/capabilities").json()
 
-    assert data["mods"]["sims4"]["online"] is True
-    assert data["mods"]["sims4"]["actions"][0]["name"] == "cook"
+    assert data["mods"]["mygame"]["online"] is True
+    assert data["mods"]["mygame"]["actions"][0]["name"] == "cook"
     assert data["heartbeat_timeout_s"] == 60.0
 
 
@@ -470,3 +470,45 @@ def test_console_router_does_not_shadow_game_endpoints(tmp_store, write_persona,
     assert client.get("/api/state").status_code == 200
     assert client.get("/api/npcs").status_code == 200
     assert server.CONSOLE_DIR.is_dir()
+
+
+# ── 事件循环不被控制台端点占住（文件 IO 走线程池）─────────
+
+def test_console_read_endpoint_does_not_block_event_loop(tmp_store, write_persona, avatar_dir,
+                                                         make_client, monkeypatch):
+    """控制台只读端点跑在线程池里（FastAPI 对**同步 def** 端点自动如此）。
+
+    回归：这些端点以前是 async def + 直接同步读文件 —— 记忆卡变大后，用户在控制台
+    点开一次「记忆卡」就能把正在进行的对话卡住。给这类端点加回 async 就会重新踩坑。
+    """
+    import asyncio
+    import time
+
+    import httpx
+
+    write_persona("cang")
+    memory.add_entry("cang", "一条记忆")
+
+    real_load_card = memory.load_card
+
+    def slow_load_card(npc_id: str):
+        time.sleep(0.4)                       # 模拟记忆卡变大后的读盘耗时
+        return real_load_card(npc_id)
+
+    monkeypatch.setattr(memory, "load_card", slow_load_card)
+
+    app = server.create_app(llm_client=make_client())
+
+    async def main() -> float:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            started = time.perf_counter()
+            reading = asyncio.create_task(ac.get("/api/npcs/cang/memory"))
+            await asyncio.sleep(0.1)          # 循环若被读盘占住，这一觉会被一起拖长
+            drift = time.perf_counter() - started - 0.1
+            assert (await reading).status_code == 200
+        return drift
+
+    drift = asyncio.run(main())
+
+    assert drift < 0.2, f"控制台端点把事件循环占住了 {drift:.2f}s"

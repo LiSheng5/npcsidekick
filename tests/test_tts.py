@@ -10,11 +10,10 @@ import json
 
 import pytest
 
-import server
 import tts
 
 
-CAPS = {"mod": "sims4", "actions": [
+CAPS = {"mod": "mygame", "actions": [
     {"name": "cook", "desc": "用厨房做饭", "params": {"dish": "菜名(字符串)"}}]}
 
 
@@ -116,14 +115,14 @@ def test_talk_voice_synthesis_failure_falls_back_to_text(tmp_store, write_person
 
 def test_talk_voice_timeout_falls_back_to_text(tmp_store, write_persona, make_app_client,
                                                make_provider, monkeypatch):
-    """合成超时（TTS_TIMEOUT_SEC）→ 不出 audio 帧。"""
+    """合成超时（tts.SYNTH_TIMEOUT_SEC）→ 不出 audio 帧。"""
     async def slow(text, voice):
         await asyncio.sleep(5)
         return b"late"
 
     monkeypatch.setattr(tts, "available", lambda: True)
     monkeypatch.setattr(tts, "synthesize", slow)
-    monkeypatch.setattr(server, "TTS_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(tts, "SYNTH_TIMEOUT_SEC", 0.05)
     write_persona("cang")
     client = make_app_client(provider=make_provider(turns=[{"text": "行啊。"}]))
 

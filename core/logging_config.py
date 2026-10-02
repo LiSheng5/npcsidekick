@@ -2,12 +2,11 @@
 结构化日志配置 — 基于 structlog + Rich 渲染。
 
 使用:
-  from agent.logging_config import logger, configure_logging
+  from core.logging_config import log, configure_logging
   configure_logging(level="INFO", mode="console")
   configure_logging(level="WARNING", mode="json")
 
-  log = logger.bind(component="orchestrator")
-  log.info("plan_generated", task_id="task_001", steps_count=3)
+  log.info("turn_done", npc_id="cang", rounds=2)
 """
 
 from __future__ import annotations
@@ -18,8 +17,8 @@ from typing import Optional
 
 import structlog
 
-# Ensure stdout handles UTF-8 on Windows
-if sys.platform == "win32":
+# Ensure stdout handles UTF-8 on Windows（stdout 可能被重定向成不支持 reconfigure 的对象）
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 
@@ -133,6 +132,6 @@ class _LazyLogger:
 
 
 # 全局 logger 别名 — 方便导入
-# from agent.logging_config import log
+# from core.logging_config import log
 # log.info("something_happened")
 log: structlog.stdlib.BoundLogger = _LazyLogger()  # type: ignore[assignment]

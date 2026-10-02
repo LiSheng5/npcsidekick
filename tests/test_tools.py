@@ -130,7 +130,7 @@ def test_run_recall_passes_synonyms(tmp_store):
 
 
 def test_action_tool_is_not_executed(tmp_store):
-    """动作工具走提议通道：不写卡、不执行（执行权在游戏侧）。"""
+    """动作工具不在 tools 里执行 —— 由 server 转发 mod 的 /execute（协议 §3）。"""
     res = tools.run_tool("cook", {"dish": "面"}, "cang", capabilities=CAPS)
 
     assert res.status == ToolResultStatus.REJECTED

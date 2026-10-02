@@ -18,10 +18,10 @@ v4 不绑定任何厂商：谁来当大脑由 `AGENT_MODEL` + `NPC_API_KEY` + `N
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional
 
 from core.base import ProviderProtocol
+from core.config_flags import env_text
 from core.openai_provider import OpenAIProvider
 
 
@@ -104,7 +104,7 @@ def resolve_llm_config(api_key: str, model_name: str, base_url: str = "") -> Dic
     """解析 LLM 三件套，返回 {model, base_url, ready, missing, source}。
 
     ready=False 时 missing 列出缺哪几项（供 /api/state 与日志响亮提示）；
-    此时服务照常起，`/api/talk` 走角色卡 rules 兜底回复、不提议动作。
+    此时服务照常起，`/api/talk` 走角色卡 rules 兜底回复、不调用动作。
     source: "configured"（用户显式配端点）/ "inferred"（按模型名兜底）/ ""（没有）
     """
     missing: List[str] = []
@@ -137,9 +137,9 @@ def current_llm_config() -> Dict[str, Any]:
     """现读环境变量解析三件套（端点与模型名每次调用现读，可热切）。"""
     from core import config
 
-    model = os.environ.get("AGENT_MODEL") or os.environ.get("NPC_MODEL") or config.MODEL_NAME
-    base = os.environ.get("NPC_BASE_URL") or config.BASE_URL
-    return resolve_llm_config(api_key=config.API_KEY or "", model_name=model, base_url=base)
+    model = env_text("AGENT_MODEL") or env_text("NPC_MODEL") or config.model_name()
+    base = env_text("NPC_BASE_URL") or config.base_url()
+    return resolve_llm_config(api_key=config.api_key() or "", model_name=model, base_url=base)
 
 
 def create_provider(

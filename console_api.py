@@ -1,11 +1,12 @@
 """控制台端点（**调试面**）—— 与给 mod 用的游戏面端点分开（本文件的端点不属于 mod 契约）。
 
-游戏面 = mod 用的四件事（报到 / 对话 / 动作提议 / 动作结果回报）+ 状态查询；
+游戏面 = mod 用的四件事（报到 / 对话 / 动作执行 / 动作结果回报）+ 状态查询；
 本文件只服务于本地控制台 UI：
 角色卡读写、关系网（含头像）、记忆卡增删改查、聊天记录查看、手动修剪。
 
 约定：
   · 找不到资源 → 404；请求体非法 → 400（与游戏面的"字段非法 → 400"区分开）
+  · 角色卡的读取/枚举统一走 core.personas（与游戏面同一实现），这里只管 HTTP 口径
   · 记忆的写操作走 memory 模块（= 把"直接手改记忆卡"这条通道做成界面），
     不新增任何绕过记忆卡的写路径
   · 头像走 data URI（`{"image": "data:image/png;base64,..."}`）而不是 multipart
@@ -13,6 +14,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -24,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from core.logging_config import log
+from core.personas import PersonaError, persona_files, persona_path, read_persona
 
 import chatlog
 import memory
@@ -72,20 +75,21 @@ def build_router(persona_dir: Path,
             raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
         return data
 
-    def _persona_path(npc_id: str) -> Path:
-        return persona_dir / f"{npc_id}.json"
+    # ── 端点分工（别搞反了，改错会把文件 IO 搬回事件循环里）──
+    #   · 纯读 / 无 body 的文件端点写成**同步 def** —— FastAPI 自动把它丢进线程池，
+    #     天然不卡事件循环；给它加回 async 就等于把 IO 搬回循环里。
+    #   · 需要 await body、或要拿 lock_for（记忆卡写操作）的端点保持 async，
+    #     内部同步 IO 一律 `await asyncio.to_thread(...)`。
+    # 理由：这些端点慢的时候（记忆卡/聊天记录变大后）不能让正在进行的对话顿卡。
 
     def _read_persona(npc_id: str) -> Dict[str, Any]:
-        path = _persona_path(npc_id)
-        if not path.exists():
-            raise HTTPException(status_code=404, detail=f"未找到 NPC 角色卡: {path}")
+        """读一张角色卡（实现在 core/personas.py）：没有这张卡 → 404；卡坏了 → 400。"""
+        path = persona_path(persona_dir, npc_id)
         try:
-            data = json.loads(path.read_text("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail=f"角色卡 JSON 损坏: {path} ({exc})") from exc
-        if not isinstance(data, dict):
-            raise HTTPException(status_code=400, detail=f"角色卡必须是 JSON 对象: {path}")
-        return data
+            return read_persona(path)
+        except PersonaError as exc:
+            raise HTTPException(status_code=404 if exc.missing else 400,
+                                detail=str(exc)) from exc
 
     # ── 头像文件（avatars/{id}.<ext>，由 server 静态挂在 /avatars）──
 
@@ -125,6 +129,7 @@ def build_router(persona_dir: Path,
                     "online": registry.online(mod),
                     "last_seen_s_ago": round(now - entry["last_seen"], 1),
                     "actions": entry["actions"],
+                    "execute_url": entry.get("execute_url"),
                 }
             return {"mods": mods, "heartbeat_timeout_s": registry.timeout()}
 
@@ -132,7 +137,7 @@ def build_router(persona_dir: Path,
 
     if llm_api:
         @router.get("/llm")
-        async def get_llm():
+        def get_llm():
             return llm_api["status"]()
 
         @router.put("/llm")
@@ -140,37 +145,34 @@ def build_router(persona_dir: Path,
             """改设置并立即换脑；非法档位 → 400。key 不在这里改。"""
             body = await _body(request)
             try:
-                return llm_api["apply"](body)
+                return await asyncio.to_thread(llm_api["apply"], body)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         @router.delete("/llm")
-        async def delete_llm():
+        def delete_llm():
             """清掉页面设置与落盘文件，回到环境变量那一层。"""
             return llm_api["reset"]()
 
     # ── 角色卡（personas/*.json）───────────────────────────
 
     @router.get("/personas")
-    async def list_personas():
+    def list_personas():
         items: List[Dict[str, Any]] = []
-        if persona_dir.exists():
-            for path in sorted(p for p in persona_dir.glob("*.json") if not p.name.startswith("_")):
-                item: Dict[str, Any] = {"id": path.stem, "path": str(path)}
-                try:
-                    data = json.loads(path.read_text("utf-8"))
-                    if isinstance(data, dict):
-                        item["name"] = data.get("name") or path.stem
-                        item["identity"] = data.get("identity", "")
-                    else:
-                        item["error"] = "角色卡必须是 JSON 对象"
-                except json.JSONDecodeError as exc:
-                    item["error"] = f"JSON 损坏: {exc}"
-                items.append(item)
+        for path in persona_files(persona_dir):
+            item: Dict[str, Any] = {"id": path.stem, "path": str(path)}
+            try:
+                data = read_persona(path)
+            except PersonaError as exc:          # 坏卡不连累整份列表，挂在它自己头上
+                item["error"] = str(exc)
+            else:
+                item["name"] = data.get("name") or path.stem
+                item["identity"] = data.get("identity", "")
+            items.append(item)
         return {"personas": items}
 
     @router.get("/personas/{npc_id}")
-    async def get_persona(npc_id: str):
+    def get_persona(npc_id: str):
         return {"npc_id": npc_id, "persona": _read_persona(npc_id)}
 
     @router.put("/personas/{npc_id}")
@@ -184,16 +186,21 @@ def build_router(persona_dir: Path,
                 detail=f"角色卡 id（{given}）与路径 id（{npc_id}）不一致")
         persona["id"] = npc_id
 
-        path = _persona_path(npc_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(persona, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        path = persona_path(persona_dir, npc_id)
+
+        def _write_card() -> None:
+            """原子写（先写临时文件再替换）—— 同步实现，交给线程池。"""
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(persona, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+
+        await asyncio.to_thread(_write_card)
         log.info("persona_saved", npc_id=npc_id)
         return {"ok": True, "npc_id": npc_id, "persona": persona}
 
     @router.delete("/personas/{npc_id}")
-    async def delete_persona(npc_id: str):
+    def delete_persona(npc_id: str):
         """删掉一张角色卡（只删 `personas/{id}.json`）。
 
         `_` 开头的文件是模板/说明，不算 NPC，也不许删。
@@ -202,7 +209,7 @@ def build_router(persona_dir: Path,
         """
         if not _valid_id(npc_id) or npc_id.startswith("_"):
             raise HTTPException(status_code=400, detail=f"非法的 NPC id: {npc_id}")
-        path = _persona_path(npc_id)
+        path = persona_path(persona_dir, npc_id)
         if not path.exists():
             raise HTTPException(status_code=404, detail=f"没有这张角色卡: {npc_id}")
 
@@ -223,7 +230,7 @@ def build_router(persona_dir: Path,
     # ── 关系网（persona 的 relations 字段驱动；无数据 → 诚实空态）──
 
     @router.get("/relationships")
-    async def get_relationships():
+    def get_relationships():
         """关系图数据源 {source, nodes, edges}。
 
         v4 没有 world/Runtime，关系只有一个来源：`personas/{id}.json` 的可选
@@ -232,42 +239,40 @@ def build_router(persona_dir: Path,
         """
         nodes: Dict[str, Dict[str, Any]] = {}
         edges: List[Dict[str, Any]] = []
-        if persona_dir.exists():
-            for path in sorted(p for p in persona_dir.glob("*.json") if not p.name.startswith("_")):
-                pid = path.stem
-                node: Dict[str, Any] = {"id": pid, "type": "npc", "name": pid,
-                                        "identity": "", "error": None,
-                                        "avatar": _avatar_url(pid)}
-                try:
-                    data = json.loads(path.read_text("utf-8"))
-                except json.JSONDecodeError as exc:
-                    node["error"] = f"JSON 损坏: {exc}"
-                    nodes[pid] = node
-                    continue
-                if isinstance(data, dict):
-                    node["name"] = data.get("name") or pid
-                    node["identity"] = data.get("identity", "")
-                    relations = data.get("relations")
-                    if isinstance(relations, list):
-                        for rel in relations:
-                            if not isinstance(rel, dict):
-                                continue
-                            who = rel.get("who") or rel.get("target")
-                            if not isinstance(who, str) or not who.strip():
-                                continue
-                            who = who.strip()
-                            kind = rel.get("how") or rel.get("type") or "related"
-                            weight = rel.get("weight", rel.get("score"))
-                            edges.append({
-                                "source": pid,
-                                "target": who,
-                                "type": str(kind),
-                                "weight": weight,
-                                "metadata": {k: v for k, v in rel.items()
-                                             if k not in ("who", "target", "how", "type",
-                                                          "score", "weight")},
-                            })
+        for path in persona_files(persona_dir):
+            pid = path.stem
+            node: Dict[str, Any] = {"id": pid, "type": "npc", "name": pid,
+                                    "identity": "", "error": None,
+                                    "avatar": _avatar_url(pid)}
+            try:
+                data = read_persona(path)
+            except PersonaError as exc:          # 坏卡只标它自己，别拖垮整张关系网
+                node["error"] = str(exc)
                 nodes[pid] = node
+                continue
+            node["name"] = data.get("name") or pid
+            node["identity"] = data.get("identity", "")
+            relations = data.get("relations")
+            if isinstance(relations, list):
+                for rel in relations:
+                    if not isinstance(rel, dict):
+                        continue
+                    who = rel.get("who") or rel.get("target")
+                    if not isinstance(who, str) or not who.strip():
+                        continue
+                    who = who.strip()
+                    kind = rel.get("how") or rel.get("type") or "related"
+                    weight = rel.get("weight", rel.get("score"))
+                    edges.append({
+                        "source": pid,
+                        "target": who,
+                        "type": str(kind),
+                        "weight": weight,
+                        "metadata": {k: v for k, v in rel.items()
+                                     if k not in ("who", "target", "how", "type",
+                                                  "score", "weight")},
+                    })
+            nodes[pid] = node
 
         # 边里出现但不在角色卡里的对象（玩家 / 阵营 / 物件…）→ 补合成节点，不假设类型
         for edge in edges:
@@ -319,18 +324,23 @@ def build_router(persona_dir: Path,
             raise HTTPException(status_code=400,
                                 detail=f"图片太大（{len(raw)} 字节，上限 {_AVATAR_MAX_BYTES}）")
 
-        avatar_dir.mkdir(parents=True, exist_ok=True)
-        for old in _avatar_glob(npc_id):
-            old.unlink()
-        target = avatar_dir / f"{npc_id}{_AVATAR_EXT[matched.group(1)]}"
-        tmp = target.with_suffix(target.suffix + ".tmp")
-        tmp.write_bytes(raw)
-        tmp.replace(target)
+        def _save_avatar() -> Optional[str]:
+            """落盘 + 返回带 mtime 的 URL（换头像要清旧文件）—— 同步实现，交给线程池。"""
+            avatar_dir.mkdir(parents=True, exist_ok=True)
+            for old in _avatar_glob(npc_id):
+                old.unlink()
+            target = avatar_dir / f"{npc_id}{_AVATAR_EXT[matched.group(1)]}"
+            tmp = target.with_suffix(target.suffix + ".tmp")
+            tmp.write_bytes(raw)
+            tmp.replace(target)
+            return _avatar_url(npc_id)
+
+        avatar = await asyncio.to_thread(_save_avatar)
         log.info("avatar_saved", npc_id=npc_id, bytes=len(raw))
-        return {"ok": True, "npc_id": npc_id, "bytes": len(raw), "avatar": _avatar_url(npc_id)}
+        return {"ok": True, "npc_id": npc_id, "bytes": len(raw), "avatar": avatar}
 
     @router.delete("/npcs/{npc_id}/avatar")
-    async def delete_avatar(npc_id: str):
+    def delete_avatar(npc_id: str):
         if not _valid_id(npc_id):
             raise HTTPException(status_code=400, detail=f"非法的 NPC id: {npc_id}")
         files = _avatar_glob(npc_id)
@@ -356,7 +366,7 @@ def build_router(persona_dir: Path,
         return out
 
     @router.get("/npcs/{npc_id}/memory")
-    async def list_memory(npc_id: str):
+    def list_memory(npc_id: str):
         entries = memory.load_card(npc_id)
         return {
             "npc_id": npc_id,
@@ -377,8 +387,9 @@ def build_router(persona_dir: Path,
         pinned = bool(body.get("pinned"))
         async with lock_for(npc_id):
             try:
-                entry = memory.add_entry(npc_id, content, importance=importance,
-                                         category=category, pinned=pinned)
+                entry = await asyncio.to_thread(
+                    memory.add_entry, npc_id, content,
+                    importance=importance, category=category, pinned=pinned)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "entry": _decorate([entry])[0]}
@@ -392,7 +403,8 @@ def build_router(persona_dir: Path,
                                 detail=f"至少要给一个可改字段: {'/'.join(_EDITABLE_FIELDS)}")
         async with lock_for(npc_id):
             try:
-                entry = memory.update_entry(npc_id, entry_id, **fields)
+                entry = await asyncio.to_thread(
+                    lambda: memory.update_entry(npc_id, entry_id, **fields))
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         if entry is None:
@@ -402,7 +414,7 @@ def build_router(persona_dir: Path,
     @router.delete("/npcs/{npc_id}/memory/{entry_id}")
     async def delete_memory(npc_id: str, entry_id: str):
         async with lock_for(npc_id):
-            ok = memory.delete_entry(npc_id, entry_id)
+            ok = await asyncio.to_thread(memory.delete_entry, npc_id, entry_id)
         if not ok:
             raise HTTPException(status_code=404, detail=f"未找到记忆条目: {entry_id}")
         return {"ok": True, "deleted": entry_id}
@@ -411,14 +423,15 @@ def build_router(persona_dir: Path,
     async def prune_memory(npc_id: str):
         """手动触发确定性修剪（与对话开始时自动跑的是同一个函数）。"""
         async with lock_for(npc_id):
-            removed = memory.prune(npc_id)
+            removed = await asyncio.to_thread(memory.prune, npc_id)
+            remaining = await asyncio.to_thread(memory.load_card, npc_id)
         return {"ok": True, "npc_id": npc_id, "removed": removed,
-                "remaining": len(memory.load_card(npc_id))}
+                "remaining": len(remaining)}
 
     # ── 聊天记录（store/{id}_chat.jsonl）─────────────────
 
     @router.get("/npcs/{npc_id}/chat")
-    async def get_chat(npc_id: str, limit: int = 200, offset: int = 0):
+    def get_chat(npc_id: str, limit: int = 200, offset: int = 0):
         """从最新往前取窗口：offset = 已看过的最新条数，limit = 本页条数。"""
         limit = max(1, min(int(limit), _CHAT_PAGE_MAX))
         offset = max(0, int(offset))

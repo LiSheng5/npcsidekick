@@ -1,24 +1,29 @@
 """HTTP 服务 —— 大脑 ↔ mod 的契约实现。
 
 端点：
-  POST /api/capabilities   mod 报到：声明能力清单（白名单唯一闸门）+ 心跳
+  POST /api/capabilities   mod 报到：声明能力清单（白名单唯一闸门）+ 执行接口 + 心跳
   POST /api/talk           对话：SSE 流式（delta / action / audio / done 帧）
-  POST /api/action_result  动作结果回报 → 确定性写记忆卡
+  POST /api/action_result  动作结果回报 → 确定性写记忆卡（可选通道，长动作才用）
   POST /api/tts            语音合成（独立输出通道，不属于 mod 契约）
   GET  /api/state          服务器概况（调试）
   GET  /api/npcs           各 NPC 状态摘要（调试）
 
-两条通道严格分离（台词只走 delta 帧，动作只在流末尾出 action 帧）：
+执行模型（2026-09-28 起）：**动作 = LLM 直接调用的工具**。
+  记忆工具由本进程执行；动作工具由本服务**同步调用** mod 的 `execute_url`（协议 §3），
+  结果作为工具消息回上下文继续推理，并**当场写进记忆卡** —— mod 不用回报。
+
+两条通道严格分离（台词只走 delta 帧，流末尾的 action 帧只是"已执行动作"的记录）：
   · 台词通道 = SSE 的 delta 帧，只有角色说的话
-  · 结构化通道 = action 帧，在流末尾，mod 自己决定执不执行
+  · 结构化通道 = action 帧，在流末尾，mod **不需要**照它做任何事（仅记录/展示）
   · 语音通道 = audio 帧（仅 voice=true 时），在 done 之前，缺依赖/超时则不出帧
+
+本文件只留"契约端点 + 应用装配"：
+  · 回合主体（LLM ↔ 工具循环、动作同步转发）在 `turn.py`
+  · 角色卡读取/编译在 `core/personas.py`；LLM 设置在 `core/llm_runtime.py`
 """
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -28,13 +33,24 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.client import LLMClient
+from core.config_flags import env_num
+from core.llm_runtime import (
+    apply_llm_settings,
+    build_default_client,
+    key_perm_hint,
+    llm_config_status,
+    reasoning_effort,
+    reset_llm_settings,
+    scrub,
+)
 from core.logging_config import log
+from core.personas import PersonaError, persona_ids, persona_path, read_persona
 
 import chatlog
 import console_api
 import memory
-import tools
 import tts
+import turn
 
 # 角色卡目录（加一个文件就多一个 NPC）
 PERSONA_DIR = Path(__file__).resolve().parent / "personas"
@@ -47,118 +63,37 @@ AVATAR_DIR = Path(__file__).resolve().parent / "avatars"
 
 # v4 不预设厂商：模型名 / key / 端点三件套由用户自配（AGENT_MODEL / NPC_API_KEY / NPC_BASE_URL）
 
-# 单次对话内的记忆工具循环上限（防死循环）
-MAX_TOOL_ROUNDS = 4
-
-# mod 心跳超时（秒）：超时视该 mod 离线，不再提议动作
+# mod 心跳超时（秒）：超时视该 mod 离线，不再调用任何动作
 DEFAULT_HEARTBEAT_TIMEOUT = 60.0
 _ENV_HEARTBEAT_TIMEOUT = "NPC_MOD_HEARTBEAT_TIMEOUT"
 
-# 思考模式档位：未设置 → 不指定，用服务端默认；
-# off/disabled/none → 显式关闭；low/medium/high/max → 开启
-_ENV_REASONING_EFFORT = "NPC_REASONING_EFFORT"
-
-# 记忆检索返回条数（recall 工具）
-RECALL_TOP_K = 5
-
-# 语音合成超时（秒）—— 语音是锦上添花，超时就不等（纯文本保底）
-TTS_TIMEOUT_SEC = 5.0
-
-
-async def _tts_synthesize_safe(text: str, voice: str) -> Optional[bytes]:
-    """合成音频，超时/失败 → None（调用方回退纯文本，绝不卡对话）。"""
-    try:
-        return await asyncio.wait_for(tts.synthesize(text, voice), timeout=TTS_TIMEOUT_SEC)
-    except Exception:
-        return None
-
-
-def reasoning_effort() -> Optional[str]:
-    """思考档位（现读，可热切）：页面设置 > 落盘配置 > 环境变量。空白 → None（不指定）。"""
-    raw = str(llm_settings().get("reasoning_effort") or "").strip()
-    return raw or None
-
-
-def thinking_effort() -> Optional[str]:
-    """实际发给模型的档位 —— 勾了"该模型不认思考参数"就一律 None（一个参数都不发）。
-
-    对不认这些字段的端点，连 `thinking:{type:disabled}` 都是未知参数会 400，
-    所以"不支持思考的模型"要映射到"不指定"，而不是显式关闭。
-    """
-    if llm_settings().get("thinking_unsupported"):
-        return None
-    return reasoning_effort()
+# 动作执行等待上限（秒）：大脑同步调 mod 的 execute_url 时最多等这么久
+DEFAULT_EXECUTE_TIMEOUT = 30.0
+_ENV_EXECUTE_TIMEOUT = "NPC_EXECUTE_TIMEOUT"
 
 
 def heartbeat_timeout() -> float:
-    raw = os.environ.get(_ENV_HEARTBEAT_TIMEOUT)
-    if raw is None or not str(raw).strip():
-        return DEFAULT_HEARTBEAT_TIMEOUT
-    try:
-        return max(0.0, float(str(raw).strip()))
-    except ValueError:
-        return DEFAULT_HEARTBEAT_TIMEOUT
+    """mod 心跳超时（现读，可热切）：NPC_MOD_HEARTBEAT_TIMEOUT 秒，默认 60。"""
+    return max(0.0, env_num(_ENV_HEARTBEAT_TIMEOUT, DEFAULT_HEARTBEAT_TIMEOUT))
 
 
-# ── 角色卡（persona JSON → 系统提示词）──────────────────────
+def execute_timeout() -> float:
+    """动作执行等待上限（现读，可热切）：NPC_EXECUTE_TIMEOUT 秒，默认 30。"""
+    return max(0.0, env_num(_ENV_EXECUTE_TIMEOUT, DEFAULT_EXECUTE_TIMEOUT))
+
+
+# ── 角色卡（读取/枚举在 core/personas.py，这里只管 HTTP 口径）──
 
 def load_persona(npc_id: str) -> Dict[str, Any]:
     """读 personas/{id}.json；缺失/非法 → HTTPException(400)。"""
-    path = PERSONA_DIR / f"{npc_id}.json"
-    if not path.exists():
-        raise HTTPException(status_code=400, detail=f"未找到 NPC 角色卡: {path}")
+    path = persona_path(PERSONA_DIR, npc_id)
     try:
-        data = json.loads(path.read_text("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"角色卡 JSON 损坏: {path} ({exc})") from exc
-    if not isinstance(data, dict) or not data.get("id"):
+        persona = read_persona(path)
+    except PersonaError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not persona.get("id"):
         raise HTTPException(status_code=400, detail=f"角色卡缺少 id 字段: {path}")
-    return data
-
-
-def build_system_prompt(persona: Dict[str, Any], observation: Any = None) -> str:
-    """角色卡 JSON 编译成系统提示词（含台词纪律与"查不到就说不知道"的接地要求）。"""
-    lines = [
-        f"你是{persona.get('identity') or '一个游戏角色'}。",
-        f"性格: {persona.get('personality') or '友善'}。",
-        f"说话风格: {persona.get('speech_style') or '自然'}。",
-    ]
-    samples = persona.get("voice_samples") or []
-    if isinstance(samples, list) and samples:
-        lines.append("你说过的台词（语气和用词严格按这些来）:")
-        lines.extend(f"- 「{s}」" for s in samples)
-    taboos = persona.get("taboos") or []
-    if isinstance(taboos, list) and taboos:
-        lines.append(f"禁忌: 你绝不会{'、'.join(str(t) for t in taboos)}。")
-
-    if observation:
-        text = observation if isinstance(observation, str) else json.dumps(
-            observation, ensure_ascii=False)
-        lines.append(f"当前情况（游戏观测）: {text}")
-
-    lines.extend([
-        "规矩:",
-        "1. 你只输出角色说的话（台词）。不要出现“调用工具/函数/参数”之类的说法，"
-        "也不要写旁白或舞台说明。",
-        "2. 想做什么就用自然语言说出来（例如“我去煮饭”）。动作由游戏侧执行，"
-        "你只负责提议；游戏没做，就等于没发生。",
-        "3. 只依据上文出现的事实回答。不知道就说不知道，绝不编造。",
-        "4. 涉及往事、答应过的事或记不清的细节时，先查记忆（recall）再按查到的原文回答；"
-        "查不到就说不知道，绝不编造。",
-    ])
-    return "\n".join(lines)
-
-
-def rule_reply(persona: Dict[str, Any], message: str) -> str:
-    """LLM 不可用时的规则回复（按角色卡 rules.replies 的关键词命中，兜底用 rules.fallback）。"""
-    rules = persona.get("rules") or {}
-    replies = rules.get("replies") or {}
-    if isinstance(replies, dict):
-        for keyword, reply in replies.items():
-            if keyword and keyword in message:
-                return str(reply)
-    fallback = rules.get("fallback")
-    return str(fallback) if fallback else "……"
+    return persona
 
 
 # ── 能力清单登记 + 心跳 ───────────────────────────────────
@@ -173,8 +108,11 @@ class Registry:
     def timeout(self) -> float:
         return heartbeat_timeout() if self._timeout_override is None else self._timeout_override
 
-    def declare(self, mod: str, actions: List[dict]) -> None:
-        self._mods[mod] = {"actions": list(actions), "last_seen": time.time()}
+    def declare(self, mod: str, actions: List[dict],
+                execute_url: Optional[str] = None) -> None:
+        url = execute_url.strip() if isinstance(execute_url, str) else ""
+        self._mods[mod] = {"actions": list(actions), "execute_url": url or None,
+                           "last_seen": time.time()}
 
     def touch(self, mod: str) -> None:
         entry = self._mods.get(mod)
@@ -191,7 +129,7 @@ class Registry:
         return [m for m in self._mods if self.online(m)]
 
     def actions(self, mod: Optional[str]) -> List[dict]:
-        """该 mod 声明且在线时的动作清单；离线/未知 → 空（不提议动作）。"""
+        """该 mod 声明且在线时的动作清单；离线/未知 → 空（不调用动作）。"""
         if mod:
             return list(self._mods[mod]["actions"]) if self.online(mod) else []
         online = self.online_mods()
@@ -199,12 +137,28 @@ class Registry:
             return list(self._mods[online[0]]["actions"])
         return []
 
+    def execute_url(self, mod: Optional[str]) -> Optional[str]:
+        """该 mod 的执行接口地址（协议 §1）；离线 / 未知 / 没给 → None。
+
+        没给执行接口 = 该 mod 没有可执行的动作 —— 动作工具不进 LLM 的工具定义。
+        """
+        if mod:
+            entry = self._mods.get(mod)
+            if entry is None or not self.online(mod):
+                return None
+            return entry.get("execute_url")
+        online = self.online_mods()
+        if len(online) == 1:                     # 只有一个在线 mod → 就是它
+            return self._mods[online[0]].get("execute_url")
+        return None
+
     def state(self) -> Dict[str, Any]:
         now = time.time()
         return {
             m: {
                 "online": self.online(m),
                 "actions": len(e["actions"]),
+                "execute_url": e.get("execute_url"),
                 "last_seen_s_ago": round(now - e["last_seen"], 1),
             }
             for m, e in self._mods.items()
@@ -230,44 +184,16 @@ def _require_text(body: Dict[str, Any], key: str) -> str:
     return value.strip()
 
 
-def _sse(payload: Dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-# ── 流式工具调用累积 ─────────────────────────────────────
-
-class _ToolCallBuffer:
-    """把跨 chunk 的 tool_call 增量拼成完整调用。"""
-
-    def __init__(self) -> None:
-        self.name = ""
-        self.arguments = ""
-        self.call_id = ""
-
-    def feed(self, delta: Dict[str, Any]) -> None:
-        if delta.get("id"):
-            self.call_id = str(delta["id"])
-        if delta.get("function_name"):
-            self.name += str(delta["function_name"])
-        if delta.get("function_arguments"):
-            self.arguments += str(delta["function_arguments"])
-
-    def finalize(self, index: int) -> Dict[str, Any]:
-        try:
-            args = json.loads(self.arguments) if self.arguments.strip() else {}
-        except json.JSONDecodeError:
-            log.warning("tool_args_bad_json", tool=self.name, raw=self.arguments[:120])
-            args = {}
-        if not isinstance(args, dict):
-            args = {}
-        return {"id": self.call_id or f"call_{index + 1}", "name": self.name, "args": args}
-
-
 # ── 应用 ─────────────────────────────────────────────────
 
 def create_app(llm_client: Optional[LLMClient] = None,
-               heartbeat_timeout_override: Optional[float] = None) -> FastAPI:
-    """组装应用。llm_client 可注入（测试用假 Provider）；None 时按环境自动创建。"""
+               heartbeat_timeout_override: Optional[float] = None,
+               executor: Optional[Any] = None) -> FastAPI:
+    """组装应用。llm_client 可注入（测试用假 Provider）；None 时按环境自动创建。
+
+    executor 可注入（测试用假执行器）：`async (url, payload, timeout) -> dict`；
+    缺省走真实 HTTP（`turn._http_execute`）请求 mod 的 execute_url。
+    """
     app = FastAPI(title="NPCSidekick v4", version="4.0")
     registry = Registry(timeout=heartbeat_timeout_override)
     locks: Dict[str, asyncio.Lock] = {}
@@ -294,6 +220,9 @@ def create_app(llm_client: Optional[LLMClient] = None,
     async def capabilities(request: Request):
         body = await _json_body(request)
         mod = _require_text(body, "mod")
+        execute_url = body.get("execute_url")
+        if execute_url is not None and not isinstance(execute_url, str):
+            raise HTTPException(status_code=400, detail="字段 execute_url 必须是字符串")
         actions = body.get("actions")
         if not isinstance(actions, list) or not actions:
             raise HTTPException(status_code=400, detail="字段 actions 必填且必须是非空数组")
@@ -311,8 +240,9 @@ def create_app(llm_client: Optional[LLMClient] = None,
             if params is not None and not isinstance(params, dict):
                 raise HTTPException(status_code=400, detail=f"actions[{i}].params 必须是对象")
             clean.append({"name": name.strip(), "desc": desc.strip(), "params": params or {}})
-        registry.declare(mod, clean)
-        log.info("capabilities_declared", mod=mod, actions=len(clean))
+        registry.declare(mod, clean, execute_url=execute_url)
+        log.info("capabilities_declared", mod=mod, actions=len(clean),
+                 execute_url=bool(str(execute_url or "").strip()))
         return {"ok": True, "mod": mod, "actions": [a["name"] for a in clean]}
 
     # ── 对话（SSE 流式：delta / action / audio / done）──
@@ -330,103 +260,25 @@ def create_app(llm_client: Optional[LLMClient] = None,
             mod = None
 
         persona = load_persona(npc_id)
-        capabilities = registry.actions(mod)
+        # 动作要"能执行"才进 LLM 的工具定义：mod 在线 + 声明过动作 + 给了执行接口（协议 §1）
+        execute_url = registry.execute_url(mod)
+        capabilities = registry.actions(mod) if execute_url else []
         llm = llm_holder["client"]          # 页面换过脑就拿到新的
         timeout = registry.timeout()
         wants_voice = bool(body.get("voice"))        # 按需输出通道：默认纯文本
 
-        async def stream():
-            full_parts: List[str] = []
-            proposal: Optional[Dict[str, Any]] = None
-            emitted = False
-            async with lock_for(npc_id):
-                try:
-                    if llm is None:
-                        raise RuntimeError("LLM 不可用")
-                    memory.prune(npc_id)                       # 确定性遗忘（半衰期修剪，不走 LLM）
-                    history = chatlog.build_history(npc_id, llm)
-                    messages = [{"role": "system",
-                                 "content": build_system_prompt(persona, observation)}]
-                    messages.extend(history)
-                    messages.append({"role": "user", "content": message})
-                    tool_defs = tools.build_tool_definitions(capabilities)
-
-                    for round_no in range(MAX_TOOL_ROUNDS):
-                        buffers: Dict[int, _ToolCallBuffer] = {}
-                        round_text: List[str] = []
-                        async for chunk in llm.stream(messages, tools=tool_defs,
-                                                      reasoning_effort=thinking_effort()):
-                            if chunk.has_content:
-                                round_text.append(chunk.content)
-                                full_parts.append(chunk.content)
-                                emitted = True
-                                yield _sse({"type": "delta", "text": chunk.content})
-                            if chunk.has_tool_call:
-                                delta = chunk.tool_call_delta or {}
-                                buffers.setdefault(
-                                    int(delta.get("index") or 0), _ToolCallBuffer()).feed(delta)
-
-                        calls = [buffers[k].finalize(k) for k in sorted(buffers)]
-                        calls = [c for c in calls if c["name"]]
-                        if not calls:
-                            break
-
-                        action_calls = [c for c in calls
-                                        if tools.is_action_tool(c["name"], capabilities)]
-                        if action_calls:
-                            proposal = {"name": action_calls[0]["name"],
-                                        "params": action_calls[0]["args"]}
-                            break                                   # 提议通道：不执行，流末尾出台
-
-                        messages.append({
-                            "role": "assistant",
-                            "content": "".join(round_text),
-                            "tool_calls": [{
-                                "id": c["id"], "type": "function",
-                                "function": {"name": c["name"],
-                                             "arguments": json.dumps(c["args"], ensure_ascii=False)},
-                            } for c in calls],
-                        })
-                        for c in calls:
-                            # 同义词族**按请求显式传入**（取自本 NPC 的角色卡）——
-                            # 不走 memory 的进程级全局表，多 NPC 并发时互不污染
-                            result = tools.run_tool(c["name"], c["args"], npc_id, capabilities,
-                                                    top_k=RECALL_TOP_K,
-                                                    synonyms=persona.get("entity_synonyms"))
-                            messages.append({
-                                "role": "tool", "tool_call_id": c["id"],
-                                "content": str(result.data if result.ok else (result.error or "")),
-                            })
-                        if round_no == MAX_TOOL_ROUNDS - 1:
-                            log.warning("talk_tool_rounds_exhausted", npc_id=npc_id)
-                except Exception as exc:                            # 降级：LLM 出错就回退角色卡的规则回复
-                    log.warning("talk_llm_failed", npc_id=npc_id, error=scrub(str(exc))[:160])
-                    if not emitted:
-                        fallback = rule_reply(persona, message)
-                        full_parts.append(fallback)
-                        emitted = True
-                        yield _sse({"type": "delta", "text": fallback})
-
-                chatlog.append_turn(npc_id, message, "".join(full_parts))
-
-            if proposal:
-                yield _sse({"type": "action", "action": proposal})
-            if wants_voice and tts.available():
-                # 台词流已走完，这里才整段合成 —— 不阻塞 delta 的逐字输出
-                voice = tts.voice_for(persona)
-                audio = await _tts_synthesize_safe("".join(full_parts), voice)
-                if audio:
-                    yield _sse({"type": "audio", "audio": tts.to_base64(audio), "voice": voice})
-            yield _sse({"type": "done"})
-
         return StreamingResponse(
-            stream(),
+            turn.stream_turn(llm=llm, npc_id=npc_id, message=message, persona=persona,
+                             observation=observation, capabilities=capabilities,
+                             execute_url=execute_url, mod=mod, executor=executor,
+                             lock=lock_for(npc_id), wants_voice=wants_voice,
+                             execute_timeout=execute_timeout),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                      "X-Mod-Heartbeat-Timeout": str(timeout)},
         )
 
-    # ── 动作结果回报（游戏执行完回报 → 写记忆卡）─────────
+    # ── 动作结果回报（可选通道：长动作异步回报 → 写记忆卡，协议 §4）──
     @app.post("/api/action_result")
     async def action_result(request: Request):
         body = await _json_body(request)
@@ -448,7 +300,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
             registry.touch(mod.strip())
 
         async with lock_for(npc_id):
-            entry = memory.add_action_result(npc_id, action, ok, note)
+            entry = await asyncio.to_thread(memory.add_action_result, npc_id, action, ok, note)
         log.info("action_result_recorded", npc_id=npc_id, action=action, ok=ok)
         return {"ok": True, "npc_id": npc_id, "entry": entry}
 
@@ -469,11 +321,11 @@ def create_app(llm_client: Optional[LLMClient] = None,
             persona = None
             if isinstance(npc_id, str) and npc_id.strip():
                 try:
-                    persona = load_persona(npc_id.strip())
+                    persona = await asyncio.to_thread(load_persona, npc_id.strip())
                 except HTTPException:
                     persona = None
             voice = tts.voice_for(persona)
-        audio = await _tts_synthesize_safe(text, voice)
+        audio = await tts.synthesize_safe(text, voice)
         return {"audio": tts.to_base64(audio) if audio else "", "voice": voice}
 
     # ── 状态查询（/api/state、/api/npcs，调试用）─────────
@@ -486,7 +338,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
             "tts": tts.available(),
             "store_dir": str(memory.STORE_DIR),
             "persona_dir": str(PERSONA_DIR),
-            "npcs": len(_persona_ids()),
+            "npcs": len(persona_ids(PERSONA_DIR)),
             "mods": registry.state(),
             "heartbeat_timeout_s": registry.timeout(),
             "uptime_s": round(time.time() - started_at, 1),
@@ -495,7 +347,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
     @app.get("/api/npcs")
     async def npcs():
         result = []
-        for npc_id in _persona_ids():
+        for npc_id in persona_ids(PERSONA_DIR):
             entries = memory.load_card(npc_id)
             msgs = chatlog.load_turns(npc_id)
             result.append({
@@ -534,308 +386,6 @@ def create_app(llm_client: Optional[LLMClient] = None,
                             "/api/state", "/api/npcs"]}
 
     return app
-
-
-def _api_key() -> Optional[str]:
-    from core import config
-    return config.API_KEY or None
-
-
-def _persona_ids() -> List[str]:
-    if not PERSONA_DIR.exists():
-        return []
-    # 下划线开头 = 模板/说明一类非 NPC 文件（如 personas/_模板.json），不算角色
-    return sorted(p.stem for p in PERSONA_DIR.glob("*.json") if not p.name.startswith("_"))
-
-
-# ── LLM 设置（页面可改，落 store/llm_config.json；key 不在这里）──
-
-_LLM_FIELDS = ("model", "base_url", "api_key", "reasoning_effort", "thinking_unsupported")
-_EFFORT_VALUES = ("off", "disabled", "none", "low", "medium", "high", "max")
-
-# 只有 api_key 是允许字段（页面可填，明文落盘，见 _PLAIN_KEY_WARNING）；
-# 其余凭据类字段一律响亮拒绝，别被静默吞掉。
-_FORBIDDEN_KEYS = ("token", "authorization", "secret", "password")
-
-_PLAIN_KEY_WARNING = ("页面填的 key 以**明文**存在 store/llm_config.json —— "
-                      "别分享、别提交这个文件；想更安全就清空它，改用环境变量 NPC_API_KEY。")
-
-
-def mask_secret(value: str) -> str:
-    """只留头尾：`sk-abc…wxyz`。页面与接口只给掩码，绝不回原文。"""
-    value = value or ""
-    if not value:
-        return ""
-    if len(value) <= 8:
-        return f"{value[:2]}…"
-    return f"{value[:3]}…{value[-4:]}"
-
-
-def effective_api_key() -> str:
-    """生效的 key：页面填的（store/llm_config.json）优先，其次环境变量 / api_key.txt。"""
-    from core import config
-
-    return str(llm_settings().get("api_key") or "").strip() or (config.API_KEY or "")
-
-
-def scrub(text: str) -> str:
-    """日志/报错脱敏：把生效 key 与环境变量 key 的原文都换成掩码。"""
-    from core import config
-
-    out = text or ""
-    for key in {effective_api_key(), config.API_KEY or ""}:
-        if len(key) >= 6 and key in out:
-            out = out.replace(key, mask_secret(key))
-    return out
-
-
-def api_key_status() -> Dict[str, Any]:
-    """key 的只读状态：有没有、来自哪、掩码 —— 内容一个字都不回。"""
-    from core import config
-    from core.settings import api_key_source
-
-    # "页面填的"要看持久化层（文件 + 运行时），不能看合并值 —— 合并值已经回落过环境变量了
-    from_page = str(_persisted_llm_config().get("api_key") or "").strip()
-    env_key = config.API_KEY or ""
-    key = from_page or env_key
-    return {
-        "present": bool(key),
-        "masked": mask_secret(key) or None,
-        "source": "store/llm_config.json（页面填的）" if from_page else (api_key_source() or None),
-        "from_page": bool(from_page),
-        "perm_hint": key_perm_hint(),     # api_key.txt 权限太松时的提示（Windows 才有）
-        "plain_warning": _PLAIN_KEY_WARNING if from_page else None,
-    }
-
-
-# ── api_key.txt 权限：只检测，不自动改 ────────────────────
-
-_KEY_PERM_HINT: Optional[str] = None
-_KEY_PERM_CHECKED = False
-
-
-def _world_readable_lines(icacls_output: str, path: str = "") -> List[str]:
-    """从 icacls 输出里挑"其他账户也能读/写"的行（Everyone / Users / Authenticated Users）。
-
-    先把文件名本身从行首去掉 —— 否则 `C:\\Users\\...` 这种路径会被误判成 Users 账户。
-    """
-    hits: List[str] = []
-    prefix = (path or "").strip().lower()
-    for raw in (icacls_output or "").splitlines():
-        line = raw.strip()
-        if prefix and line.lower().startswith(prefix):
-            line = line[len(prefix):]
-        low = line.lower()
-        if not any(name in low for name in ("everyone", "users", "authenticated users")):
-            continue
-        if any(right in low for right in ("(r)", "(rx)", "(rw)", "(w)", "(m)", "(f)")):
-            hits.append(raw.strip())
-    return hits
-
-
-def scan_key_file_perm(path: Optional[Path] = None) -> Optional[str]:
-    """看看 api_key.txt 是不是对其他账户也可读 —— **只检测，绝不改文件**。
-
-    只在 Windows + 文件存在时跑一次 icacls；非 Windows / 没这文件 / icacls 失败 → None（静默）。
-    返回一段可直接复制的收紧命令，由用户自己决定跑不跑。
-    """
-    if os.name != "nt":
-        return None
-    target = Path(path) if path else Path(__file__).resolve().parent / "api_key.txt"
-    if not target.exists():
-        return None
-    try:
-        proc = subprocess.run(["icacls", str(target)],
-                              capture_output=True, text=True, timeout=3)
-    except Exception:                                   # 命令缺失/超时/被拦 → 一律闭嘴
-        return None
-    hits = _world_readable_lines(proc.stdout, str(target))
-    if not hits:
-        return None
-    user = os.environ.get("USERNAME") or os.environ.get("USER") or "当前用户"
-    return (f"{target.name} 对其他账户也可读（{hits[0]}）—— v4 不会自动改你的文件，"
-            f'要收紧请自己跑：icacls "{target}" /inheritance:r '
-            f'/grant:r "{user}:(R,W)" "SYSTEM:(F)" "Administrators:(F)"')
-
-
-def key_perm_hint(refresh: bool = False) -> Optional[str]:
-    """给日志与页面用的提示（只算一次，重启才刷新）。
-
-    扫两处明文 key：工程根 `api_key.txt`、以及页面存下来的 `store/llm_config.json`
-    （只在它真存了 key 时才提示）。
-    """
-    global _KEY_PERM_HINT, _KEY_PERM_CHECKED
-    if refresh or not _KEY_PERM_CHECKED:
-        hints: List[str] = []
-        root = scan_key_file_perm()
-        if root:
-            hints.append(root)
-        if _load_llm_file().get("api_key"):
-            stored = scan_key_file_perm(llm_config_path())
-            if stored:
-                hints.append(stored)
-        _KEY_PERM_HINT = "；".join(hints) or None
-        _KEY_PERM_CHECKED = True
-    return _KEY_PERM_HINT
-
-_LLM_RUNTIME: Dict[str, Any] = {}          # 页面改过的值（优先级最高，进程内有效）
-
-
-def llm_config_path() -> Path:
-    """页面设置的落盘位置（与记忆卡同级的运行时目录，已 gitignore）。"""
-    return memory.STORE_DIR / "llm_config.json"
-
-
-def _load_llm_file() -> Dict[str, Any]:
-    try:
-        data = json.loads(llm_config_path().read_text("utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _save_llm_file(cfg: Dict[str, Any]) -> None:
-    path = llm_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    blob = {k: v for k, v in cfg.items() if k in _LLM_FIELDS}
-    if blob.get("api_key"):
-        # 明文 key 落盘 —— 文件自带一行警告：万一被拷走/误发，打开就看得见
-        blob["_warning"] = ("本文件含明文 API Key：不要分享、不要提交到仓库；"
-                            "想更安全就删掉它，改用环境变量 NPC_API_KEY。")
-    path.write_text(json.dumps(blob, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _env_llm_config() -> Dict[str, Any]:
-    """环境变量那一层 —— 页面与文件都没设时的起点。"""
-    from core import config
-
-    return {
-        "model": os.environ.get("AGENT_MODEL") or os.environ.get("NPC_MODEL") or "",
-        "base_url": os.environ.get("NPC_BASE_URL") or config.BASE_URL or "",
-        "api_key": config.API_KEY or "",
-        "reasoning_effort": os.environ.get(_ENV_REASONING_EFFORT) or "",
-        "thinking_unsupported": False,
-    }
-
-
-def llm_settings() -> Dict[str, Any]:
-    """生效中的设置：页面改的 > store/llm_config.json > 环境变量。"""
-    merged = _env_llm_config()
-    merged.update({k: v for k, v in _load_llm_file().items() if k in _LLM_FIELDS})
-    merged.update(_LLM_RUNTIME)
-    return merged
-
-
-def _persisted_llm_config() -> Dict[str, Any]:
-    """要落盘的那份 = 文件里原有的 + 页面改的（**不含环境变量那一层**）。
-
-    否则保存时会把环境变量里的 key 抄进文件 —— 用户没在页面填过也变成明文存一份。
-    """
-    saved = {k: v for k, v in _load_llm_file().items() if k in _LLM_FIELDS}
-    saved.update(_LLM_RUNTIME)
-    return saved
-
-
-def _llm_origin() -> str:
-    """当前值来自哪一层（页面上要说清，免得用户以为改了没生效）。"""
-    if _LLM_RUNTIME:
-        return "runtime"
-    if _load_llm_file():
-        return "file"
-    return "env"
-
-
-def llm_config_status() -> Dict[str, Any]:
-    """当前 LLM 设置与状态：缺什么写什么，并标明值来自哪一层。"""
-    from core import config
-    from core.factory import resolve_llm_config
-
-    cfg = llm_settings()
-    status = resolve_llm_config(api_key=effective_api_key(), model_name=cfg["model"],
-                                base_url=cfg["base_url"])
-    status["reasoning_effort"] = reasoning_effort()      # 用户设的档位
-    status["thinking_effort"] = thinking_effort()        # 实际下发的（None = 一个都不发）
-    status["thinking_unsupported"] = bool(cfg["thinking_unsupported"])
-    status["origin"] = _llm_origin()
-    status["api_key"] = api_key_status()      # 只有掩码，没有原文
-    return status
-
-
-def apply_llm_settings(patch: Dict[str, Any],
-                       holder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """改设置 → 落盘 → 换脑。校验不通过抛 ValueError（调用方转 400）。
-
-    api_key 是唯一允许的凭据字段：填了就明文存 store/llm_config.json（页面优先），
-    传空串 = 删掉它、回到环境变量那一层。
-    """
-    for key in patch:                       # 护栏：凭据类字段（token/secret…）一律拒绝
-        if str(key).lower() in _FORBIDDEN_KEYS:
-            raise ValueError(f"字段 {key} 不接受 —— 要配 key 请用 api_key，或放环境变量 NPC_API_KEY")
-
-    clear_key = False
-    clean: Dict[str, Any] = {}
-    for key in ("model", "base_url", "api_key", "reasoning_effort"):
-        if key not in patch or patch[key] is None:
-            continue
-        value = str(patch[key]).strip()
-        if key == "reasoning_effort" and value and value not in _EFFORT_VALUES:
-            raise ValueError(f"思考档位只能是 {'/'.join(_EFFORT_VALUES)} 或留空（不指定）")
-        if not value and key == "api_key":
-            _LLM_RUNTIME.pop("api_key", None)    # 清空 = 删掉它，回到环境变量
-            clear_key = True
-            continue
-        clean[key] = value
-    if patch.get("thinking_unsupported") is not None:
-        clean["thinking_unsupported"] = bool(patch["thinking_unsupported"])
-
-    _LLM_RUNTIME.update(clean)
-    saved = _persisted_llm_config()
-    if clear_key:
-        saved.pop("api_key", None)
-    _save_llm_file(saved)
-    if holder is not None:
-        rebuild_llm(holder)
-    return llm_config_status()
-
-
-def reset_llm_settings(holder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """清掉页面设置与落盘文件，回到环境变量那一层。"""
-    _LLM_RUNTIME.clear()
-    try:
-        llm_config_path().unlink()
-    except OSError:
-        pass
-    if holder is not None:
-        rebuild_llm(holder)
-    return llm_config_status()
-
-
-def rebuild_llm(holder: Dict[str, Any]) -> None:
-    """按生效设置重建大脑；没配齐 → None（/api/talk 走角色卡 rules 兜底）。"""
-    holder["client"] = build_default_client()
-
-
-def build_default_client() -> Optional[LLMClient]:
-    """按用户配置创建 LLM 客户端；三件套缺任何一项 → None（走规则回复兜底）。"""
-    status = llm_config_status()
-    if not status["ready"]:
-        log.warning("llm_not_configured", missing=",".join(status["missing"]),
-                    hint="可在控制台「模型」页直接填；未配齐时 /api/talk 走角色卡 rules 回复")
-        return None
-    if status["source"] == "inferred":
-        log.info("llm_base_url_inferred", model=status["model"], base_url=status["base_url"],
-                 hint="想换厂商/网关请显式配 NPC_BASE_URL")
-    from core import config
-    from core.factory import create_provider
-
-    provider = create_provider(
-        api_key=effective_api_key(),        # 页面填的 key 优先，其次环境变量 / api_key.txt
-        model_name=status["model"],
-        base_url=status["base_url"],
-        temperature=config.TEMPERATURE,
-        max_tokens=config.MAX_TOKENS,
-    )
-    return LLMClient(provider=provider)
 
 
 app = create_app(llm_client=build_default_client())

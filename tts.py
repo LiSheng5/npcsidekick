@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import importlib.util
@@ -16,6 +17,9 @@ from typing import Optional
 
 # 全局默认音色（persona["voice"] 可覆盖）
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
+
+# 合成超时（秒）—— 语音是锦上添花，超时就不等（纯文本保底）
+SYNTH_TIMEOUT_SEC = 5.0
 
 # 内存缓存：相同文本 + 音色不重复合成（常见台词/兜底话术复用）
 _cache: dict[str, bytes] = {}
@@ -67,5 +71,13 @@ async def synthesize(text: str, voice: str) -> Optional[bytes]:
             _cache.clear()
         _cache[key] = result
         return result
+    except Exception:
+        return None
+
+
+async def synthesize_safe(text: str, voice: str) -> Optional[bytes]:
+    """合成音频，超时/失败 → None（调用方回退纯文本，绝不卡对话）。"""
+    try:
+        return await asyncio.wait_for(synthesize(text, voice), timeout=SYNTH_TIMEOUT_SEC)
     except Exception:
         return None
