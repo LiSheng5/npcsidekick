@@ -26,9 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.logging_config import log
-
-# 运行时数据目录（工程根/store；测试用 monkeypatch 替换）
-STORE_DIR = Path(__file__).resolve().parent / "store"
+from core.paths import resolve_store
 
 # ── 记忆卡事件文案单一来源（写卡文案只在此处定义）──────────
 EV_DONE = "完成: "
@@ -74,16 +72,16 @@ def _tokenize(text: str) -> List[str]:
 
 
 # ── 同义词族（声明驱动：由角色卡 entity_synonyms 声明，引擎保持游戏无关）──
-_ACTIVE_SYNONYMS: Dict[str, frozenset] = {}
+# 没有进程级全局表：检索用的同义词表**每次显式传入**（取自该 NPC 的角色卡），
+# 多 NPC 并发对话互不污染。
 
 
-def set_synonyms(synonyms: Optional[Dict[str, Any]]) -> None:
-    """设置生效的同义词族表：{规范词: [别名...]}。
+def _normalize_synonyms(synonyms: Optional[Dict[str, Any]]) -> Dict[str, frozenset]:
+    """归一同义词表：{规范词: 别名列表/单个别名} → {规范词: frozenset(别名)}。
 
     声明方自己控制别名粒度（单字别名也会参与子串匹配）—— 引擎不预设游戏词表。
-    传 None / 空 → 清空（等于没有同义词召回）。
+    非法条目跳过；整表不是 dict / 传 None → 空表（等于没有同义词召回）。
     """
-    global _ACTIVE_SYNONYMS
     table: Dict[str, frozenset] = {}
     if isinstance(synonyms, dict):
         for canon, aliases in synonyms.items():
@@ -97,12 +95,11 @@ def set_synonyms(synonyms: Optional[Dict[str, Any]]) -> None:
                 continue
             if words:
                 table[canon.strip()] = words
-    _ACTIVE_SYNONYMS = table
+    return table
 
 
-def _canonical_terms(text: str, synonyms: Optional[Dict[str, Any]] = None) -> set:
-    """抽取文本命中的规范词（同义词族归一）。"""
-    table = _ACTIVE_SYNONYMS if synonyms is None else synonyms
+def _canonical_terms(text: str, table: Optional[Dict[str, Any]]) -> set:
+    """抽取文本命中的规范词（同义词族归一）。table 为空 → 无同义词召回。"""
     if not table or not text:
         return set()
     found = set()
@@ -121,25 +118,29 @@ def _recency_score(created_at: float, now: float) -> float:
 def _relevance_score(content: str, query: str,
                      query_tokens: Optional[List[str]] = None,
                      q_canon: Optional[set] = None,
-                     c_canon: Optional[set] = None) -> float:
-    """相关度 = 分词命中比例 + 同义词族命中比例（归一 0~1）。"""
+                     c_canon: Optional[set] = None,
+                     table: Optional[Dict[str, Any]] = None) -> float:
+    """相关度 = 分词命中比例 + 同义词族命中比例（归一 0~1）。
+
+    table = 本次检索用的同义词表（显式传入）；q_canon / c_canon 没预算时才在这里算。
+    """
     tokens = query_tokens if query_tokens is not None else _tokenize(query)
     hit = sum(1 for w in tokens if w in content) / len(tokens) if tokens else 0.0
     if q_canon is None:
-        q_canon = _canonical_terms(query)
+        q_canon = _canonical_terms(query, table)
     syn = 0.0
     if q_canon:
         if c_canon is None:
-            c_canon = _canonical_terms(content)
+            c_canon = _canonical_terms(content, table)
         syn = len(q_canon & c_canon) / len(q_canon)
     return min(1.0, hit + syn)
 
 
 # ── 路径与读写 ───────────────────────────────────────────
 
-def card_path(npc_id: str) -> Path:
-    """记忆卡路径：store/{id}_memory.json。"""
-    return STORE_DIR / f"{npc_id}_memory.json"
+def card_path(npc_id: str, store_dir: Optional[Path] = None) -> Path:
+    """记忆卡路径：store/{id}_memory.json。store_dir=None → 工程默认 store/。"""
+    return resolve_store(store_dir) / f"{npc_id}_memory.json"
 
 
 def _normalize_entry(raw: Any, index: int) -> Dict[str, Any]:
@@ -169,9 +170,9 @@ def _normalize_entry(raw: Any, index: int) -> Dict[str, Any]:
     return entry
 
 
-def load_card(npc_id: str) -> List[Dict[str, Any]]:
+def load_card(npc_id: str, store_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     """读记忆卡。文件不存在 → 空列表；内容损坏 → 响亮失败（ValueError）。"""
-    path = card_path(npc_id)
+    path = card_path(npc_id, store_dir)
     if not path.exists():
         return []
     try:
@@ -183,9 +184,10 @@ def load_card(npc_id: str) -> List[Dict[str, Any]]:
     return [_normalize_entry(e, i) for i, e in enumerate(data)]
 
 
-def save_card(npc_id: str, entries: List[Dict[str, Any]]) -> None:
+def save_card(npc_id: str, entries: List[Dict[str, Any]],
+              store_dir: Optional[Path] = None) -> None:
     """原子写记忆卡（先写临时文件再替换），保持可手改的缩进格式。"""
-    path = card_path(npc_id)
+    path = card_path(npc_id, store_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -195,7 +197,8 @@ def save_card(npc_id: str, entries: List[Dict[str, Any]]) -> None:
 # ── 写入口（三个通道中的两个：remember 工具 / 动作结果回报）─
 
 def add_entry(npc_id: str, content: str, importance: int = DEFAULT_IMPORTANCE,
-              category: str = DEFAULT_CATEGORY, pinned: bool = False) -> Dict[str, Any]:
+              category: str = DEFAULT_CATEGORY, pinned: bool = False,
+              store_dir: Optional[Path] = None) -> Dict[str, Any]:
     """记一条记忆（remember 工具 / 人工调用）。importance 0-9。"""
     if not isinstance(content, str) or not content.strip():
         raise ValueError("记忆内容不能为空")
@@ -207,15 +210,16 @@ def add_entry(npc_id: str, content: str, importance: int = DEFAULT_IMPORTANCE,
         "created_at": time.time(),
         "pinned": bool(pinned),
     }, 0)
-    entries = load_card(npc_id)
+    entries = load_card(npc_id, store_dir=store_dir)
     entries.append(entry)
-    save_card(npc_id, entries)
+    save_card(npc_id, entries, store_dir=store_dir)
     log.debug("memory_added", npc_id=npc_id, entry_id=entry["id"],
               importance=entry["importance"], category=entry["category"])
     return entry
 
 
-def add_action_result(npc_id: str, action: str, ok: bool, note: str = "") -> Dict[str, Any]:
+def add_action_result(npc_id: str, action: str, ok: bool, note: str = "",
+                      store_dir: Optional[Path] = None) -> Dict[str, Any]:
     """动作结果确定性写卡："完成: …" / "没做成: …"。"""
     text = (note or "").strip() or action
     content = f"{EV_DONE if ok else EV_FAIL}{text}"
@@ -224,6 +228,7 @@ def add_action_result(npc_id: str, action: str, ok: bool, note: str = "") -> Dic
         content,
         importance=_IMPORTANCE_ACTION_OK if ok else _IMPORTANCE_ACTION_FAIL,
         category="action",
+        store_dir=store_dir,
     )
 
 
@@ -231,20 +236,25 @@ def add_action_result(npc_id: str, action: str, ok: bool, note: str = "") -> Dic
 
 def retrieve(npc_id: str, query: str, top_k: int = 5,
              synonyms: Optional[Dict[str, Any]] = None,
-             now: Optional[float] = None) -> List[Dict[str, Any]]:
-    """加权检索：recency×0.5 + relevance×3 + importance×2，返回前 top_k 条。"""
-    entries = load_card(npc_id)
+             now: Optional[float] = None,
+             store_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """加权检索：recency×0.5 + relevance×3 + importance×2，返回前 top_k 条。
+
+    synonyms = 本次检索的同义词表（通常来自该 NPC 的角色卡 entity_synonyms）；
+    不传 = 没有同义词召回（没有进程级全局表，多 NPC 并发互不污染）。
+    """
+    entries = load_card(npc_id, store_dir=store_dir)
     if not entries:
         return []
     now = time.time() if now is None else now
-    table = _ACTIVE_SYNONYMS if synonyms is None else synonyms
+    table = _normalize_synonyms(synonyms)
     q_canon = _canonical_terms(query, table)
     tokens = _tokenize(query)
 
     scored = []
     for e in entries:
         rel = _relevance_score(e["content"], query, tokens, q_canon,
-                               _canonical_terms(e["content"], table))
+                               _canonical_terms(e["content"], table), table=table)
         score = (_recency_score(e["created_at"], now) * _GW_RECENCY
                  + rel * _GW_RELEVANCE
                  + e["importance"] * _GW_IMPORTANCE)
@@ -276,12 +286,13 @@ def strength_of(entry: Dict[str, Any], now: Optional[float] = None) -> float:
     return float(entry.get("importance", DEFAULT_IMPORTANCE)) * (0.5 ** (hours / _HALF_LIFE_HOURS))
 
 
-def prune(npc_id: str, now: Optional[float] = None) -> int:
+def prune(npc_id: str, now: Optional[float] = None,
+          store_dir: Optional[Path] = None) -> int:
     """移除强度 < 1.0 的旧条目，返回移除条数。
 
     强度 = importance × 0.5 ^ (小时 / 72)；豁免：importance ≥ 8、pinned、反思/合并产物。
     """
-    entries = load_card(npc_id)
+    entries = load_card(npc_id, store_dir=store_dir)
     if not entries:
         return 0
     now = time.time() if now is None else now
@@ -289,45 +300,48 @@ def prune(npc_id: str, now: Optional[float] = None) -> int:
             if is_exempt(e) or strength_of(e, now) >= _PRUNE_STRENGTH]
     removed = len(entries) - len(keep)
     if removed:
-        save_card(npc_id, keep)
+        save_card(npc_id, keep, store_dir=store_dir)
         log.info("memory_pruned", npc_id=npc_id, removed=removed, kept=len(keep))
     return removed
 
 
 # ── 条目级人工编辑（控制台用的就是"直接手改记忆卡"这条通道）─
 
-def find_entry(npc_id: str, entry_id: str) -> Optional[Dict[str, Any]]:
-    for e in load_card(npc_id):
+def find_entry(npc_id: str, entry_id: str,
+               store_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    for e in load_card(npc_id, store_dir=store_dir):
         if e["id"] == entry_id:
             return e
     return None
 
 
-def update_entry(npc_id: str, entry_id: str, **fields) -> Optional[Dict[str, Any]]:
+def update_entry(npc_id: str, entry_id: str,
+                 store_dir: Optional[Path] = None, **fields) -> Optional[Dict[str, Any]]:
     """按 id 改一条（content / importance / category / pinned）。找不到 → None。
 
     pinned=False 会把键删掉（与 add_entry 同款：只有为真才落这个键）。
     """
     editable = ("content", "importance", "category", "pinned")
-    entries = load_card(npc_id)
+    entries = load_card(npc_id, store_dir=store_dir)
     for i, e in enumerate(entries):
         if e["id"] != entry_id:
             continue
         merged = dict(e)
         merged.update({k: v for k, v in fields.items() if k in editable})
         entries[i] = _normalize_entry(merged, i)
-        save_card(npc_id, entries)
+        save_card(npc_id, entries, store_dir=store_dir)
         log.debug("memory_updated", npc_id=npc_id, entry_id=entry_id)
         return entries[i]
     return None
 
 
-def delete_entry(npc_id: str, entry_id: str) -> bool:
+def delete_entry(npc_id: str, entry_id: str,
+                 store_dir: Optional[Path] = None) -> bool:
     """按 id 删一条。删掉了 → True。"""
-    entries = load_card(npc_id)
+    entries = load_card(npc_id, store_dir=store_dir)
     keep = [e for e in entries if e["id"] != entry_id]
     if len(keep) == len(entries):
         return False
-    save_card(npc_id, keep)
+    save_card(npc_id, keep, store_dir=store_dir)
     log.debug("memory_deleted", npc_id=npc_id, entry_id=entry_id)
     return True

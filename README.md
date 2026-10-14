@@ -144,6 +144,35 @@ python -m pytest tests -q
 
 测试全零网络：LLM 一律用 `tests/conftest.py` 里的 `FakeProvider` 注入。
 
+## 尚未完成 / 待定
+
+> ⚠️ 本仓库**当前处于重构进行中**：这批改动尚未收尾，测试也未恢复全绿。以下如实记录进度与分歧，供接手者参考。
+
+### 尚未完成
+
+- **路径注入化（重构阶段 2，半成品）**：已新增 `core/paths.py` 作为运行时目录的单一来源，
+  `memory.py` / `chatlog.py` / `tools.py` 的磁盘函数改为接受 `store_dir`（`None` = 工程默认），
+  并删掉了 `memory._ACTIVE_SYNONYMS` 进程级全局表。**未收尾**：`server.py` / `console_api.py` /
+  `core/llm_runtime.py` 仍在引用已被删除的 `memory.STORE_DIR`，`tests/conftest.py` 还在靠
+  monkeypatch 打桩 —— 当前 `import server` 会直接 `AttributeError`，测试暂时无法收集。
+- **循环与输出解耦**：计划抽 `core/harness.py`，让「LLM ↔ 工具多轮循环」产出结构化事件，
+  从而脱离 FastAPI / SSE 独立单测；尚未开工。
+- **多游戏适配（接第二个 mod 前必须做）**：动作工具名加 `{mod}__{action}` 命名空间、
+  `params` 支持 JSON Schema 片段（枚举 / 整数 / 可选）、`/api/capabilities` 加协议版本协商；尚未开工。
+- **长跑实测**：记忆卡与 `store/{id}_chat.jsonl` 在 30 分钟 / 数百轮下的真实增长速度，从未实测。
+- **性能与健壮性收尾**：同轮多工具并发、`httpx.AsyncClient` 复用（提到 lifespan）、
+  `except` 粒度细分、纯工具轮 assistant `content` 传 `null` 的厂商兼容 —— 均未做。
+
+### 尚未决定
+
+- **聊天记录文件要不要归档**：滚动摘要只管上下文，`{id}_chat.jsonl` 会一直追加；先实测增长再定策略。
+- **NPC 之间怎么互动**：关系感知走记忆还是角色卡声明、互相对话用什么通道、多对话并发的 API 形态 —— 都没设计。
+- **页面填的 key 要不要换成加密存储**：目前明文落 `store/llm_config.json`（带三处提示）；
+  候选 DPAPI（零依赖，仅 Windows）或 keyring（跨平台，多一个依赖）。
+- **提示词注入防护**：要不要移植旧工程「靠消息结构划边界」的护盾（且把 `observation` 一并纳入）；开关形态未定。
+- **英文文档**：先把中文做扎实，等 `README` / 规格定稿后再统一对齐英文版。
+- **流式工具轮是否拼接 `reasoning_content`**：当前决议「暂不拼接」，先保真流式与最小改动。
+
 ## License
 
 MIT

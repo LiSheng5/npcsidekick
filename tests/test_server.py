@@ -335,6 +335,53 @@ def test_talk_two_action_rounds_emit_two_frames(tmp_store, write_persona, make_a
         "完成: 面煮好了", "完成: 走到厨房了"]
 
 
+def test_talk_tool_budget_exhausted_still_speaks(tmp_store, write_persona, make_app_client,
+                                                 make_provider):
+    """工具轮预算用满后仍有一次收尾轮：动作做了，台词不会缺席（不带工具，逼模型说话）。"""
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "", "tool_calls": [{"name": "goto", "arguments": {"place": "厨房"}}]},
+        {"text": "", "tool_calls": [{"name": "remember",
+                                     "arguments": {"content": "玩家要一碗面", "importance": 5}}]},
+        {"text": "都办好了，趁热吃。"},
+    ])
+    executor = FakeExecutor(results=[{"ok": True, "status": "done", "note": "面煮好了"},
+                                     {"ok": True, "status": "done", "note": "走到厨房了"}])
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭端过来",
+                                         "mod": "mygame"})
+
+    assert len(executor.calls) == 2                            # 两个动作都执行了
+    assert text_of(res) == "都办好了，趁热吃。"                  # 收尾轮一定有台词
+    assert provider.stream_calls[-1]["tools"] is None          # 收尾轮不给工具
+    assert kinds(res)[-1] == "done"
+
+
+def test_talk_bad_tool_arguments_goes_back_to_model(tmp_store, write_persona, make_app_client,
+                                                    make_provider):
+    """工具参数不是合法 JSON：不拿空参数去执行动作，而是回给模型让它重发。"""
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "raw_arguments": "{坏"}]},
+        {"text": "我再看看怎么做。"},
+    ])
+    executor = FakeExecutor()
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
+
+    assert executor.calls == []                                # 没执行任何动作
+    assert memory.load_card("cang") == []                      # 也没写卡
+    assert kinds(res).count("action") == 0
+    assert text_of(res) == "我再看看怎么做。"
+    tool_msg = provider.stream_calls[1]["messages"][-1]
+    assert tool_msg["role"] == "tool" and "合法 JSON" in tool_msg["content"]
+
+
 def test_talk_mixed_memory_and_action_in_one_round(tmp_store, write_persona, make_app_client,
                                                    make_provider):
     """同一条 assistant 消息里混合记忆工具与动作工具：都执行，顺序按调用顺序。"""
@@ -778,7 +825,9 @@ def test_tool_call_buffer_tolerates_bad_json():
 
     buf = turn._ToolCallBuffer()
     buf.feed({"index": 0, "function_name": "cook", "function_arguments": "{坏"})
-    assert buf.finalize(0)["args"] == {}
+    call = buf.finalize(0)
+    assert call["args"] == {}
+    assert buf.bad_args is True                                # 标记出来，执行前要回给模型重发
 
 
 def test_build_default_client_follows_user_config(tmp_store, monkeypatch):

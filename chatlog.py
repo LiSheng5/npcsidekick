@@ -16,9 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from core.config_flags import env_text
 from core.logging_config import log
-
-# 运行时数据目录（工程根/store；测试用 monkeypatch 替换）
-STORE_DIR = Path(__file__).resolve().parent / "store"
+from core.paths import resolve_store
 
 # 阈值与保留窗口（按估算的绝对 token 数，默认 20K，可配；现读环境变量可热切）
 DEFAULT_TOKEN_THRESHOLD = 20000
@@ -58,12 +56,12 @@ def keep_recent_turns() -> int:
 
 # ── 路径 ─────────────────────────────────────────────────
 
-def chat_path(npc_id: str) -> Path:
-    return STORE_DIR / f"{npc_id}_chat.jsonl"
+def chat_path(npc_id: str, store_dir: Optional[Path] = None) -> Path:
+    return resolve_store(store_dir) / f"{npc_id}_chat.jsonl"
 
 
-def summary_path(npc_id: str) -> Path:
-    return STORE_DIR / f"{npc_id}_summary.json"
+def summary_path(npc_id: str, store_dir: Optional[Path] = None) -> Path:
+    return resolve_store(store_dir) / f"{npc_id}_summary.json"
 
 
 # ── token 估算（纯本地确定性，只用于量级判断，不求精确）─────
@@ -99,9 +97,10 @@ def select_recent(turns: List[Dict[str, Any]], token_budget: int) -> List[Dict[s
 
 # ── 读写 ─────────────────────────────────────────────────
 
-def append_turn(npc_id: str, user_text: str, assistant_text: str) -> None:
+def append_turn(npc_id: str, user_text: str, assistant_text: str,
+                store_dir: Optional[Path] = None) -> None:
     """追加一轮：用户一行 + 助手一行。"""
-    path = chat_path(npc_id)
+    path = chat_path(npc_id, store_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = time.time()
     lines = [
@@ -112,12 +111,13 @@ def append_turn(npc_id: str, user_text: str, assistant_text: str) -> None:
         fh.write("\n".join(lines) + "\n")
 
 
-def load_turns(npc_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+def load_turns(npc_id: str, limit: Optional[int] = None,
+               store_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     """读聊天记录（扁平消息列表）。limit = 取最后 limit 行。
 
     单行损坏（写入中途断电等）→ 跳过并告警，不让一条坏行拖垮整个 NPC。
     """
-    path = chat_path(npc_id)
+    path = chat_path(npc_id, store_dir)
     if not path.exists():
         return []
     msgs: List[Dict[str, Any]] = []
@@ -143,10 +143,10 @@ def load_turns(npc_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]
     return msgs
 
 
-def load_summary(npc_id: str) -> Dict[str, Any]:
+def load_summary(npc_id: str, store_dir: Optional[Path] = None) -> Dict[str, Any]:
     """读摘要状态：{summary, covered, updated_at}；缺失/损坏 → 空壳。"""
     empty = {"summary": "", "covered": 0, "updated_at": 0.0}
-    path = summary_path(npc_id)
+    path = summary_path(npc_id, store_dir)
     if not path.exists():
         return empty
     try:
@@ -164,8 +164,9 @@ def load_summary(npc_id: str) -> Dict[str, Any]:
     }
 
 
-def _save_summary(npc_id: str, summary: str, covered: int) -> None:
-    path = summary_path(npc_id)
+def _save_summary(npc_id: str, summary: str, covered: int,
+                  store_dir: Optional[Path] = None) -> None:
+    path = summary_path(npc_id, store_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(
         {"summary": summary, "covered": covered, "updated_at": time.time()},
@@ -174,7 +175,8 @@ def _save_summary(npc_id: str, summary: str, covered: int) -> None:
 
 # ── 滚动摘要（超阈值就把最旧的轮次压成一段）────────────────
 
-def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None) -> Optional[str]:
+def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None,
+                    store_dir: Optional[Path] = None) -> Optional[str]:
     """超阈值时把最旧的轮次压成摘要；未超阈值/无内容可压/失败 → None。
 
     成功返回新摘要文本并落盘（covered 推进）；失败不写任何东西，
@@ -183,12 +185,12 @@ def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None) -> Opti
     threshold = token_threshold()
     keep = keep_recent_turns() if keep_recent is None else max(0, keep_recent)
 
-    turns = load_turns(npc_id)
+    turns = load_turns(npc_id, store_dir=store_dir)
     total = sum(estimate_tokens(m["content"]) for m in turns)
     if total <= threshold:
         return None
 
-    state = load_summary(npc_id)
+    state = load_summary(npc_id, store_dir=store_dir)
     covered = min(state["covered"], len(turns))
     cutoff = len(turns) - keep * 2
     if cutoff <= covered:
@@ -214,16 +216,17 @@ def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None) -> Opti
         log.warning("summary_empty", npc_id=npc_id)
         return None
 
-    _save_summary(npc_id, summary, cutoff)
+    _save_summary(npc_id, summary, cutoff, store_dir=store_dir)
     log.info("summary_updated", npc_id=npc_id, covered=cutoff, folded=len(old))
     return summary
 
 
-def build_history(npc_id: str, llm, token_budget: Optional[int] = None) -> List[Dict[str, Any]]:
+def build_history(npc_id: str, llm, token_budget: Optional[int] = None,
+                  store_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     """拼上下文用的历史：可选的摘要消息 + 最近若干轮（受 token 预算约束）。"""
-    maybe_summarize(npc_id, llm)
-    state = load_summary(npc_id)
-    turns = load_turns(npc_id)
+    maybe_summarize(npc_id, llm, store_dir=store_dir)
+    state = load_summary(npc_id, store_dir=store_dir)
+    turns = load_turns(npc_id, store_dir=store_dir)
     covered = min(state["covered"], len(turns))
     budget = token_threshold() if token_budget is None else token_budget
 

@@ -11,6 +11,7 @@
 
 同步文件 IO（记忆修剪 / 聊天记录读写）一律 `asyncio.to_thread` ——
 本函数是 SSE 生成器，跑在事件循环上，直接调用会把整个服务器卡住。
+唯一例外：客户端断连 / 取消时的落盘兜底（文末 `finally`）—— 那种挂起状态下不能再 await。
 """
 from __future__ import annotations
 
@@ -48,6 +49,7 @@ class _ToolCallBuffer:
         self.name = ""
         self.arguments = ""
         self.call_id = ""
+        self.bad_args = False     # 参数不是合法 JSON 对象 —— 不该拿去执行，要回给模型重发
 
     def feed(self, delta: Dict[str, Any]) -> None:
         if delta.get("id"):
@@ -58,13 +60,17 @@ class _ToolCallBuffer:
             self.arguments += str(delta["function_arguments"])
 
     def finalize(self, index: int) -> Dict[str, Any]:
-        try:
-            args = json.loads(self.arguments) if self.arguments.strip() else {}
-        except json.JSONDecodeError:
-            log.warning("tool_args_bad_json", tool=self.name, raw=self.arguments[:120])
-            args = {}
+        raw = self.arguments.strip()
+        args: Any = {}
+        if raw:
+            try:
+                args = json.loads(raw)
+            except json.JSONDecodeError:
+                log.warning("tool_args_bad_json", tool=self.name, raw=self.arguments[:120])
+                self.bad_args = True
         if not isinstance(args, dict):
             args = {}
+            self.bad_args = True
         return {"id": self.call_id or f"call_{index + 1}", "name": self.name, "args": args}
 
 
@@ -139,6 +145,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     full_parts: List[str] = []
     executed: List[Dict[str, Any]] = []     # 本回合已执行的动作（流末尾出 action 帧）
     emitted = False
+    recorded = False                        # 聊天记录是否已落盘（finally 兜底用）
     async with lock:
         try:
             if llm is None:
@@ -153,10 +160,14 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
             messages.append({"role": "user", "content": message})
             tool_defs = tools.build_tool_definitions(capabilities)
 
-            for round_no in range(MAX_TOOL_ROUNDS):
+            # 工具轮预算用满后追加一次**收尾轮**（不带工具）：否则模型可能连续几轮只调工具，
+            # 预算一耗尽就"哑巴收场"—— 动作做了，台词一句没有。
+            for round_no in range(MAX_TOOL_ROUNDS + 1):
+                closing = round_no == MAX_TOOL_ROUNDS
                 buffers: Dict[int, _ToolCallBuffer] = {}
                 round_text: List[str] = []
-                async for chunk in llm.stream(messages, tools=tool_defs,
+                async for chunk in llm.stream(messages,
+                                              tools=None if closing else tool_defs,
                                               reasoning_effort=thinking_effort()):
                     if chunk.has_content:
                         round_text.append(chunk.content)
@@ -168,9 +179,15 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                         buffers.setdefault(
                             int(delta.get("index") or 0), _ToolCallBuffer()).feed(delta)
 
-                calls = [buffers[k].finalize(k) for k in sorted(buffers)]
+                keys = sorted(buffers)
+                calls = [buffers[k].finalize(k) for k in keys]
+                bad_ids = {c["id"] for k, c in zip(keys, calls) if buffers[k].bad_args}
                 calls = [c for c in calls if c["name"]]
                 if not calls:
+                    break
+                if closing:
+                    # 收尾轮没给工具，正常不会再有调用；模型硬报也只记账、不再执行（防跑飞）
+                    log.warning("talk_closing_round_tool_call_ignored", npc_id=npc_id)
                     break
 
                 messages.append({
@@ -183,7 +200,10 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                     } for c in calls],
                 })
                 for c in calls:
-                    if execute_url and tools.is_action_tool(c["name"], capabilities):
+                    if c["id"] in bad_ids:
+                        # 参数不是合法 JSON：别拿空参数去执行动作，回给模型让它重发
+                        tool_text = f"{c['name']} 的参数不是合法 JSON，请按工具定义重发一次"
+                    elif execute_url and tools.is_action_tool(c["name"], capabilities):
                         # 动作工具：同步调 mod 的 /execute，结果当场回上下文继续推理
                         outcome = await invoke_action(execute_url, npc_id, c["name"],
                                                       c["args"], mod, execute_timeout(),
@@ -220,9 +240,21 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 full_parts.append(fallback)
                 emitted = True
                 yield _sse({"type": "delta", "text": fallback})
-
-        await asyncio.to_thread(chatlog.append_turn, npc_id, message,
-                                "".join(full_parts))
+        else:
+            # 正常走完：异步落盘（同步 IO 挪线程池，不卡事件循环）
+            await asyncio.to_thread(chatlog.append_turn, npc_id, message,
+                                    "".join(full_parts))
+            recorded = True
+        finally:
+            # 兜底：异常 / 客户端断连 / 取消时也要落盘，否则这一回合的话直接丢。
+            # 此时**不能 await**（生成器在 GeneratorExit / CancelledError 挂起中再 await 会报
+            # "async generator ignored GeneratorExit"），故同步落盘 —— 仅异常路径，量极小。
+            if not recorded:
+                try:
+                    chatlog.append_turn(npc_id, message, "".join(full_parts))
+                except Exception as exc:
+                    log.warning("chatlog_append_failed", npc_id=npc_id,
+                                error=scrub(str(exc))[:120])
 
     for record in executed:                    # 已执行动作的记录（mod 不需要照它做任何事）
         yield _sse({"type": "action", "action": record})

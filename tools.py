@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.logging_config import log
@@ -106,7 +107,8 @@ def build_tool_definitions(capabilities: Optional[List[dict]] = None) -> List[di
 def run_tool(name: str, args: Dict[str, Any], npc_id: str,
              capabilities: Optional[List[dict]] = None,
              top_k: int = 5,
-             synonyms: Optional[Dict[str, Any]] = None) -> ToolResult:
+             synonyms: Optional[Dict[str, Any]] = None,
+             store_dir: Optional[Path] = None) -> ToolResult:
     """执行一次**非动作**工具调用（server 侧只把记忆工具送到这里）。
 
     remember / recall 由本模块执行；动作工具走 server 的同步转发（协议 §3），
@@ -122,7 +124,8 @@ def run_tool(name: str, args: Dict[str, Any], npc_id: str,
         importance = _as_importance(args.get("importance"))
         category = args.get("category")
         category = category if isinstance(category, str) and category.strip() else memory.DEFAULT_CATEGORY
-        entry = memory.add_entry(npc_id, content, importance=importance, category=category)
+        entry = memory.add_entry(npc_id, content, importance=importance,
+                                 category=category, store_dir=store_dir)
         return _result(name, ToolResultStatus.SUCCESS,
                        data=f"已记住（重要性 {entry['importance']}）", started=started)
 
@@ -130,7 +133,8 @@ def run_tool(name: str, args: Dict[str, Any], npc_id: str,
         query = args.get("query")
         if not isinstance(query, str) or not query.strip():
             return _result(name, ToolResultStatus.ERROR, error="recall 缺少 query", started=started)
-        entries = memory.retrieve(npc_id, query, top_k=top_k, synonyms=synonyms)
+        entries = memory.retrieve(npc_id, query, top_k=top_k, synonyms=synonyms,
+                                  store_dir=store_dir)
         log.debug("recall_done", npc_id=npc_id, hits=len(entries))
         return _result(name, ToolResultStatus.SUCCESS,
                        data=memory.format_for_context(entries), started=started)

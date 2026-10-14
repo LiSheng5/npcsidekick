@@ -85,7 +85,10 @@ class FakeProvider(ProviderProtocol):
             yield StreamChunk(content=text[i:i + self.chunk_size], model=self.model_name, index=idx)
 
         for i, tc in enumerate(turn.get("tool_calls") or []):
-            args = json.dumps(tc.get("arguments") or {}, ensure_ascii=False)
+            # raw_arguments 用于模拟"模型吐了坏 JSON"的调用（不经过 json.dumps）
+            args = tc.get("raw_arguments")
+            if args is None:
+                args = json.dumps(tc.get("arguments") or {}, ensure_ascii=False)
             idx += 1
             yield StreamChunk(
                 tool_call_delta={"index": i, "id": f"call_{i + 1}",
