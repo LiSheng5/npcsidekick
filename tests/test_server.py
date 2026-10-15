@@ -361,6 +361,38 @@ def test_talk_tool_budget_exhausted_still_speaks(tmp_store, write_persona, make_
     assert kinds(res)[-1] == "done"
 
 
+def test_talk_closing_round_without_tools_forces_text(tmp_store, write_persona, make_app_client,
+                                                      make_provider):
+    """模型每轮都想调工具也拦不住最后一轮说话：收尾轮不给工具定义，只出文本。
+
+    回归：工具预算用满后如果直接结束循环，动作做了、台词一句没有（NPC 哑巴收场）。
+    """
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "", "tool_calls": [{"name": "goto", "arguments": {"place": "厨房"}}]},
+        {"text": "", "tool_calls": [{"name": "remember",
+                                     "arguments": {"content": "玩家要一碗面", "importance": 5}}]},
+        # 收尾轮：模型仍然"想"调工具（假 provider 不看 tools，照吐调用）——必须被忽略
+        {"text": "都办好了，趁热吃。", "tool_calls": [{"name": "cook", "arguments": {"dish": "汤"}}]},
+    ])
+    executor = FakeExecutor(results=[{"ok": True, "status": "done", "note": "面煮好了"},
+                                     {"ok": True, "status": "done", "note": "走到厨房了"}])
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭端过来",
+                                         "mod": "mygame"})
+
+    assert len(executor.calls) == 2                            # 收尾轮的工具调用不再执行
+    assert text_of(res) == "都办好了，趁热吃。"                  # 台词一定有（delta 帧）
+    assert "delta" in kinds(res)
+    last = provider.stream_calls[-1]
+    assert last["tools"] is None                               # 收尾轮不给工具定义
+    assert all(c["tools"] for c in provider.stream_calls[:-1])  # 前面的轮次照常给
+    assert kinds(res)[-1] == "done"
+
+
 def test_talk_bad_tool_arguments_goes_back_to_model(tmp_store, write_persona, make_app_client,
                                                     make_provider):
     """工具参数不是合法 JSON：不拿空参数去执行动作，而是回给模型让它重发。"""
