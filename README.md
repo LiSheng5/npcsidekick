@@ -30,14 +30,14 @@ python -m uvicorn server:app --host 127.0.0.1 --port 8765
 
 ## 四个端点
 
-mod 侧要用的就这四个，**完整字段级契约见 `规格.md` 第一部分**：
+mod 侧要用的就这四个，**完整字段级契约见 `docs/API.md`，怎么接见 `docs/游戏接入.md`**：
 
 | # | 端点 | 干什么 |
 |---|---|---|
 | 1 | `POST /api/capabilities` | 报到：声明能力白名单 + 执行接口 `execute_url` + 心跳（不填 `execute_url` = 大脑不调它的动作） |
 | 2 | `POST /api/talk` | 对话（SSE：`delta` / `action` / `audio` / `done` 帧），玩家说话时调 |
-| 3 | 你自己的 `POST <execute_url>` | 大脑同步调它执行动作，**做完才回响应**（超 30s 视失败） |
-| 4 | `POST /api/action_result` | 可选：只有长动作异步才用；同步路径由大脑调 `/execute` 当场写卡 |
+| 3 | 你自己的 `POST <execute_url>` | 大脑同步调它执行动作，**做完才回响应**；请求带 `call_id`，长动作回 `running` 后带它回报 |
+| 4 | `POST /api/action_result` | 可选：只有长动作异步才用（带 `call_id` 精确销账）；同步路径由大脑调 `/execute` 当场写卡 |
 
 ```bash
 # 例：对话（SSE 流）
@@ -101,7 +101,8 @@ v4 为此做了三处提示：① 页面上红字 + 「删掉明文 key」按钮
 | `NPC_SUMMARY_TOKEN_THRESHOLD` | `20000` | 滚动摘要触发阈值（绝对 token 数） |
 | `NPC_SUMMARY_KEEP_RECENT` | `8` | 摘要后仍逐字保留的最近轮数 |
 | `NPC_MOD_HEARTBEAT_TIMEOUT` | `60` | mod 心跳超时（秒）：超时视离线，不再调任何动作 |
-| `NPC_EXECUTE_TIMEOUT` | `30` | 动作执行等待上限（秒）：大脑同步调 mod 的 `/execute` 时最多等这么久，超时视作失败 |
+| `NPC_EXECUTE_TIMEOUT` | `30` | 动作执行等待上限（秒）：超时**不当成失败**（mod 可能已做了），转待定等回报 |
+| `NPC_PENDING_TTL` | `300` | 待定动作存活上限（秒）：到点还没等到 mod 回报 → 写一条「没做成: 一直没等到结果」 |
 | `NPC_LLM_RETRY` / `NPC_LLM_RETRY_DELAYS` | 关 | LLM 网关抖动重试（见 `core/client.py`） |
 
 ## 控制台（调试面）
