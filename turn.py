@@ -27,6 +27,7 @@ from core.personas import build_system_prompt, rule_reply
 
 import chatlog
 import memory
+import pending
 import tools
 import tts
 
@@ -100,30 +101,37 @@ async def _http_execute(url: str, payload: Dict[str, Any], timeout: float) -> Di
 async def invoke_action(execute_url: str, npc_id: str, name: str, args: Dict[str, Any],
                         mod: Optional[str], timeout: float,
                         executor: Optional[Any] = None) -> Dict[str, Any]:
-    """同步请求 mod 执行一个动作，返回统一形态 `{ok, status, note}`。
+    """同步请求 mod 执行一个动作，返回统一形态 `{ok, status, note, call_id}`。
 
     - 超时 / 连不上 / 响应非法 → `ok=False` 的失败，**绝不假装做成**（协议 §3）
-    - `status`：`done`（已做完，默认）/ `running`（mod 说还在做）
+    - `status`：`done`（已做完，默认）/ `running`（mod 说还在做）/ `failed`（大脑侧失败）
+    - `call_id`：本次调用的关联 id（`uuid4().hex`，随请求发给 mod，Mod 回报时原样带回）——
+      不复用 LLM 的 tool_call id，那个不保证唯一
     - `executor` 可注入（测试用假实现）；缺省走真实 HTTP（`_http_execute`）
     """
-    payload = {"npc_id": npc_id, "action": name, "params": args, "mod": mod}
+    call_id = pending.new_call_id()
+    payload = {"npc_id": npc_id, "action": name, "params": args, "mod": mod,
+               "call_id": call_id}
     runner = executor or _http_execute
     try:
         data = await asyncio.wait_for(runner(execute_url, payload, timeout), timeout=timeout)
     except asyncio.TimeoutError:
-        log.warning("action_execute_timeout", npc_id=npc_id, action=name, timeout_s=timeout)
-        return {"ok": False, "status": "failed", "note": f"等待超过 {timeout:g}s 仍未返回"}
+        log.warning("action_execute_timeout", npc_id=npc_id, action=name,
+                    call_id=call_id, timeout_s=timeout)
+        return {"ok": False, "status": "failed", "call_id": call_id,
+                "note": f"等待超过 {timeout:g}s 仍未返回"}
     except Exception as exc:
         log.warning("action_execute_failed", npc_id=npc_id, action=name,
-                    error=type(exc).__name__)
-        return {"ok": False, "status": "failed",
+                    call_id=call_id, error=type(exc).__name__)
+        return {"ok": False, "status": "failed", "call_id": call_id,
                 "note": f"执行接口没接上（{type(exc).__name__}）"}
     if not isinstance(data, dict):
-        return {"ok": False, "status": "failed", "note": "执行接口回了非法响应"}
+        return {"ok": False, "status": "failed", "call_id": call_id,
+                "note": "执行接口回了非法响应"}
     status = str(data.get("status") or "done").strip().lower()
     if status not in ("done", "running"):
         status = "done"
-    return {"ok": bool(data.get("ok")), "status": status,
+    return {"ok": bool(data.get("ok")), "status": status, "call_id": call_id,
             "note": str(data.get("note") or "").strip()}
 
 
@@ -144,6 +152,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                       capabilities: Optional[List[dict]] = None,
                       execute_url: Optional[str] = None, mod: Optional[str] = None,
                       executor: Optional[Any] = None, lock: asyncio.Lock,
+                      pending_actions: Optional[pending.PendingActions] = None,
                       wants_voice: bool = False,
                       store_dir: Optional[Path] = None,
                       execute_timeout: Callable[[], float]) -> AsyncGenerator[str, None]:
@@ -152,6 +161,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     - `capabilities` 为空 = 动作工具不进 LLM 的工具定义（mod 离线 / 未报到 / 没给执行接口，§1）
     - `executor` 可注入（测试用假实现）；`execute_timeout` 传的是**取值的函数**（现读，可热切）
     - `lock` = 该 NPC 的 asyncio.Lock（同 NPC 串行，防并发写覆盖）
+    - `pending_actions` = 待定动作登记表（`running` 的动作等 mod 回报；不传 = 不登记）
     - `store_dir` = 记忆卡/聊天记录的运行时数据目录（None = 工程默认 store/）
     """
     full_parts: List[str] = []
@@ -224,11 +234,16 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                         outcome = await invoke_action(execute_url, npc_id, c["name"],
                                                       c["args"], mod, execute_timeout(),
                                                       executor)
-                        executed.append({"name": c["name"], "params": c["args"]})
+                        executed.append({"name": c["name"], "params": c["args"],
+                                         "call_id": outcome["call_id"]})
                         tool_text = action_tool_text(c["name"], outcome)
-                        if outcome["status"] != "running":
-                            # 当场写卡（协议 §3）：成功/失败都写；running 结果还没定，
-                            # 不写（等 §4 的异步回报）
+                        if outcome["status"] == "running":
+                            # 结果还没定：登记 call_id，等 §4 的异步回报（那时才写卡）
+                            if pending_actions is not None:
+                                pending_actions.register(outcome["call_id"], npc_id, c["name"],
+                                                         c["args"], mod)
+                        else:
+                            # 当场写卡（协议 §3）：成功/失败都写
                             try:
                                 await asyncio.to_thread(
                                     memory.add_action_result, npc_id, c["name"],

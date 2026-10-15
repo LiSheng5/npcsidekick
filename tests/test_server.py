@@ -236,13 +236,17 @@ def test_talk_action_executes_via_mod_then_writes_memory(tmp_store, write_person
 
     assert kinds(res)[-1] == "done"
     assert kinds(res).count("action") == 1
-    assert frames(res)[-2]["action"] == {"name": "cook", "params": {"dish": "面"}}
+    record = frames(res)[-2]["action"]
+    assert record["name"] == "cook" and record["params"] == {"dish": "面"}
     assert text_of(res) == "行啊，面好了，趁热吃。"
-    # mod 真的被同步调用了，载荷符合协议 §3
-    assert executor.calls == [{
-        "url": CAPS["execute_url"], "timeout": 30.0,
-        "payload": {"npc_id": "cang", "action": "cook",
-                    "params": {"dish": "面"}, "mod": "mygame"}}]
+    # mod 真的被同步调用了，载荷符合协议 §3（call_id = 大脑生成，Mod 回报时原样带回）
+    call = executor.calls[0]
+    assert call["url"] == CAPS["execute_url"] and call["timeout"] == 30.0
+    payload = call["payload"]
+    assert len(payload["call_id"]) == 32                        # uuid4().hex
+    assert payload["call_id"] == record["call_id"]              # 帧里的 id 与发给 mod 的一致
+    assert {k: v for k, v in payload.items() if k != "call_id"} == {
+        "npc_id": "cang", "action": "cook", "params": {"dish": "面"}, "mod": "mygame"}
     # 结果当场写卡 + 第二轮上下文里带上工具结果
     assert [e["content"] for e in memory.load_card("cang",
                                                    store_dir=tmp_store)] == ["完成: 面煮好了"]
@@ -309,6 +313,42 @@ def test_talk_action_running_is_not_recorded(tmp_store, write_persona, make_app_
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert "还在进行中" in tool_msg["content"]
     assert kinds(res).count("action") == 1                     # 调过就有记录
+
+
+def test_talk_running_action_registers_pending_then_report_writes_once(tmp_store, write_persona,
+                                                                      make_app_client,
+                                                                      make_provider):
+    """mod 回 running → 登记 call_id；带 call_id 回报写卡**一次**；重复回报不再写（协议 §4）。"""
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "火还没关，再等会儿。"},
+    ])
+    executor = FakeExecutor(result={"ok": False, "status": "running", "note": "还在煮"})
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
+
+    pending = client.app.state.pending
+    call_id = executor.calls[0]["payload"]["call_id"]
+    assert len(pending) == 1                                   # running → 登记待定
+    assert memory.load_card("cang", store_dir=tmp_store) == []  # 还没定论就不写卡
+
+    first = client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "note": "面煮好了",
+        "call_id": call_id, "mod": "mygame"})
+
+    assert first.status_code == 200 and first.json()["matched"] is True
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
+        "完成: 面煮好了"]
+    assert len(pending) == 0                                   # 精确销账
+
+    again = client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "note": "面煮好了", "call_id": call_id})
+
+    assert again.status_code == 200 and again.json()["matched"] is False
+    assert len(memory.load_card("cang", store_dir=tmp_store)) == 1   # 重复回报不写第二遍
 
 
 def test_talk_two_action_rounds_emit_two_frames(tmp_store, write_persona, make_app_client,
@@ -649,6 +689,142 @@ def test_action_result_failure_wording(tmp_store, write_persona, make_app_client
     client.post("/api/action_result", json={"npc_id": "cang", "action": "goto", "ok": False})
 
     assert memory.load_card("cang", store_dir=tmp_store)[0]["content"] == "没做成: goto"
+
+
+def test_action_result_unknown_call_id_is_not_recorded(tmp_store, write_persona, make_app_client):
+    """未知 / 重复 / 已过期的 call_id：不写卡（同一次动作不能写两遍），仍返回 200。"""
+    write_persona("cang")
+    client = make_app_client()
+
+    res = client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "note": "面好了",
+        "call_id": "查无此id"})
+
+    assert res.status_code == 200
+    assert res.json()["matched"] is False and res.json()["entry"] is None
+    assert memory.load_card("cang", store_dir=tmp_store) == []
+
+
+def test_action_result_bad_call_id_type_400(tmp_store, write_persona, make_app_client):
+    write_persona("cang")
+    client = make_app_client()
+    res = client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "call_id": 42})
+    assert res.status_code == 400
+
+
+def test_action_result_legacy_without_call_id_records_and_clears_pending_fifo(
+        tmp_store, write_persona, make_app_client, make_provider):
+    """旧 mod（回报不带 call_id）：照旧写卡，并按 FIFO 销掉**最早**那条登记（旧回报不能丢）。"""
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "行。"},
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "汤"}}]},
+        {"text": "行。"},
+    ])
+    executor = FakeExecutor(result={"ok": False, "status": "running", "note": ""})
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    for message in ("做点面", "再弄碗汤"):
+        client.post("/api/talk", json={"npc_id": "cang", "message": message, "mod": "mygame"})
+
+    pending = client.app.state.pending
+    assert len(pending) == 2
+
+    res = client.post("/api/action_result", json={"npc_id": "cang", "action": "cook", "ok": True})
+
+    assert res.json()["matched"] is True                       # 命中登记 → matched=true
+    assert res.json()["entry"]["content"] == "完成: cook（dish=面）"   # FIFO：销掉最早那条
+    assert len(pending) == 1
+
+    client.post("/api/action_result", json={"npc_id": "cang", "action": "cook", "ok": False})
+
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
+        "完成: cook（dish=面）", "没做成: cook（dish=汤）"]
+    assert len(pending) == 0
+
+
+def test_action_result_call_id_match_does_not_mix_same_action(tmp_store, write_persona,
+                                                             make_app_client, make_provider):
+    """同一 NPC 连开两个同名动作：按 call_id 精确销账，互不串（不走 FIFO）。"""
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "行。"},
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "汤"}}]},
+        {"text": "行。"},
+    ])
+    executor = FakeExecutor(result={"ok": False, "status": "running", "note": ""})
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    for message in ("做点面", "再弄碗汤"):
+        client.post("/api/talk", json={"npc_id": "cang", "message": message, "mod": "mygame"})
+
+    pending = client.app.state.pending
+    first_id = executor.calls[0]["payload"]["call_id"]
+    second_id = executor.calls[1]["payload"]["call_id"]
+    assert len(pending) == 2 and first_id != second_id
+
+    # 先回报**后**开的那条：拿到的必须是它自己的参数（dish=汤），不是最早那条
+    res = client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "call_id": second_id})
+    assert res.json()["entry"]["content"] == "完成: cook（dish=汤）"
+    assert len(pending) == 1
+
+    res = client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "call_id": first_id})
+    assert res.json()["entry"]["content"] == "完成: cook（dish=面）"
+    assert len(pending) == 0
+
+
+def test_pending_ttl_expiry_writes_failure_memory(tmp_store, write_persona, make_app_client,
+                                                  make_provider, monkeypatch):
+    """TTL 到点还没回报 → 写一条失败记忆；此后迟到的回报不再写卡（协议 §4）。"""
+    write_persona("cang")
+    monkeypatch.setenv("NPC_PENDING_TTL", "0")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "再等等。"},
+        {"text": "嗯。"},
+    ])
+    executor = FakeExecutor(result={"ok": False, "status": "running", "note": ""})
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
+    call_id = executor.calls[0]["payload"]["call_id"]
+    assert len(client.app.state.pending) == 1
+    assert memory.load_card("cang", store_dir=tmp_store) == []
+
+    client.post("/api/talk", json={"npc_id": "cang", "message": "好了没"})   # 下一轮开头顺手 expire
+
+    assert len(client.app.state.pending) == 0
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
+        "没做成: 一直没等到结果"]
+
+    late = client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "note": "其实做成了",
+        "call_id": call_id})
+
+    assert late.json()["matched"] is False                     # 过期了：迟到的回报不写卡
+    assert len(memory.load_card("cang", store_dir=tmp_store)) == 1
+
+
+def test_pending_ttl_env(monkeypatch):
+    """NPC_PENDING_TTL 现读、可热切；非法值回默认 300s。"""
+    import pending
+
+    monkeypatch.delenv("NPC_PENDING_TTL", raising=False)
+    assert pending.pending_ttl() == 300.0
+
+    monkeypatch.setenv("NPC_PENDING_TTL", "5")
+    assert pending.pending_ttl() == 5.0
+
+    monkeypatch.setenv("NPC_PENDING_TTL", " 坏 ")
+    assert pending.pending_ttl() == 300.0
 
 
 def test_action_result_with_mod_refreshes_heartbeat(tmp_store, write_persona, make_app_client):

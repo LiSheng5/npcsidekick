@@ -46,6 +46,7 @@ from core.llm_runtime import (
 from core.logging_config import log
 from core.paths import Paths, default_paths
 from core.personas import PersonaError, persona_ids, persona_path, read_persona
+from pending import PendingActions
 
 import chatlog
 import console_api
@@ -179,6 +180,18 @@ def _require_text(body: Dict[str, Any], key: str) -> str:
     return value.strip()
 
 
+def _note_from_params(action: str, params: Any) -> str:
+    """回报没带 note 时，用登记的动作参数拼一句描述（没参数就返回空串 → 写卡回落到动作名）。"""
+    if isinstance(params, dict) and params:
+        detail = "，".join(f"{k}={v}" for k, v in params.items())
+        return f"{action}（{detail}）"
+    return ""
+
+
+# 待定动作 TTL 到点还没回报时的失败文案（"没做成: " 前缀由 memory.add_action_result 加）
+PENDING_EXPIRED_NOTE = "一直没等到结果"
+
+
 # ── 应用 ─────────────────────────────────────────────────
 
 def create_app(llm_client: Optional[LLMClient] = None,
@@ -198,6 +211,8 @@ def create_app(llm_client: Optional[LLMClient] = None,
     avatar_dir = paths.avatar_dir
     registry = Registry(timeout=heartbeat_timeout_override)
     locks: Dict[str, asyncio.Lock] = {}
+    # 待定动作登记（`running` / 超时未知 → 等 §4 回报）；TTL 到点顺手清理
+    pending_actions = PendingActions()
     started_at = time.time()
     # 大脑可被页面热换：端点一律读 holder["client"]，而不是闭包里那一份
     llm_holder: Dict[str, Any] = {"client": llm_client}
@@ -215,6 +230,24 @@ def create_app(llm_client: Optional[LLMClient] = None,
 
     def lock_for(npc_id: str) -> asyncio.Lock:
         return locks.setdefault(npc_id, asyncio.Lock())
+
+    async def expire_pending_actions() -> None:
+        """TTL 到点还没等到回报的动作 → 写一条失败记忆（顺手清理，不开后台任务）。
+
+        `/api/talk` 开始与 `/api/action_result` 到达时各调一次；写卡在 `lock_for(npc_id)` 内
+        （与正在跑的回合串行），失败不连累请求本身。
+        """
+        for info in pending_actions.expire():
+            log.warning("pending_action_expired", call_id=info["call_id"],
+                        npc_id=info["npc_id"], action=info["action"])
+            try:
+                async with lock_for(info["npc_id"]):
+                    await asyncio.to_thread(
+                        memory.add_action_result, info["npc_id"], info["action"], False,
+                        PENDING_EXPIRED_NOTE, store_dir=store_dir)
+            except Exception as exc:        # 写卡失败只是少一条记忆，别把请求打挂
+                log.warning("pending_expire_memory_failed", npc_id=info["npc_id"],
+                            action=info["action"], error=scrub(str(exc))[:120])
 
     # ── 能力清单（mod 报到 + 心跳）──────────────────────
     @app.post("/api/capabilities")
@@ -267,12 +300,14 @@ def create_app(llm_client: Optional[LLMClient] = None,
         llm = llm_holder["client"]          # 页面换过脑就拿到新的
         timeout = registry.timeout()
         wants_voice = bool(body.get("voice"))        # 按需输出通道：默认纯文本
+        await expire_pending_actions()      # 每轮对话开始顺手清理过期待定动作（§4）
 
         return StreamingResponse(
             turn.stream_turn(llm=llm, npc_id=npc_id, message=message, persona=persona,
                              observation=observation, capabilities=capabilities,
                              execute_url=execute_url, mod=mod, executor=executor,
-                             lock=lock_for(npc_id), wants_voice=wants_voice,
+                             lock=lock_for(npc_id), pending_actions=pending_actions,
+                             wants_voice=wants_voice,
                              store_dir=store_dir, execute_timeout=execute_timeout),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
@@ -282,6 +317,14 @@ def create_app(llm_client: Optional[LLMClient] = None,
     # ── 动作结果回报（可选通道：长动作异步回报 → 写记忆卡，协议 §4）──
     @app.post("/api/action_result")
     async def action_result(request: Request):
+        """长动作回报。匹配规则（协议 §4）：
+
+        1. 带 `call_id` 且命中登记 → 写卡；`note` 为空时用登记的 `params` 拼一句描述
+        2. 带 `call_id` 但没命中（重复回报 / 已过期 / 未知）→ **不写卡**（同一次动作不能写两遍），
+           仍返回 200，`matched=false`
+        3. 不带 `call_id`（旧 mod）→ 先按 `(npc_id, action)` 取最早的登记（FIFO），
+           **无论命中与否都写卡** —— 旧 mod 的回报不能丢
+        """
         body = await _json_body(request)
         npc_id = _require_text(body, "npc_id")
         action = _require_text(body, "action")
@@ -294,17 +337,38 @@ def create_app(llm_client: Optional[LLMClient] = None,
         if not isinstance(note, str):
             raise HTTPException(status_code=400, detail="字段 note 必须是字符串")
 
+        raw_call_id = body.get("call_id")
+        if raw_call_id is not None and not isinstance(raw_call_id, str):
+            raise HTTPException(status_code=400, detail="字段 call_id 必须是字符串")
+        call_id = (raw_call_id or "").strip()
+
         mod = body.get("mod")
         if isinstance(mod, str) and mod.strip():
             # 捎带 mod 也算一次心跳（协议 §1）：长动作执行完回报时，mod 不该被判离线。
             # 只刷新已报到过的 mod；不带 mod 就不猜是哪一个。
             registry.touch(mod.strip())
 
+        await expire_pending_actions()      # 每个回报到达顺手清理过期待定动作（§4）
+
+        if call_id:
+            info = pending_actions.resolve(call_id)
+            if info is None:
+                log.warning("action_result_unmatched", npc_id=npc_id, action=action,
+                            call_id=call_id)
+                return {"ok": True, "npc_id": npc_id, "entry": None, "matched": False}
+            matched = True
+        else:
+            info = pending_actions.resolve_legacy(npc_id, action)
+            matched = info is not None
+        if info is not None and not note.strip():
+            note = _note_from_params(action, info.get("params"))   # 回报没写 note → 用登记信息补
+
         async with lock_for(npc_id):
             entry = await asyncio.to_thread(memory.add_action_result, npc_id, action,
                                             ok, note, store_dir=store_dir)
-        log.info("action_result_recorded", npc_id=npc_id, action=action, ok=ok)
-        return {"ok": True, "npc_id": npc_id, "entry": entry}
+        log.info("action_result_recorded", npc_id=npc_id, action=action, ok=ok,
+                 matched=matched, call_id=call_id or None)
+        return {"ok": True, "npc_id": npc_id, "entry": entry, "matched": matched}
 
     # ── 语音合成（独立输出通道，不属于 mod 契约）─────────
     @app.post("/api/tts")
@@ -363,6 +427,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
 
     app.state.registry = registry
     app.state.llm_holder = llm_holder
+    app.state.pending = pending_actions
 
     # ── 控制台（调试面，见 console_api.py，不属于 mod 契约）──
     avatar_dir.mkdir(parents=True, exist_ok=True)
