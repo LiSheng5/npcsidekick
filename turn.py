@@ -244,7 +244,11 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                         outcome = await invoke_action(execute_url, npc_id, c["name"],
                                                       c["args"], mod, execute_timeout(),
                                                       executor)
+                        # 记录进 action 帧：name / params 之外再带上结果（ok / status）与 call_id，
+                        # 否则失败的动作在帧里看起来跟做成了一样（mod 依旧不需要照它做任何事）
                         executed.append({"name": c["name"], "params": c["args"],
+                                         "ok": bool(outcome["ok"]),
+                                         "status": outcome["status"],
                                          "call_id": outcome["call_id"]})
                         tool_text = action_tool_text(c["name"], outcome)
                         if outcome["status"] in ("running", "unknown"):

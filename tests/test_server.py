@@ -238,6 +238,7 @@ def test_talk_action_executes_via_mod_then_writes_memory(tmp_store, write_person
     assert kinds(res).count("action") == 1
     record = frames(res)[-2]["action"]
     assert record["name"] == "cook" and record["params"] == {"dish": "面"}
+    assert record["ok"] is True and record["status"] == "done"   # 结果也进帧（任务 5）
     assert text_of(res) == "行啊，面好了，趁热吃。"
     # mod 真的被同步调用了，载荷符合协议 §3（call_id = 大脑生成，Mod 回报时原样带回）
     call = executor.calls[0]
@@ -273,6 +274,11 @@ def test_talk_action_failure_is_not_pretended(tmp_store, write_persona,
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert tool_msg["role"] == "tool" and tool_msg["content"].startswith("没做成")
     assert text_of(res) == "灶好像坏了，没做成。"
+    # 失败的动作在帧里必须看得出来（任务 5）：旧字段仍在，新增 ok / status
+    record = [f["action"] for f in frames(res) if f["type"] == "action"][0]
+    assert record["name"] == "cook" and record["params"] == {"dish": "面"}
+    assert record["ok"] is False and record["status"] == "failed"
+    assert len(record["call_id"]) == 32
 
 
 def test_talk_action_timeout_is_unknown_not_failure(tmp_store, write_persona, make_app_client,
@@ -373,6 +379,8 @@ def test_talk_action_running_is_not_recorded(tmp_store, write_persona, make_app_
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert "还在进行中" in tool_msg["content"]
     assert kinds(res).count("action") == 1                     # 调过就有记录
+    record = frames(res)[-2]["action"]
+    assert record["ok"] is False and record["status"] == "running"   # 帧里如实带结果（任务 5）
 
 
 def test_talk_running_action_registers_pending_then_report_writes_once(tmp_store, write_persona,
