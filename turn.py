@@ -4,6 +4,9 @@
   记忆工具由本进程执行；动作工具由本模块**同步调用** mod 的 `execute_url`（协议 §3），
   结果作为工具消息回上下文继续推理，并**当场写进记忆卡** —— mod 不用回报。
 
+  结果没定的两种情况（`running` / 同步等待超时 `unknown`）**不写卡**，改为登记 `pending`
+  （见 `pending.py`），等 mod 带 `call_id` 回报时再写；TTL 到点仍没回报才算没做成。
+
 两条通道严格分离（台词只走 delta 帧，流末尾的 action 帧只是"已执行动作"的记录）：
   · 台词通道 = SSE 的 delta 帧，只有角色说的话
   · 结构化通道 = action 帧，在流末尾，mod **不需要**照它做任何事（仅记录/展示）
@@ -103,8 +106,11 @@ async def invoke_action(execute_url: str, npc_id: str, name: str, args: Dict[str
                         executor: Optional[Any] = None) -> Dict[str, Any]:
     """同步请求 mod 执行一个动作，返回统一形态 `{ok, status, note, call_id}`。
 
-    - 超时 / 连不上 / 响应非法 → `ok=False` 的失败，**绝不假装做成**（协议 §3）
-    - `status`：`done`（已做完，默认）/ `running`（mod 说还在做）/ `failed`（大脑侧失败）
+    - 连不上 / 响应非法 → `ok=False` 的失败（请求大概率没到 mod），**绝不假装做成**（协议 §3）
+    - **超时** → `status="unknown"`：请求可能已经到 mod 并被执行了，只是没等到回应，
+      故不当作失败，由调用方登记待定（`pending`）等回报，TTL 到点再算账
+    - `status`：`done`（已做完，默认）/ `running`（mod 说还在做）/ `unknown`（超时未定）
+      / `failed`（大脑侧失败 —— 只给超时以外那些确定没做成的）
     - `call_id`：本次调用的关联 id（`uuid4().hex`，随请求发给 mod，Mod 回报时原样带回）——
       不复用 LLM 的 tool_call id，那个不保证唯一
     - `executor` 可注入（测试用假实现）；缺省走真实 HTTP（`_http_execute`）
@@ -118,7 +124,7 @@ async def invoke_action(execute_url: str, npc_id: str, name: str, args: Dict[str
     except asyncio.TimeoutError:
         log.warning("action_execute_timeout", npc_id=npc_id, action=name,
                     call_id=call_id, timeout_s=timeout)
-        return {"ok": False, "status": "failed", "call_id": call_id,
+        return {"ok": False, "status": "unknown", "call_id": call_id,
                 "note": f"等待超过 {timeout:g}s 仍未返回"}
     except Exception as exc:
         log.warning("action_execute_failed", npc_id=npc_id, action=name,
@@ -138,8 +144,12 @@ async def invoke_action(execute_url: str, npc_id: str, name: str, args: Dict[str
 def action_tool_text(name: str, outcome: Dict[str, Any]) -> str:
     """动作结果 → 给 LLM 的工具消息文本（进上下文的，不是写卡文案）。"""
     note = str(outcome.get("note") or "").strip()
-    if outcome.get("status") == "running":
+    status = outcome.get("status")
+    if status == "running":
         return f"{name} 还在进行中，结果稍后才出来"
+    if status == "unknown":
+        # 同步等待超时：mod 可能已经做了 —— 只说"不知道"，别替它下结论
+        return f"{name} 没等到回应，不确定是否已经做成"
     if outcome.get("ok"):
         return note or f"{name} 已完成"
     return f"没做成: {note or name}"
@@ -237,8 +247,9 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                         executed.append({"name": c["name"], "params": c["args"],
                                          "call_id": outcome["call_id"]})
                         tool_text = action_tool_text(c["name"], outcome)
-                        if outcome["status"] == "running":
-                            # 结果还没定：登记 call_id，等 §4 的异步回报（那时才写卡）
+                        if outcome["status"] in ("running", "unknown"):
+                            # 结果还没定（mod 说在做 / 超时没等到回应）：登记 call_id 等 §4 的回报，
+                            # 不写卡 —— 超时不能当成"没做成"（mod 可能已经做了）
                             if pending_actions is not None:
                                 pending_actions.register(outcome["call_id"], npc_id, c["name"],
                                                          c["args"], mod)

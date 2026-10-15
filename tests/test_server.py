@@ -275,24 +275,84 @@ def test_talk_action_failure_is_not_pretended(tmp_store, write_persona,
     assert text_of(res) == "灶好像坏了，没做成。"
 
 
-def test_talk_action_timeout_is_failure(tmp_store, write_persona, make_app_client,
-                                        make_provider, monkeypatch):
-    """等待超过 NPC_EXECUTE_TIMEOUT = 失败，不假装做成（协议 §3）。"""
+def test_talk_action_timeout_is_unknown_not_failure(tmp_store, write_persona, make_app_client,
+                                                    make_provider, monkeypatch):
+    """等待超过 NPC_EXECUTE_TIMEOUT = **不知道做没做**：不写失败卡，登记 pending 等回报。
+
+    （任务 4 默认方案：超时 ≠ 没做成 —— mod 可能已经执行了，只是没等到回应。）
+    """
     write_persona("cang")
     monkeypatch.setenv("NPC_EXECUTE_TIMEOUT", "0.05")
     provider = make_provider(turns=[
         {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "灶坏了。"},
+        {"text": "灶是不是坏了……" },
+    ])
+    executor = FakeExecutor(delay=0.5)
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
+
+    assert executor.calls[0]["timeout"] == 0.05
+    assert memory.load_card("cang", store_dir=tmp_store) == []       # 不当成"没做成"
+    assert len(client.app.state.pending) == 1                        # 登记待定，等 mod 回报
+    tool_msg = provider.stream_calls[1]["messages"][-1]
+    assert "不确定" in tool_msg["content"]                            # 给模型留圆场余地
+    assert text_of(res) == "灶是不是坏了……"
+    assert kinds(res).count("action") == 1
+
+
+def test_talk_action_timeout_late_report_writes_memory(tmp_store, write_persona, make_app_client,
+                                                       make_provider, monkeypatch):
+    """超时后 mod 晚到的成功回报（带 call_id）→ 正确写"完成"卡。"""
+    write_persona("cang")
+    monkeypatch.setenv("NPC_EXECUTE_TIMEOUT", "0.05")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "稍等。"},
     ])
     executor = FakeExecutor(delay=0.5)
     client = make_app_client(provider=provider, executor=executor)
     client.post("/api/capabilities", json=CAPS)
 
     client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
+    call_id = executor.calls[0]["payload"]["call_id"]
 
-    assert executor.calls[0]["timeout"] == 0.05
-    assert memory.load_card("cang", store_dir=tmp_store)[0]["content"].startswith(
-        "没做成: 等待超过 0.05s")
+    res = client.post("/api/action_result", json={
+        "npc_id": "cang", "action": "cook", "ok": True, "note": "其实煮好了",
+        "call_id": call_id, "mod": "mygame"})
+
+    assert res.json()["matched"] is True
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
+        "完成: 其实煮好了"]
+    assert len(client.app.state.pending) == 0
+
+
+def test_talk_action_timeout_without_report_expires_into_failure(tmp_store, write_persona,
+                                                                 make_app_client, make_provider,
+                                                                 monkeypatch):
+    """超时登记的动作一直没回报 → TTL 到点写一条失败记忆（"没做成: 一直没等到结果"）。"""
+    write_persona("cang")
+    monkeypatch.setenv("NPC_EXECUTE_TIMEOUT", "0.05")
+    monkeypatch.setenv("NPC_PENDING_TTL", "0")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "稍等。"},
+        {"text": "嗯。"},
+    ])
+    executor = FakeExecutor(delay=0.5)
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
+    assert len(client.app.state.pending) == 1
+    assert memory.load_card("cang", store_dir=tmp_store) == []
+
+    client.post("/api/talk", json={"npc_id": "cang", "message": "好了没"})   # 下一轮开头顺手 expire
+
+    assert len(client.app.state.pending) == 0
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
+        "没做成: 一直没等到结果"]
 
 
 def test_talk_action_running_is_not_recorded(tmp_store, write_persona, make_app_client,
