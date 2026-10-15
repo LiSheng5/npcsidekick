@@ -17,11 +17,15 @@ from core.openai_provider import OpenAIProvider
 
 @pytest.fixture
 def clean_llm(tmp_store):
-    """每个用例前后都清掉页面设置与落盘文件（不污染别的用例）。"""
+    """每个用例前后都清掉页面设置与落盘文件（不污染别的用例）。
+
+    落盘文件在注入的 tmp store 里（llm_config.json 与记忆卡同目录），
+    用例里读写它都要显式传 store_dir=tmp_store。
+    """
     from core import llm_runtime
 
     llm_runtime._LLM_RUNTIME.clear()
-    path = llm_runtime.llm_config_path()
+    path = tmp_store / "llm_config.json"
     if path.exists():
         path.unlink()
     yield llm_runtime
@@ -152,13 +156,13 @@ def test_state_reports_missing_llm_config(tmp_store, write_persona, make_app_cli
 
     llm = make_app_client().get("/api/state").json()["llm"]
 
-    assert server.llm_config_status()["ready"] is False
+    assert server.llm_config_status(store_dir=tmp_store)["ready"] is False
     assert llm["ready"] is False
     assert "AGENT_MODEL" in llm["missing"]
     assert "NPC_API_KEY" in llm["missing"]
 
 
-def test_build_default_client_returns_none_when_unconfigured(monkeypatch):
+def test_build_default_client_returns_none_when_unconfigured(tmp_store, monkeypatch):
     from core import config
     import server
 
@@ -166,10 +170,10 @@ def test_build_default_client_returns_none_when_unconfigured(monkeypatch):
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     monkeypatch.delenv("NPC_BASE_URL", raising=False)
 
-    assert server.build_default_client() is None
+    assert server.build_default_client(store_dir=tmp_store) is None
 
 
-def test_build_default_client_uses_configured_endpoint(monkeypatch):
+def test_build_default_client_uses_configured_endpoint(tmp_store, monkeypatch):
     from core import config
     import server
 
@@ -177,7 +181,7 @@ def test_build_default_client_uses_configured_endpoint(monkeypatch):
     monkeypatch.setenv("AGENT_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("NPC_BASE_URL", "https://gateway.local/v1")
 
-    client = server.build_default_client()
+    client = server.build_default_client(store_dir=tmp_store)
 
     assert client is not None
     assert client.provider.base_url == "https://gateway.local/v1"
@@ -194,7 +198,7 @@ def test_apply_llm_settings_switches_brain(clean_llm, monkeypatch, tmp_store):
 
     status = llm_runtime.apply_llm_settings(
         {"model": "qwen-plus", "base_url": "https://dash.example/v1", "reasoning_effort": "high"},
-        holder)
+        holder, store_dir=tmp_store)
 
     assert status["ready"] is True and status["model"] == "qwen-plus"
     assert status["reasoning_effort"] == "high"
@@ -206,29 +210,31 @@ def test_apply_llm_settings_switches_brain(clean_llm, monkeypatch, tmp_store):
     assert saved["model"] == "qwen-plus" and saved["reasoning_effort"] == "high"
 
 
-def test_settings_survive_runtime_clear(clean_llm, monkeypatch):
+def test_settings_survive_runtime_clear(clean_llm, monkeypatch, tmp_store):
     """用户要求：页面改的值下次启动还在 —— 清掉内存（模拟重启）后应来自文件。"""
     from core import config
 
     llm_runtime = clean_llm
     monkeypatch.setattr(config, "api_key", lambda: "sk-test")
-    llm_runtime.apply_llm_settings({"model": "qwen-plus", "base_url": "https://dash.example/v1"})
+    llm_runtime.apply_llm_settings({"model": "qwen-plus", "base_url": "https://dash.example/v1"},
+                                   store_dir=tmp_store)
 
-    assert llm_runtime.llm_config_status()["origin"] == "runtime"
+    assert llm_runtime.llm_config_status(store_dir=tmp_store)["origin"] == "runtime"
     llm_runtime._LLM_RUNTIME.clear()                        # 模拟重启
-    status = llm_runtime.llm_config_status()
+    status = llm_runtime.llm_config_status(store_dir=tmp_store)
 
     assert status["origin"] == "file"
     assert status["model"] == "qwen-plus"
 
 
-def test_thinking_unsupported_sends_nothing(clean_llm, monkeypatch):
+def test_thinking_unsupported_sends_nothing(clean_llm, tmp_store, monkeypatch):
     """不支持深度思考的模型 → 实际一个思考参数都不发（= 安全的关闭）。"""
     llm_runtime = clean_llm
-    llm_runtime.apply_llm_settings({"reasoning_effort": "high", "thinking_unsupported": True})
+    llm_runtime.apply_llm_settings({"reasoning_effort": "high", "thinking_unsupported": True},
+                                   store_dir=tmp_store)
 
-    assert llm_runtime.reasoning_effort() == "high"          # 页面上仍显示用户的选择
-    assert llm_runtime.thinking_effort() is None             # 但下发时一个都不发
+    assert llm_runtime.reasoning_effort(store_dir=tmp_store) == "high"   # 页面上仍显示用户的选择
+    assert llm_runtime.thinking_effort(store_dir=tmp_store) is None      # 但下发时一个都不发
 
 
 def test_apply_rejects_bad_effort(clean_llm):
@@ -299,7 +305,8 @@ def test_saved_llm_file_has_no_secret_when_key_not_filled(clean_llm, monkeypatch
     from core import config
 
     monkeypatch.setattr(config, "api_key", lambda: "sk-SUPERSECRET123456")
-    clean_llm.apply_llm_settings({"model": "qwen-plus", "base_url": "https://dash.example/v1"})
+    clean_llm.apply_llm_settings({"model": "qwen-plus", "base_url": "https://dash.example/v1"},
+                                 store_dir=tmp_store)
 
     raw = (tmp_store / "llm_config.json").read_text("utf-8")
     assert "SUPERSECRET" not in raw
@@ -312,12 +319,13 @@ def test_page_key_stored_plain_but_never_echoed(clean_llm, monkeypatch, tmp_stor
     from core import config
 
     monkeypatch.setattr(config, "api_key", lambda: "sk-FROMENV000000")
-    status = clean_llm.apply_llm_settings({"api_key": "sk-FROMPAGE999999"})
+    status = clean_llm.apply_llm_settings({"api_key": "sk-FROMPAGE999999"},
+                                          store_dir=tmp_store)
 
     assert status["api_key"]["from_page"] is True
     assert status["api_key"]["masked"] == "sk-…9999"
     assert "FROMPAGE" not in json.dumps(status)          # 接口绝不回原文
-    assert clean_llm.effective_api_key() == "sk-FROMPAGE999999"   # 页面填的优先
+    assert clean_llm.effective_api_key(store_dir=tmp_store) == "sk-FROMPAGE999999"   # 页面填的优先
 
     raw = json.loads((tmp_store / "llm_config.json").read_text("utf-8"))
     assert raw["api_key"] == "sk-FROMPAGE999999"          # 落盘就是明文（方案 C 的代价）
@@ -328,12 +336,12 @@ def test_page_key_clear_falls_back_to_env(clean_llm, monkeypatch, tmp_store):
     from core import config
 
     monkeypatch.setattr(config, "api_key", lambda: "sk-FROMENV000000")
-    clean_llm.apply_llm_settings({"api_key": "sk-FROMPAGE999999"})
-    assert clean_llm.effective_api_key() == "sk-FROMPAGE999999"
+    clean_llm.apply_llm_settings({"api_key": "sk-FROMPAGE999999"}, store_dir=tmp_store)
+    assert clean_llm.effective_api_key(store_dir=tmp_store) == "sk-FROMPAGE999999"
 
-    status = clean_llm.apply_llm_settings({"api_key": ""})   # 清空 = 回到环境变量
+    status = clean_llm.apply_llm_settings({"api_key": ""}, store_dir=tmp_store)   # 清空 = 回到环境变量
 
-    assert clean_llm.effective_api_key() == "sk-FROMENV000000"
+    assert clean_llm.effective_api_key(store_dir=tmp_store) == "sk-FROMENV000000"
     assert status["api_key"]["from_page"] is False
     assert "api_key" not in json.loads((tmp_store / "llm_config.json").read_text("utf-8"))
 
@@ -434,7 +442,6 @@ def test_perm_check_covers_stored_page_key(tmp_path, monkeypatch):
 
     monkeypatch.setattr(llm_runtime.os, "name", "nt")
     monkeypatch.setenv("USERNAME", "me")
-    monkeypatch.setattr(llm_runtime, "llm_config_path", lambda: tmp_path / "llm_config.json")
     (tmp_path / "llm_config.json").write_text(
         json.dumps({"api_key": "sk-x", "_warning": "…"}), encoding="utf-8")
 
@@ -445,7 +452,7 @@ def test_perm_check_covers_stored_page_key(tmp_path, monkeypatch):
 
     monkeypatch.setattr(llm_runtime.subprocess, "run", fake)
 
-    hint = llm_runtime.key_perm_hint(refresh=True)
+    hint = llm_runtime.key_perm_hint(refresh=True, store_dir=tmp_path)
 
     assert hint and "llm_config.json" in hint          # 提示里点名这个文件
     assert "icacls" in hint

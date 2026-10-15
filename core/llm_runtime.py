@@ -23,29 +23,28 @@ from typing import Any, Dict, List, Optional
 from core.client import LLMClient
 from core.config_flags import env_text
 from core.logging_config import log
-
-import memory
+from core.paths import resolve_store
 
 # 思考模式档位：未设置 → 不指定，用服务端默认；
 # off/disabled/none → 显式关闭；low/medium/high/max → 开启
 _ENV_REASONING_EFFORT = "NPC_REASONING_EFFORT"
 
 
-def reasoning_effort() -> Optional[str]:
+def reasoning_effort(store_dir: Optional[Path] = None) -> Optional[str]:
     """思考档位（现读，可热切）：页面设置 > 落盘配置 > 环境变量。空白 → None（不指定）。"""
-    raw = str(llm_settings().get("reasoning_effort") or "").strip()
+    raw = str(llm_settings(store_dir=store_dir).get("reasoning_effort") or "").strip()
     return raw or None
 
 
-def thinking_effort() -> Optional[str]:
+def thinking_effort(store_dir: Optional[Path] = None) -> Optional[str]:
     """实际发给模型的档位 —— 勾了"该模型不认思考参数"就一律 None（一个参数都不发）。
 
     对不认这些字段的端点，连 `thinking:{type:disabled}` 都是未知参数会 400，
     所以"不支持思考的模型"要映射到"不指定"，而不是显式关闭。
     """
-    if llm_settings().get("thinking_unsupported"):
+    if llm_settings(store_dir=store_dir).get("thinking_unsupported"):
         return None
-    return reasoning_effort()
+    return reasoning_effort(store_dir=store_dir)
 
 
 # ── LLM 设置（页面可改，落 store/llm_config.json；key 不在这里）──
@@ -71,11 +70,12 @@ def mask_secret(value: str) -> str:
     return f"{value[:3]}…{value[-4:]}"
 
 
-def effective_api_key() -> str:
+def effective_api_key(store_dir: Optional[Path] = None) -> str:
     """生效的 key：页面填的（store/llm_config.json）优先，其次环境变量 / api_key.txt。"""
     from core import config
 
-    return str(llm_settings().get("api_key") or "").strip() or (config.api_key() or "")
+    return str(llm_settings(store_dir=store_dir).get("api_key") or "").strip() \
+        or (config.api_key() or "")
 
 
 def scrub(text: str) -> str:
@@ -89,13 +89,13 @@ def scrub(text: str) -> str:
     return out
 
 
-def api_key_status() -> Dict[str, Any]:
+def api_key_status(store_dir: Optional[Path] = None) -> Dict[str, Any]:
     """key 的只读状态：有没有、来自哪、掩码 —— 内容一个字都不回。"""
     from core import config
     from core.settings import api_key_source
 
     # "页面填的"要看持久化层（文件 + 运行时），不能看合并值 —— 合并值已经回落过环境变量了
-    from_page = str(_persisted_llm_config().get("api_key") or "").strip()
+    from_page = str(_persisted_llm_config(store_dir=store_dir).get("api_key") or "").strip()
     env_key = config.api_key() or ""
     key = from_page or env_key
     return {
@@ -158,7 +158,7 @@ def scan_key_file_perm(path: Optional[Path] = None) -> Optional[str]:
             f'/grant:r "{user}:(R,W)" "SYSTEM:(F)" "Administrators:(F)"')
 
 
-def key_perm_hint(refresh: bool = False) -> Optional[str]:
+def key_perm_hint(refresh: bool = False, store_dir: Optional[Path] = None) -> Optional[str]:
     """给日志与页面用的提示（只算一次，重启才刷新）。
 
     扫两处明文 key：工程根 `api_key.txt`、以及页面存下来的 `store/llm_config.json`
@@ -170,8 +170,8 @@ def key_perm_hint(refresh: bool = False) -> Optional[str]:
         root = scan_key_file_perm()
         if root:
             hints.append(root)
-        if _load_llm_file().get("api_key"):
-            stored = scan_key_file_perm(llm_config_path())
+        if _load_llm_file(store_dir=store_dir).get("api_key"):
+            stored = scan_key_file_perm(llm_config_path(store_dir))
             if stored:
                 hints.append(stored)
         _KEY_PERM_HINT = "；".join(hints) or None
@@ -182,21 +182,21 @@ def key_perm_hint(refresh: bool = False) -> Optional[str]:
 _LLM_RUNTIME: Dict[str, Any] = {}          # 页面改过的值（优先级最高，进程内有效）
 
 
-def llm_config_path() -> Path:
+def llm_config_path(store_dir: Optional[Path] = None) -> Path:
     """页面设置的落盘位置（与记忆卡同级的运行时目录，已 gitignore）。"""
-    return memory.STORE_DIR / "llm_config.json"
+    return resolve_store(store_dir) / "llm_config.json"
 
 
-def _load_llm_file() -> Dict[str, Any]:
+def _load_llm_file(store_dir: Optional[Path] = None) -> Dict[str, Any]:
     try:
-        data = json.loads(llm_config_path().read_text("utf-8"))
+        data = json.loads(llm_config_path(store_dir).read_text("utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
-def _save_llm_file(cfg: Dict[str, Any]) -> None:
-    path = llm_config_path()
+def _save_llm_file(cfg: Dict[str, Any], store_dir: Optional[Path] = None) -> None:
+    path = llm_config_path(store_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     blob = {k: v for k, v in cfg.items() if k in _LLM_FIELDS}
     if blob.get("api_key"):
@@ -219,51 +219,53 @@ def _env_llm_config() -> Dict[str, Any]:
     }
 
 
-def llm_settings() -> Dict[str, Any]:
+def llm_settings(store_dir: Optional[Path] = None) -> Dict[str, Any]:
     """生效中的设置：页面改的 > store/llm_config.json > 环境变量。"""
     merged = _env_llm_config()
-    merged.update({k: v for k, v in _load_llm_file().items() if k in _LLM_FIELDS})
+    merged.update({k: v for k, v in _load_llm_file(store_dir=store_dir).items()
+                   if k in _LLM_FIELDS})
     merged.update(_LLM_RUNTIME)
     return merged
 
 
-def _persisted_llm_config() -> Dict[str, Any]:
+def _persisted_llm_config(store_dir: Optional[Path] = None) -> Dict[str, Any]:
     """要落盘的那份 = 文件里原有的 + 页面改的（**不含环境变量那一层**）。
 
     否则保存时会把环境变量里的 key 抄进文件 —— 用户没在页面填过也变成明文存一份。
     """
-    saved = {k: v for k, v in _load_llm_file().items() if k in _LLM_FIELDS}
+    saved = {k: v for k, v in _load_llm_file(store_dir=store_dir).items() if k in _LLM_FIELDS}
     saved.update(_LLM_RUNTIME)
     return saved
 
 
-def _llm_origin() -> str:
+def _llm_origin(store_dir: Optional[Path] = None) -> str:
     """当前值来自哪一层（页面上要说清，免得用户以为改了没生效）。"""
     if _LLM_RUNTIME:
         return "runtime"
-    if _load_llm_file():
+    if _load_llm_file(store_dir=store_dir):
         return "file"
     return "env"
 
 
-def llm_config_status() -> Dict[str, Any]:
+def llm_config_status(store_dir: Optional[Path] = None) -> Dict[str, Any]:
     """当前 LLM 设置与状态：缺什么写什么，并标明值来自哪一层。"""
     from core import config
     from core.factory import resolve_llm_config
 
-    cfg = llm_settings()
-    status = resolve_llm_config(api_key=effective_api_key(), model_name=cfg["model"],
-                                base_url=cfg["base_url"])
-    status["reasoning_effort"] = reasoning_effort()      # 用户设的档位
-    status["thinking_effort"] = thinking_effort()        # 实际下发的（None = 一个都不发）
+    cfg = llm_settings(store_dir=store_dir)
+    status = resolve_llm_config(api_key=effective_api_key(store_dir=store_dir),
+                                model_name=cfg["model"], base_url=cfg["base_url"])
+    status["reasoning_effort"] = reasoning_effort(store_dir=store_dir)   # 用户设的档位
+    status["thinking_effort"] = thinking_effort(store_dir=store_dir)     # 实际下发的（None = 一个都不发）
     status["thinking_unsupported"] = bool(cfg["thinking_unsupported"])
-    status["origin"] = _llm_origin()
-    status["api_key"] = api_key_status()      # 只有掩码，没有原文
+    status["origin"] = _llm_origin(store_dir=store_dir)
+    status["api_key"] = api_key_status(store_dir=store_dir)      # 只有掩码，没有原文
     return status
 
 
 def apply_llm_settings(patch: Dict[str, Any],
-                       holder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       holder: Optional[Dict[str, Any]] = None,
+                       store_dir: Optional[Path] = None) -> Dict[str, Any]:
     """改设置 → 落盘 → 换脑。校验不通过抛 ValueError（调用方转 400）。
 
     api_key 是唯一允许的凭据字段：填了就明文存 store/llm_config.json（页面优先），
@@ -290,25 +292,26 @@ def apply_llm_settings(patch: Dict[str, Any],
         clean["thinking_unsupported"] = bool(patch["thinking_unsupported"])
 
     _LLM_RUNTIME.update(clean)
-    saved = _persisted_llm_config()
+    saved = _persisted_llm_config(store_dir=store_dir)
     if clear_key:
         saved.pop("api_key", None)
-    _save_llm_file(saved)
+    _save_llm_file(saved, store_dir=store_dir)
     if holder is not None:
         rebuild_llm(holder)
-    return llm_config_status()
+    return llm_config_status(store_dir=store_dir)
 
 
-def reset_llm_settings(holder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def reset_llm_settings(holder: Optional[Dict[str, Any]] = None,
+                       store_dir: Optional[Path] = None) -> Dict[str, Any]:
     """清掉页面设置与落盘文件，回到环境变量那一层。"""
     _LLM_RUNTIME.clear()
     try:
-        llm_config_path().unlink()
+        llm_config_path(store_dir).unlink()
     except OSError:
         pass
     if holder is not None:
         rebuild_llm(holder)
-    return llm_config_status()
+    return llm_config_status(store_dir=store_dir)
 
 
 def rebuild_llm(holder: Dict[str, Any]) -> None:
@@ -316,9 +319,9 @@ def rebuild_llm(holder: Dict[str, Any]) -> None:
     holder["client"] = build_default_client()
 
 
-def build_default_client() -> Optional[LLMClient]:
+def build_default_client(store_dir: Optional[Path] = None) -> Optional[LLMClient]:
     """按用户配置创建 LLM 客户端；三件套缺任何一项 → None（走规则回复兜底）。"""
-    status = llm_config_status()
+    status = llm_config_status(store_dir=store_dir)
     if not status["ready"]:
         log.warning("llm_not_configured", missing=",".join(status["missing"]),
                     hint="可在控制台「模型」页直接填；未配齐时 /api/talk 走角色卡 rules 回复")
@@ -330,7 +333,7 @@ def build_default_client() -> Optional[LLMClient]:
     from core.factory import create_provider
 
     provider = create_provider(
-        api_key=effective_api_key(),        # 页面填的 key 优先，其次环境变量 / api_key.txt
+        api_key=effective_api_key(store_dir=store_dir),   # 页面填的 key 优先，其次环境变量 / api_key.txt
         model_name=status["model"],
         base_url=status["base_url"],
         temperature=config.temperature(),

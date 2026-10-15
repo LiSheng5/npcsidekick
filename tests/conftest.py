@@ -147,41 +147,32 @@ def make_client():
 
 
 @pytest.fixture
-def tmp_store(tmp_path, monkeypatch):
-    """把 memory / chatlog 的 store 指到临时目录。"""
-    import memory
+def paths(tmp_path):
+    """注入用的运行时数据目录（store / personas / avatars 全在 tmp 下，零 monkeypatch）。"""
+    from core.paths import Paths
 
-    store = tmp_path / "store"
+    return Paths(root=tmp_path)
+
+
+@pytest.fixture
+def tmp_store(paths):
+    """memory / chatlog / llm_config 的运行时数据目录（显式传 store_dir 用）。"""
+    store = paths.store_dir
     store.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(memory, "STORE_DIR", store)
-    try:
-        import chatlog
-    except ImportError:
-        pass
-    else:
-        monkeypatch.setattr(chatlog, "STORE_DIR", store)
     return store
 
 
 @pytest.fixture
-def persona_dir(tmp_path, monkeypatch):
-    """把 server 的角色卡目录指到临时目录。"""
-    import server
-
-    d = tmp_path / "personas"
+def persona_dir(paths):
+    d = paths.persona_dir
     d.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(server, "PERSONA_DIR", d)
     return d
 
 
 @pytest.fixture
-def avatar_dir(tmp_path, monkeypatch):
-    """把 server 的头像目录指到临时目录（create_app 会自己 mkdir）。"""
-    import server
-
-    d = tmp_path / "avatars"
-    monkeypatch.setattr(server, "AVATAR_DIR", d)
-    return d
+def avatar_dir(paths):
+    """create_app 会自己 mkdir；测试都经由 make_app_client 注入，不会碰真实 avatars/。"""
+    return paths.avatar_dir
 
 
 @pytest.fixture
@@ -204,10 +195,11 @@ def write_persona(persona_dir):
 
 
 @pytest.fixture
-def make_app_client(tmp_store, persona_dir, avatar_dir):
+def make_app_client(paths):
     """FastAPI TestClient 工厂：make_app_client(provider=..., **state)。
 
-    avatar_dir 也让 make_app_client 依赖 —— 保证任何测试都不会写到工程里真实的 avatars/。
+    运行时数据目录（store / personas / avatars）全部经 paths 注入到 tmp 下 ——
+    保证任何测试都不会写到工程里真实的 store/ 与 avatars/。
     """
     from fastapi.testclient import TestClient
 
@@ -215,6 +207,6 @@ def make_app_client(tmp_store, persona_dir, avatar_dir):
 
     def _make(provider=None, **state_kwargs):
         app = server.create_app(llm_client=LLMClient(provider=provider or FakeProvider()),
-                                **state_kwargs)
+                                paths=paths, **state_kwargs)
         return TestClient(app)
     return _make

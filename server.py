@@ -44,6 +44,7 @@ from core.llm_runtime import (
     scrub,
 )
 from core.logging_config import log
+from core.paths import Paths, default_paths
 from core.personas import PersonaError, persona_ids, persona_path, read_persona
 
 import chatlog
@@ -52,14 +53,8 @@ import memory
 import tts
 import turn
 
-# 角色卡目录（加一个文件就多一个 NPC）
-PERSONA_DIR = Path(__file__).resolve().parent / "personas"
-
-# 控制台静态资源（零构建：index.html + app.js + styles.css）
+# 控制台静态资源（零构建：index.html + app.js + styles.css）—— 属代码文件，不随 Paths 注入
 CONSOLE_DIR = Path(__file__).resolve().parent / "web" / "console"
-
-# 关系网节点头像（avatars/{id}.<ext>，静态挂在 /avatars；与控制台同属调试面）
-AVATAR_DIR = Path(__file__).resolve().parent / "avatars"
 
 # v4 不预设厂商：模型名 / key / 端点三件套由用户自配（AGENT_MODEL / NPC_API_KEY / NPC_BASE_URL）
 
@@ -84,9 +79,9 @@ def execute_timeout() -> float:
 
 # ── 角色卡（读取/枚举在 core/personas.py，这里只管 HTTP 口径）──
 
-def load_persona(npc_id: str) -> Dict[str, Any]:
+def load_persona(persona_dir: Path, npc_id: str) -> Dict[str, Any]:
     """读 personas/{id}.json；缺失/非法 → HTTPException(400)。"""
-    path = persona_path(PERSONA_DIR, npc_id)
+    path = persona_path(persona_dir, npc_id)
     try:
         persona = read_persona(path)
     except PersonaError as exc:
@@ -188,26 +183,32 @@ def _require_text(body: Dict[str, Any], key: str) -> str:
 
 def create_app(llm_client: Optional[LLMClient] = None,
                heartbeat_timeout_override: Optional[float] = None,
-               executor: Optional[Any] = None) -> FastAPI:
+               executor: Optional[Any] = None,
+               paths: Optional[Paths] = None) -> FastAPI:
     """组装应用。llm_client 可注入（测试用假 Provider）；None 时按环境自动创建。
 
     executor 可注入（测试用假执行器）：`async (url, payload, timeout) -> dict`；
     缺省走真实 HTTP（`turn._http_execute`）请求 mod 的 execute_url。
+    paths 可注入（运行时数据目录：store / personas / avatars）；None 时用工程默认。
     """
     app = FastAPI(title="NPCSidekick v4", version="4.0")
+    paths = paths or default_paths()
+    store_dir = paths.store_dir
+    persona_dir = paths.persona_dir
+    avatar_dir = paths.avatar_dir
     registry = Registry(timeout=heartbeat_timeout_override)
     locks: Dict[str, asyncio.Lock] = {}
     started_at = time.time()
     # 大脑可被页面热换：端点一律读 holder["client"]，而不是闭包里那一份
     llm_holder: Dict[str, Any] = {"client": llm_client}
 
-    perm_hint = key_perm_hint()             # 只检测 api_key.txt 权限，不改文件
+    perm_hint = key_perm_hint(store_dir=store_dir)  # 只检测 api_key.txt 权限，不改文件
     if perm_hint:
         log.warning("api_key_file_permission", hint=perm_hint)
 
     if llm_client is None:
         try:
-            llm_client = build_default_client()
+            llm_client = build_default_client(store_dir=store_dir)
         except Exception as exc:                 # 无 key / 初始化失败 → 规则回复兜底
             log.warning("llm_unavailable", error=scrub(str(exc))[:160])
             llm_client = None
@@ -259,7 +260,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
         else:
             mod = None
 
-        persona = load_persona(npc_id)
+        persona = load_persona(persona_dir, npc_id)
         # 动作要"能执行"才进 LLM 的工具定义：mod 在线 + 声明过动作 + 给了执行接口（协议 §1）
         execute_url = registry.execute_url(mod)
         capabilities = registry.actions(mod) if execute_url else []
@@ -272,7 +273,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
                              observation=observation, capabilities=capabilities,
                              execute_url=execute_url, mod=mod, executor=executor,
                              lock=lock_for(npc_id), wants_voice=wants_voice,
-                             execute_timeout=execute_timeout),
+                             store_dir=store_dir, execute_timeout=execute_timeout),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                      "X-Mod-Heartbeat-Timeout": str(timeout)},
@@ -300,7 +301,8 @@ def create_app(llm_client: Optional[LLMClient] = None,
             registry.touch(mod.strip())
 
         async with lock_for(npc_id):
-            entry = await asyncio.to_thread(memory.add_action_result, npc_id, action, ok, note)
+            entry = await asyncio.to_thread(memory.add_action_result, npc_id, action,
+                                            ok, note, store_dir=store_dir)
         log.info("action_result_recorded", npc_id=npc_id, action=action, ok=ok)
         return {"ok": True, "npc_id": npc_id, "entry": entry}
 
@@ -321,7 +323,8 @@ def create_app(llm_client: Optional[LLMClient] = None,
             persona = None
             if isinstance(npc_id, str) and npc_id.strip():
                 try:
-                    persona = await asyncio.to_thread(load_persona, npc_id.strip())
+                    persona = await asyncio.to_thread(load_persona, persona_dir,
+                                                      npc_id.strip())
                 except HTTPException:
                     persona = None
             voice = tts.voice_for(persona)
@@ -333,12 +336,12 @@ def create_app(llm_client: Optional[LLMClient] = None,
     async def state():
         return {
             "model": getattr(llm_holder["client"], "model", None),
-            "llm": llm_config_status(),          # 三件套状态：缺什么写什么
-            "reasoning_effort": reasoning_effort(),
+            "llm": llm_config_status(store_dir=store_dir),   # 三件套状态：缺什么写什么
+            "reasoning_effort": reasoning_effort(store_dir=store_dir),
             "tts": tts.available(),
-            "store_dir": str(memory.STORE_DIR),
-            "persona_dir": str(PERSONA_DIR),
-            "npcs": len(persona_ids(PERSONA_DIR)),
+            "store_dir": str(store_dir),
+            "persona_dir": str(persona_dir),
+            "npcs": len(persona_ids(persona_dir)),
             "mods": registry.state(),
             "heartbeat_timeout_s": registry.timeout(),
             "uptime_s": round(time.time() - started_at, 1),
@@ -347,9 +350,9 @@ def create_app(llm_client: Optional[LLMClient] = None,
     @app.get("/api/npcs")
     async def npcs():
         result = []
-        for npc_id in persona_ids(PERSONA_DIR):
-            entries = memory.load_card(npc_id)
-            msgs = chatlog.load_turns(npc_id)
+        for npc_id in persona_ids(persona_dir):
+            entries = memory.load_card(npc_id, store_dir=store_dir)
+            msgs = chatlog.load_turns(npc_id, store_dir=store_dir)
             result.append({
                 "npc_id": npc_id,
                 "memory_entries": len(entries),
@@ -362,15 +365,16 @@ def create_app(llm_client: Optional[LLMClient] = None,
     app.state.llm_holder = llm_holder
 
     # ── 控制台（调试面，见 console_api.py，不属于 mod 契约）──
-    AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+    avatar_dir.mkdir(parents=True, exist_ok=True)
     app.include_router(console_api.build_router(
-        PERSONA_DIR, lock_for, registry, AVATAR_DIR,
+        persona_dir, lock_for, registry, avatar_dir,
+        store_dir=store_dir,
         llm_api={
-            "status": llm_config_status,
-            "apply": lambda patch: apply_llm_settings(patch, llm_holder),
-            "reset": lambda: reset_llm_settings(llm_holder),
+            "status": lambda: llm_config_status(store_dir=store_dir),
+            "apply": lambda patch: apply_llm_settings(patch, llm_holder, store_dir=store_dir),
+            "reset": lambda: reset_llm_settings(llm_holder, store_dir=store_dir),
         }))
-    app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR)), name="avatars")
+    app.mount("/avatars", StaticFiles(directory=str(avatar_dir)), name="avatars")
     if CONSOLE_DIR.is_dir():
         app.mount("/console", StaticFiles(directory=str(CONSOLE_DIR), html=True), name="console")
 

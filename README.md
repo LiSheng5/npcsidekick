@@ -142,19 +142,17 @@ v4 为此做了三处提示：① 页面上红字 + 「删掉明文 key」按钮
 python -m pytest tests -q
 ```
 
-测试全零网络：LLM 一律用 `tests/conftest.py` 里的 `FakeProvider` 注入。
+测试全零网络：LLM 一律用 `tests/conftest.py` 里的 `FakeProvider` 注入；
+运行时目录（`store` / `personas` / `avatars`）一律经 `core/paths.py` 的 `Paths` 注入到 `tmp_path`，
+不再 monkeypatch 模块级路径常量。
 
 ## 尚未完成 / 待定
 
-> ⚠️ 本仓库**当前处于重构进行中**：这批改动尚未收尾，测试也未恢复全绿。以下如实记录进度与分歧，供接手者参考。
+> ℹ️ 本仓库正在做 **P-24 重构（分阶段，每阶段测试全绿）**：阶段 1（模块拆分）与阶段 2（路径注入化）
+> 已完成，**203 个测试全绿**；阶段 3 = 多游戏适配、阶段 4 = 清理尚未开工。以下如实记录未决项与分歧，供接手者参考。
 
 ### 尚未完成
 
-- **路径注入化（重构阶段 2，半成品）**：已新增 `core/paths.py` 作为运行时目录的单一来源，
-  `memory.py` / `chatlog.py` / `tools.py` 的磁盘函数改为接受 `store_dir`（`None` = 工程默认），
-  并删掉了 `memory._ACTIVE_SYNONYMS` 进程级全局表。**未收尾**：`server.py` / `console_api.py` /
-  `core/llm_runtime.py` 仍在引用已被删除的 `memory.STORE_DIR`，`tests/conftest.py` 还在靠
-  monkeypatch 打桩 —— 当前 `import server` 会直接 `AttributeError`，测试暂时无法收集。
 - **循环与输出解耦**：计划抽 `core/harness.py`，让「LLM ↔ 工具多轮循环」产出结构化事件，
   从而脱离 FastAPI / SSE 独立单测；尚未开工。
 - **多游戏适配（接第二个 mod 前必须做）**：动作工具名加 `{mod}__{action}` 命名空间、

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from core.client import LLMClient
@@ -135,12 +136,14 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                       execute_url: Optional[str] = None, mod: Optional[str] = None,
                       executor: Optional[Any] = None, lock: asyncio.Lock,
                       wants_voice: bool = False,
+                      store_dir: Optional[Path] = None,
                       execute_timeout: Callable[[], float]) -> AsyncGenerator[str, None]:
     """跑完一整个回合，逐帧产出 SSE 文本（delta… / action… / audio? / done）。
 
     - `capabilities` 为空 = 动作工具不进 LLM 的工具定义（mod 离线 / 未报到 / 没给执行接口，§1）
     - `executor` 可注入（测试用假实现）；`execute_timeout` 传的是**取值的函数**（现读，可热切）
     - `lock` = 该 NPC 的 asyncio.Lock（同 NPC 串行，防并发写覆盖）
+    - `store_dir` = 记忆卡/聊天记录的运行时数据目录（None = 工程默认 store/）
     """
     full_parts: List[str] = []
     executed: List[Dict[str, Any]] = []     # 本回合已执行的动作（流末尾出 action 帧）
@@ -152,8 +155,10 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 raise RuntimeError("LLM 不可用")
             # 同步阻塞调用一律挪到线程池：本函数是 SSE 生成器，跑在事件循环上，
             # 直接调用会把整个服务器卡住 —— 尤其 build_history 内那次同步摘要 LLM 请求。
-            await asyncio.to_thread(memory.prune, npc_id)   # 确定性遗忘（半衰期修剪，不走 LLM）
-            history = await asyncio.to_thread(chatlog.build_history, npc_id, llm)
+            await asyncio.to_thread(memory.prune, npc_id,
+                                    store_dir=store_dir)   # 确定性遗忘（半衰期修剪，不走 LLM）
+            history = await asyncio.to_thread(chatlog.build_history, npc_id, llm,
+                                              store_dir=store_dir)
             messages: List[Dict[str, Any]] = [
                 {"role": "system", "content": build_system_prompt(persona, observation)}]
             messages.extend(history)
@@ -168,7 +173,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 round_text: List[str] = []
                 async for chunk in llm.stream(messages,
                                               tools=None if closing else tool_defs,
-                                              reasoning_effort=thinking_effort()):
+                                              reasoning_effort=thinking_effort(store_dir)):
                     if chunk.has_content:
                         round_text.append(chunk.content)
                         full_parts.append(chunk.content)
@@ -216,17 +221,18 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                             try:
                                 await asyncio.to_thread(
                                     memory.add_action_result, npc_id, c["name"],
-                                    outcome["ok"], outcome["note"])
+                                    outcome["ok"], outcome["note"], store_dir=store_dir)
                             except Exception as exc:    # 写卡失败不连累这一回合
                                 log.warning("action_memory_write_failed", npc_id=npc_id,
                                             action=c["name"], error=scrub(str(exc))[:120])
                     else:
                         # 同义词族**按请求显式传入**（取自本 NPC 的角色卡）——
-                        # 不走 memory 的进程级全局表，多 NPC 并发时互不污染
+                        # 检索没有进程级全局表，多 NPC 并发时互不污染
                         result = await asyncio.to_thread(
                             tools.run_tool, c["name"], c["args"], npc_id, capabilities,
                             top_k=RECALL_TOP_K,
-                            synonyms=persona.get("entity_synonyms"))
+                            synonyms=persona.get("entity_synonyms"),
+                            store_dir=store_dir)
                         tool_text = str(result.data if result.ok else (result.error or ""))
                     messages.append({
                         "role": "tool", "tool_call_id": c["id"], "content": tool_text,
@@ -243,7 +249,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
         else:
             # 正常走完：异步落盘（同步 IO 挪线程池，不卡事件循环）
             await asyncio.to_thread(chatlog.append_turn, npc_id, message,
-                                    "".join(full_parts))
+                                    "".join(full_parts), store_dir=store_dir)
             recorded = True
         finally:
             # 兜底：异常 / 客户端断连 / 取消时也要落盘，否则这一回合的话直接丢。
@@ -251,7 +257,8 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
             # "async generator ignored GeneratorExit"），故同步落盘 —— 仅异常路径，量极小。
             if not recorded:
                 try:
-                    chatlog.append_turn(npc_id, message, "".join(full_parts))
+                    chatlog.append_turn(npc_id, message, "".join(full_parts),
+                                        store_dir=store_dir)
                 except Exception as exc:
                     log.warning("chatlog_append_failed", npc_id=npc_id,
                                 error=scrub(str(exc))[:120])

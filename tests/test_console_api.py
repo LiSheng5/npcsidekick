@@ -76,8 +76,8 @@ def test_delete_persona_keeps_memory_and_chat(tmp_store, persona_dir, write_pers
                                               make_app_client):
     """删卡只删 personas/{id}.json —— 记忆与聊天留在 store/（重建同名卡还能接着用）。"""
     write_persona("cang")
-    memory.add_entry("cang", "玩家爱吃面")
-    chatlog.append_turn("cang", "在吗", "嗯。")
+    memory.add_entry("cang", "玩家爱吃面", store_dir=tmp_store)
+    chatlog.append_turn("cang", "在吗", "嗯。", store_dir=tmp_store)
     client = make_app_client()
 
     res = client.delete("/api/personas/cang")
@@ -85,8 +85,8 @@ def test_delete_persona_keeps_memory_and_chat(tmp_store, persona_dir, write_pers
     assert res.status_code == 200 and res.json()["ok"] is True
     assert not (persona_dir / "cang.json").exists()
     assert [i["id"] for i in client.get("/api/personas").json()["personas"]] == []
-    assert len(memory.load_card("cang")) == 1        # 记忆还在
-    assert len(chatlog.load_turns("cang")) == 2      # 聊天还在
+    assert len(memory.load_card("cang", store_dir=tmp_store)) == 1        # 记忆还在
+    assert len(chatlog.load_turns("cang", store_dir=tmp_store)) == 2      # 聊天还在
 
     # 后端必须把"保留了什么"讲清楚（前端 confirm 用同一句话）
     kept = res.json()["kept"]
@@ -140,7 +140,7 @@ def test_put_persona_bad_body_400(tmp_store, persona_dir, make_app_client):
 
 def test_memory_list_decorates_strength(tmp_store, write_persona, make_app_client):
     write_persona("cang")
-    memory.add_entry("cang", "钉住的话", importance=1, pinned=True)
+    memory.add_entry("cang", "钉住的话", importance=1, pinned=True, store_dir=tmp_store)
     client = make_app_client()
 
     data = client.get("/api/npcs/cang/memory").json()
@@ -168,10 +168,10 @@ def test_memory_add_update_delete(tmp_store, write_persona, make_app_client):
                          json={"content": "玩家最爱吃面", "importance": 9, "pinned": False})
     assert updated.status_code == 200
     assert updated.json()["entry"]["content"] == "玩家最爱吃面"
-    assert "pinned" not in memory.load_card("cang")[0]        # pinned=False 会删键
+    assert "pinned" not in memory.load_card("cang", store_dir=tmp_store)[0]  # pinned=False 会删键
 
     assert client.delete(f"/api/npcs/cang/memory/{entry['id']}").status_code == 200
-    assert memory.load_card("cang") == []
+    assert memory.load_card("cang", store_dir=tmp_store) == []
 
 
 def test_memory_endpoint_validation(tmp_store, write_persona, make_app_client):
@@ -185,7 +185,7 @@ def test_memory_endpoint_validation(tmp_store, write_persona, make_app_client):
 
 def test_memory_update_needs_a_field(tmp_store, write_persona, make_app_client):
     write_persona("cang")
-    entry = memory.add_entry("cang", "一条")
+    entry = memory.add_entry("cang", "一条", store_dir=tmp_store)
     client = make_app_client()
 
     res = client.put(f"/api/npcs/cang/memory/{entry['id']}", json={"unknown": 1})
@@ -198,7 +198,7 @@ def test_memory_prune_endpoint(tmp_store, write_persona, make_app_client):
     import uuid
     old = {"id": uuid.uuid4().hex, "content": "很久以前的弱记忆", "importance": 1,
            "category": "general", "created_at": time.time() - 100000 * 3600}
-    memory.save_card("cang", [old])
+    memory.save_card("cang", [old], store_dir=tmp_store)
     client = make_app_client()
 
     res = client.post("/api/npcs/cang/prune").json()
@@ -211,8 +211,8 @@ def test_memory_prune_endpoint(tmp_store, write_persona, make_app_client):
 def test_chat_endpoint_paging_and_summary(tmp_store, write_persona, make_app_client):
     write_persona("cang")
     for i in range(5):
-        chatlog.append_turn("cang", f"问{i}", f"答{i}")
-    chatlog._save_summary("cang", "此前聊过吃饭的事", 4)
+        chatlog.append_turn("cang", f"问{i}", f"答{i}", store_dir=tmp_store)
+    chatlog._save_summary("cang", "此前聊过吃饭的事", 4, store_dir=tmp_store)
     client = make_app_client()
 
     data = client.get("/api/npcs/cang/chat?limit=2").json()
@@ -474,8 +474,8 @@ def test_console_router_does_not_shadow_game_endpoints(tmp_store, write_persona,
 
 # ── 事件循环不被控制台端点占住（文件 IO 走线程池）─────────
 
-def test_console_read_endpoint_does_not_block_event_loop(tmp_store, write_persona, avatar_dir,
-                                                         make_client, monkeypatch):
+def test_console_read_endpoint_does_not_block_event_loop(tmp_store, paths, write_persona,
+                                                         avatar_dir, make_client, monkeypatch):
     """控制台只读端点跑在线程池里（FastAPI 对**同步 def** 端点自动如此）。
 
     回归：这些端点以前是 async def + 直接同步读文件 —— 记忆卡变大后，用户在控制台
@@ -487,17 +487,17 @@ def test_console_read_endpoint_does_not_block_event_loop(tmp_store, write_person
     import httpx
 
     write_persona("cang")
-    memory.add_entry("cang", "一条记忆")
+    memory.add_entry("cang", "一条记忆", store_dir=tmp_store)
 
     real_load_card = memory.load_card
 
-    def slow_load_card(npc_id: str):
+    def slow_load_card(npc_id: str, store_dir=None):
         time.sleep(0.4)                       # 模拟记忆卡变大后的读盘耗时
-        return real_load_card(npc_id)
+        return real_load_card(npc_id, store_dir=store_dir)
 
     monkeypatch.setattr(memory, "load_card", slow_load_card)
 
-    app = server.create_app(llm_client=make_client())
+    app = server.create_app(llm_client=make_client(), paths=paths)
 
     async def main() -> float:
         transport = httpx.ASGITransport(app=app)

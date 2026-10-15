@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from core.logging_config import log
+from core.paths import resolve_store
 from core.personas import PersonaError, persona_files, persona_path, read_persona
 
 import chatlog
@@ -52,11 +53,13 @@ def build_router(persona_dir: Path,
                  lock_for: Callable[[str], Any],
                  registry: Any = None,
                  avatar_dir: Optional[Path] = None,
+                 store_dir: Optional[Path] = None,
                  llm_api: Optional[Dict[str, Callable[..., Any]]] = None) -> APIRouter:
     """组装控制台路由。lock_for = 每 NPC 的 asyncio.Lock（与 talk 共用，防并发写覆盖）。
 
     registry = server 的 Registry（能力清单 + 心跳）；给了才挂 GET /api/capabilities。
     avatar_dir = 头像存放目录（server 里静态挂在 /avatars）；None 表示不启用头像。
+    store_dir = 记忆卡/聊天记录的运行时数据目录（None = 工程默认 store/）。
     llm_api = 模型设置的读写回调 {status, apply, reset}；给了才挂 /api/llm 三个端点。
     可改字段：model / base_url / api_key / reasoning_effort / thinking_unsupported；
     其中 api_key **明文落 store/llm_config.json**（页面已带醒目提示），接口永远只回掩码。
@@ -215,9 +218,9 @@ def build_router(persona_dir: Path,
 
         kept = {
             "note": _DELETE_KEPT_NOTE,
-            "memory_entries": len(memory.load_card(npc_id)),
-            "chat_messages": len(chatlog.load_turns(npc_id)),
-            "store_dir": str(memory.STORE_DIR),
+            "memory_entries": len(memory.load_card(npc_id, store_dir=store_dir)),
+            "chat_messages": len(chatlog.load_turns(npc_id, store_dir=store_dir)),
+            "store_dir": str(resolve_store(store_dir)),
         }
         try:
             path.unlink()
@@ -367,7 +370,7 @@ def build_router(persona_dir: Path,
 
     @router.get("/npcs/{npc_id}/memory")
     def list_memory(npc_id: str):
-        entries = memory.load_card(npc_id)
+        entries = memory.load_card(npc_id, store_dir=store_dir)
         return {
             "npc_id": npc_id,
             "entries": _decorate(entries),
@@ -389,7 +392,8 @@ def build_router(persona_dir: Path,
             try:
                 entry = await asyncio.to_thread(
                     memory.add_entry, npc_id, content,
-                    importance=importance, category=category, pinned=pinned)
+                    importance=importance, category=category, pinned=pinned,
+                    store_dir=store_dir)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "entry": _decorate([entry])[0]}
@@ -404,7 +408,8 @@ def build_router(persona_dir: Path,
         async with lock_for(npc_id):
             try:
                 entry = await asyncio.to_thread(
-                    lambda: memory.update_entry(npc_id, entry_id, **fields))
+                    lambda: memory.update_entry(npc_id, entry_id,
+                                                store_dir=store_dir, **fields))
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         if entry is None:
@@ -414,7 +419,8 @@ def build_router(persona_dir: Path,
     @router.delete("/npcs/{npc_id}/memory/{entry_id}")
     async def delete_memory(npc_id: str, entry_id: str):
         async with lock_for(npc_id):
-            ok = await asyncio.to_thread(memory.delete_entry, npc_id, entry_id)
+            ok = await asyncio.to_thread(memory.delete_entry, npc_id, entry_id,
+                                         store_dir=store_dir)
         if not ok:
             raise HTTPException(status_code=404, detail=f"未找到记忆条目: {entry_id}")
         return {"ok": True, "deleted": entry_id}
@@ -423,8 +429,9 @@ def build_router(persona_dir: Path,
     async def prune_memory(npc_id: str):
         """手动触发确定性修剪（与对话开始时自动跑的是同一个函数）。"""
         async with lock_for(npc_id):
-            removed = await asyncio.to_thread(memory.prune, npc_id)
-            remaining = await asyncio.to_thread(memory.load_card, npc_id)
+            removed = await asyncio.to_thread(memory.prune, npc_id, store_dir=store_dir)
+            remaining = await asyncio.to_thread(memory.load_card, npc_id,
+                                                store_dir=store_dir)
         return {"ok": True, "npc_id": npc_id, "removed": removed,
                 "remaining": len(remaining)}
 
@@ -435,7 +442,7 @@ def build_router(persona_dir: Path,
         """从最新往前取窗口：offset = 已看过的最新条数，limit = 本页条数。"""
         limit = max(1, min(int(limit), _CHAT_PAGE_MAX))
         offset = max(0, int(offset))
-        messages = chatlog.load_turns(npc_id)
+        messages = chatlog.load_turns(npc_id, store_dir=store_dir)
         total = len(messages)
         end = max(0, total - offset)
         start = max(0, end - limit)
@@ -447,7 +454,7 @@ def build_router(persona_dir: Path,
             "turns": messages[start:end],
             "estimated_tokens": sum(chatlog.estimate_tokens(m["content"]) for m in messages),
             "summary_threshold": chatlog.token_threshold(),
-            "summary": chatlog.load_summary(npc_id),
+            "summary": chatlog.load_summary(npc_id, store_dir=store_dir),
         }
 
     return router

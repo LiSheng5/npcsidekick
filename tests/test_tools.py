@@ -79,35 +79,36 @@ def test_reserved_names_not_shadowed():
 # ── 执行 ─────────────────────────────────────────────────
 
 def test_run_remember_writes_card(tmp_store):
-    res = tools.run_tool("remember", {"content": "玩家爱吃面", "importance": 7}, "cang")
+    res = tools.run_tool("remember", {"content": "玩家爱吃面", "importance": 7}, "cang",
+                         store_dir=tmp_store)
 
     assert res.status == ToolResultStatus.SUCCESS
-    entries = memory.load_card("cang")
+    entries = memory.load_card("cang", store_dir=tmp_store)
     assert [e["content"] for e in entries] == ["玩家爱吃面"]
     assert entries[0]["importance"] == 7
 
 
 def test_run_remember_defaults_and_clamping(tmp_store):
-    tools.run_tool("remember", {"content": "随手一提"}, "cang")
-    tools.run_tool("remember", {"content": "超范围", "importance": 99}, "cang")
+    tools.run_tool("remember", {"content": "随手一提"}, "cang", store_dir=tmp_store)
+    tools.run_tool("remember", {"content": "超范围", "importance": 99}, "cang",
+                   store_dir=tmp_store)
 
-    entries = memory.load_card("cang")
+    entries = memory.load_card("cang", store_dir=tmp_store)
     assert entries[0]["importance"] == memory.DEFAULT_IMPORTANCE
     assert entries[1]["importance"] == 9
 
 
 def test_run_remember_rejects_empty_content(tmp_store):
-    res = tools.run_tool("remember", {"content": "  "}, "cang")
+    res = tools.run_tool("remember", {"content": "  "}, "cang", store_dir=tmp_store)
     assert res.status == ToolResultStatus.ERROR
-    assert memory.load_card("cang") == []
+    assert memory.load_card("cang", store_dir=tmp_store) == []
 
 
 def test_run_recall_returns_verbatim_sorted(tmp_store):
-    memory.set_synonyms(None)
-    memory.add_entry("cang", "今天天气不错")
-    memory.add_entry("cang", "锅里煮着面", importance=9)
+    memory.add_entry("cang", "今天天气不错", store_dir=tmp_store)
+    memory.add_entry("cang", "锅里煮着面", importance=9, store_dir=tmp_store)
 
-    res = tools.run_tool("recall", {"query": "面"}, "cang")
+    res = tools.run_tool("recall", {"query": "面"}, "cang", store_dir=tmp_store)
 
     assert res.status == ToolResultStatus.SUCCESS
     # 逐字返回（回忆结果照原文给模型），按相关度排序
@@ -115,40 +116,43 @@ def test_run_recall_returns_verbatim_sorted(tmp_store):
 
 
 def test_run_recall_empty_memory(tmp_store):
-    res = tools.run_tool("recall", {"query": "面"}, "cang")
+    res = tools.run_tool("recall", {"query": "面"}, "cang", store_dir=tmp_store)
     assert res.status == ToolResultStatus.SUCCESS
     assert res.data == "（没有想起相关的事）"
 
 
 def test_run_recall_passes_synonyms(tmp_store):
-    memory.add_entry("cang", "木材")
-    memory.add_entry("cang", "石头")
+    memory.add_entry("cang", "木材", store_dir=tmp_store)
+    memory.add_entry("cang", "石头", store_dir=tmp_store)
 
     res = tools.run_tool("recall", {"query": "柴"}, "cang",
-                         synonyms={"木材": ["木材", "柴"]})
+                         synonyms={"木材": ["木材", "柴"]}, store_dir=tmp_store)
     assert res.data.splitlines()[0] == "- 木材"      # 同义词命中把它排到最前
 
 
 def test_action_tool_is_not_executed(tmp_store):
     """动作工具不在 tools 里执行 —— 由 server 转发 mod 的 /execute（协议 §3）。"""
-    res = tools.run_tool("cook", {"dish": "面"}, "cang", capabilities=CAPS)
+    res = tools.run_tool("cook", {"dish": "面"}, "cang", capabilities=CAPS,
+                         store_dir=tmp_store)
 
     assert res.status == ToolResultStatus.REJECTED
-    assert memory.load_card("cang") == []
+    assert memory.load_card("cang", store_dir=tmp_store) == []
 
 
 def test_unknown_tool_is_error_not_raise(tmp_store):
-    res = tools.run_tool("乱来的工具", {}, "cang", capabilities=CAPS)
+    res = tools.run_tool("乱来的工具", {}, "cang", capabilities=CAPS,
+                         store_dir=tmp_store)
     assert res.status == ToolResultStatus.ERROR
     assert "未知工具" in res.error
 
 
 def test_undeclared_action_name_is_unknown(tmp_store):
-    res = tools.run_tool("goto", {"place": "河边"}, "cang", capabilities=[CAPS[0]])
+    res = tools.run_tool("goto", {"place": "河边"}, "cang", capabilities=[CAPS[0]],
+                         store_dir=tmp_store)
     assert res.status == ToolResultStatus.ERROR
 
 
 @pytest.mark.parametrize("bad", [None, "字符串", 123])
 def test_run_tool_tolerates_non_dict_args(tmp_store, bad):
-    res = tools.run_tool("remember", bad, "cang")
+    res = tools.run_tool("remember", bad, "cang", store_dir=tmp_store)
     assert res.status == ToolResultStatus.ERROR

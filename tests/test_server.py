@@ -87,7 +87,8 @@ def test_talk_plain_text(tmp_store, write_persona, make_app_client, make_provide
     assert kinds(res)[-1] == "done" and set(kinds(res)) == {"delta", "done"}
     assert text_of(res) == "行啊，我去给你煮碗面。"
     # 台词进了持久聊天记录（每轮两行：用户一行 + 助手一行）
-    assert [m["content"] for m in __import__("chatlog").load_turns("cang")] == [
+    assert [m["content"] for m in __import__("chatlog").load_turns(
+        "cang", store_dir=tmp_store)] == [
         "你能帮我做顿饭吗", "行啊，我去给你煮碗面。"]
 
 
@@ -143,7 +144,7 @@ def test_talk_runs_remember_then_replies(tmp_store, write_persona, make_app_clie
 
     assert kinds(res)[-1] == "done" and set(kinds(res)) == {"delta", "done"}
     assert text_of(res) == "记住了，你爱吃面。"
-    entries = memory.load_card("cang")
+    entries = memory.load_card("cang", store_dir=tmp_store)
     assert [e["content"] for e in entries] == ["玩家爱吃面"]      # remember 真的落卡
     assert len(provider.stream_calls) == 2
     # 第二轮上下文里带上了工具结果
@@ -153,7 +154,7 @@ def test_talk_runs_remember_then_replies(tmp_store, write_persona, make_app_clie
 
 def test_talk_recall_loop(tmp_store, write_persona, make_app_client, make_provider):
     write_persona("cang")
-    memory.add_entry("cang", "玩家上次说爱吃面", importance=8)
+    memory.add_entry("cang", "玩家上次说爱吃面", importance=8, store_dir=tmp_store)
     provider = make_provider(turns=[
         {"text": "", "tool_calls": [{"name": "recall", "arguments": {"query": "面"}}]},
         {"text": "你上次说过爱吃面。"},
@@ -167,17 +168,16 @@ def test_talk_recall_loop(tmp_store, write_persona, make_app_client, make_provid
     assert "玩家上次说爱吃面" in tool_msg["content"]              # 逐字记忆进了上下文
 
 
-def test_talk_uses_persona_synonyms_without_touching_global(tmp_store, write_persona,
-                                                           make_app_client, make_provider):
-    """同义词族按角色卡**显式传参**：本次 talk 既不写、也不读进程级全局表。
+def test_talk_uses_persona_synonyms_explicitly(tmp_store, write_persona,
+                                               make_app_client, make_provider):
+    """同义词族按角色卡**显式传参**进检索 —— 没有进程级全局表可依赖。
 
-    多 NPC 并发对话时，A 的同义词表不会污染 B 的检索（回归：以前 server 每请求
-    `memory.set_synonyms(...)` 写全局表，而 run_tool 没传 synonyms，落到全局回退）。
+    多 NPC 并发对话时，A 的同义词表不会污染 B 的检索：除了本次请求传进来的表，
+    检索不看任何别处（P-24 阶段 2 删掉了 `memory.set_synonyms` 全局表）。
     """
     write_persona("cang", entity_synonyms={"木材": ["木材", "柴", "木头"]})
-    memory.add_entry("cang", "存着过冬的木材", importance=5)
-    memory.add_entry("cang", "灶边的石头", importance=5)
-    memory.set_synonyms({"石头": ["石头", "柴"]})   # 别人留下的全局表：会把「柴」算到石头上
+    memory.add_entry("cang", "存着过冬的木材", importance=5, store_dir=tmp_store)
+    memory.add_entry("cang", "灶边的石头", importance=5, store_dir=tmp_store)
     provider = make_provider(turns=[
         {"text": "", "tool_calls": [{"name": "recall", "arguments": {"query": "柴"}}]},
         {"text": "木头在棚里。"},
@@ -189,8 +189,7 @@ def test_talk_uses_persona_synonyms_without_touching_global(tmp_store, write_per
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert tool_msg["role"] == "tool"
     assert tool_msg["content"].splitlines()[0] == "- 存着过冬的木材"   # 用的是角色卡里的表
-    assert memory._ACTIVE_SYNONYMS == {"石头": frozenset({"石头", "柴"})}   # 全局表原样没被动过
-    memory.set_synonyms(None)
+    assert not hasattr(memory, "_ACTIVE_SYNONYMS")    # 进程级全局表已不存在
     assert kinds(res)[-1] == "done"
 
 
@@ -245,7 +244,8 @@ def test_talk_action_executes_via_mod_then_writes_memory(tmp_store, write_person
         "payload": {"npc_id": "cang", "action": "cook",
                     "params": {"dish": "面"}, "mod": "mygame"}}]
     # 结果当场写卡 + 第二轮上下文里带上工具结果
-    assert [e["content"] for e in memory.load_card("cang")] == ["完成: 面煮好了"]
+    assert [e["content"] for e in memory.load_card("cang",
+                                                   store_dir=tmp_store)] == ["完成: 面煮好了"]
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert tool_msg["role"] == "tool" and "面煮好了" in tool_msg["content"]
 
@@ -264,7 +264,7 @@ def test_talk_action_failure_is_not_pretended(tmp_store, write_persona,
 
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
 
-    assert [e["content"] for e in memory.load_card("cang")] == [
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
         "没做成: 执行接口没接上（RuntimeError）"]
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert tool_msg["role"] == "tool" and tool_msg["content"].startswith("没做成")
@@ -287,7 +287,8 @@ def test_talk_action_timeout_is_failure(tmp_store, write_persona, make_app_clien
     client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
 
     assert executor.calls[0]["timeout"] == 0.05
-    assert memory.load_card("cang")[0]["content"].startswith("没做成: 等待超过 0.05s")
+    assert memory.load_card("cang", store_dir=tmp_store)[0]["content"].startswith(
+        "没做成: 等待超过 0.05s")
 
 
 def test_talk_action_running_is_not_recorded(tmp_store, write_persona, make_app_client,
@@ -304,7 +305,7 @@ def test_talk_action_running_is_not_recorded(tmp_store, write_persona, make_app_
 
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
 
-    assert memory.load_card("cang") == []                      # 没定论就不写卡
+    assert memory.load_card("cang", store_dir=tmp_store) == []  # 没定论就不写卡
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert "还在进行中" in tool_msg["content"]
     assert kinds(res).count("action") == 1                     # 调过就有记录
@@ -331,7 +332,7 @@ def test_talk_two_action_rounds_emit_two_frames(tmp_store, write_persona, make_a
 
     assert len(executor.calls) == 2
     assert kinds(res).count("action") == 2
-    assert [e["content"] for e in memory.load_card("cang")] == [
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
         "完成: 面煮好了", "完成: 走到厨房了"]
 
 
@@ -375,7 +376,7 @@ def test_talk_bad_tool_arguments_goes_back_to_model(tmp_store, write_persona, ma
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
 
     assert executor.calls == []                                # 没执行任何动作
-    assert memory.load_card("cang") == []                      # 也没写卡
+    assert memory.load_card("cang", store_dir=tmp_store) == []  # 也没写卡
     assert kinds(res).count("action") == 0
     assert text_of(res) == "我再看看怎么做。"
     tool_msg = provider.stream_calls[1]["messages"][-1]
@@ -400,7 +401,7 @@ def test_talk_mixed_memory_and_action_in_one_round(tmp_store, write_persona, mak
     client.post("/api/talk", json={"npc_id": "cang", "message": "记住我爱吃面，做一碗",
                                    "mod": "mygame"})
 
-    assert [e["content"] for e in memory.load_card("cang")] == [
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
         "玩家爱吃面", "完成: 面煮好了"]
 
 
@@ -588,7 +589,8 @@ def test_action_result_writes_memory(tmp_store, write_persona, make_app_client):
 
     assert res.status_code == 200
     assert res.json()["ok"] is True
-    assert memory.load_card("cang")[0]["content"] == "完成: 面煮好了，玩家吃了说不错"
+    assert memory.load_card("cang", store_dir=tmp_store)[0]["content"] == \
+        "完成: 面煮好了，玩家吃了说不错"
 
 
 def test_action_result_failure_wording(tmp_store, write_persona, make_app_client):
@@ -597,7 +599,7 @@ def test_action_result_failure_wording(tmp_store, write_persona, make_app_client
 
     client.post("/api/action_result", json={"npc_id": "cang", "action": "goto", "ok": False})
 
-    assert memory.load_card("cang")[0]["content"] == "没做成: goto"
+    assert memory.load_card("cang", store_dir=tmp_store)[0]["content"] == "没做成: goto"
 
 
 def test_action_result_with_mod_refreshes_heartbeat(tmp_store, write_persona, make_app_client):
@@ -653,7 +655,7 @@ def test_state_endpoint(tmp_store, write_persona, make_app_client):
     state = client.get("/api/state").json()
 
     assert state["model"] == "fake-model"
-    assert state["store_dir"] == str(memory.STORE_DIR)
+    assert state["store_dir"] == str(tmp_store)
     assert state["npcs"] == 1
     assert state["mods"]["mygame"]["online"] is True
     assert state["heartbeat_timeout_s"] == 60.0
@@ -662,7 +664,7 @@ def test_state_endpoint(tmp_store, write_persona, make_app_client):
 def test_npcs_endpoint(tmp_store, write_persona, make_app_client, make_provider):
     write_persona("cang")
     write_persona("ali", name="阿黎")
-    memory.add_entry("cang", "一条记忆")
+    memory.add_entry("cang", "一条记忆", store_dir=tmp_store)
     client = make_app_client(provider=make_provider(turns=[{"text": "嗯。"}]))
     client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"})
 
@@ -726,7 +728,7 @@ def test_reasoning_effort_env(monkeypatch):
 
 # ── 事件循环不被同步 IO 堵住（回合里的阻塞调用走线程池）─────
 
-def test_summary_llm_does_not_block_event_loop(tmp_store, write_persona, monkeypatch):
+def test_summary_llm_does_not_block_event_loop(tmp_store, paths, write_persona, monkeypatch):
     """滚动摘要里的同步 LLM 请求必须走线程池。
 
     回归：build_history 以前在 SSE 生成器里直接调同步 llm.chat —— 摘要一变慢
@@ -745,7 +747,7 @@ def test_summary_llm_does_not_block_event_loop(tmp_store, write_persona, monkeyp
     monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "1")
     monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "0")
     write_persona("cang")
-    chatlog.append_turn("cang", "你好世界", "嗯")     # 制造超阈值的旧轮次 → 必触发摘要
+    chatlog.append_turn("cang", "你好世界", "嗯", store_dir=tmp_store)   # 制造超阈值的旧轮次 → 必触发摘要
 
     class SlowSummaryProvider:
         """stream 立刻回台词；chat（摘要走这条）故意慢，模拟真实 LLM 延迟。"""
@@ -761,7 +763,8 @@ def test_summary_llm_does_not_block_event_loop(tmp_store, write_persona, monkeyp
             yield StreamChunk(content="在的。", model=self.model_name)
             yield StreamChunk(finish_reason="stop", model=self.model_name)
 
-    app = server.create_app(llm_client=LLMClient(provider=SlowSummaryProvider()))
+    app = server.create_app(llm_client=LLMClient(provider=SlowSummaryProvider()),
+                            paths=paths)
 
     async def main() -> float:
         transport = httpx.ASGITransport(app=app)
@@ -839,17 +842,18 @@ def test_build_default_client_follows_user_config(tmp_store, monkeypatch):
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     monkeypatch.delenv("NPC_MODEL", raising=False)
     monkeypatch.delenv("NPC_BASE_URL", raising=False)
-    assert server.build_default_client() is None
+    assert server.build_default_client(store_dir=tmp_store) is None
 
     monkeypatch.setenv("AGENT_MODEL", "qwen-plus")
     monkeypatch.setenv("NPC_BASE_URL", "https://dashscope.example/v1")
-    client = server.build_default_client()
+    client = server.build_default_client(store_dir=tmp_store)
     assert client.model == "qwen-plus"
     assert client.provider.base_url == "https://dashscope.example/v1"
 
     # 换模型名不改端点：显式配的端点永远优先，不被厂商推断覆盖
     monkeypatch.setenv("AGENT_MODEL", "deepseek-v4-pro")
-    assert server.build_default_client().provider.base_url == "https://dashscope.example/v1"
+    assert server.build_default_client(
+        store_dir=tmp_store).provider.base_url == "https://dashscope.example/v1"
 
 
 def test_build_default_client_without_key(tmp_store, monkeypatch):
@@ -857,7 +861,7 @@ def test_build_default_client_without_key(tmp_store, monkeypatch):
     from core import config
 
     monkeypatch.setattr(config, "api_key", lambda: "")
-    assert server.build_default_client() is None
+    assert server.build_default_client(store_dir=tmp_store) is None
 
 
 def test_registry_actions_empty_when_offline():
