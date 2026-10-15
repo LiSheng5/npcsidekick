@@ -415,6 +415,23 @@ def test_talk_bad_tool_arguments_goes_back_to_model(tmp_store, write_persona, ma
     assert tool_msg["role"] == "tool" and "合法 JSON" in tool_msg["content"]
 
 
+def test_talk_bad_args_on_memory_tool_keeps_missing_arg_error(tmp_store, write_persona,
+                                                              make_app_client, make_provider):
+    """记忆工具参数坏 JSON：行为不变 —— 照旧执行，落在自己的缺参提示上（不写卡）。"""
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "remember", "raw_arguments": "{坏"}]},
+        {"text": "没记住，再说一遍。"},
+    ])
+    client = make_app_client(provider=provider)
+
+    client.post("/api/talk", json={"npc_id": "cang", "message": "记住点事"})
+
+    tool_msg = provider.stream_calls[1]["messages"][-1]
+    assert tool_msg["role"] == "tool" and "缺少 content" in tool_msg["content"]
+    assert memory.load_card("cang", store_dir=tmp_store) == []
+
+
 def test_talk_mixed_memory_and_action_in_one_round(tmp_store, write_persona, make_app_client,
                                                    make_provider):
     """同一条 assistant 消息里混合记忆工具与动作工具：都执行，顺序按调用顺序。"""
@@ -862,7 +879,14 @@ def test_tool_call_buffer_tolerates_bad_json():
     buf.feed({"index": 0, "function_name": "cook", "function_arguments": "{坏"})
     call = buf.finalize(0)
     assert call["args"] == {}
-    assert buf.bad_args is True                                # 标记出来，执行前要回给模型重发
+    assert call["bad_args"] is True                            # 标记出来，执行前要回给模型重发
+    assert buf.bad_args is True                                # 兼容旧口径：缓冲器上也留一份
+    assert call["name"] == "cook" and call["id"]               # 不抛异常，照样给出调用形态
+
+    # 合法 JSON 但不是对象（数组 / 字符串）同样按坏参数处理
+    buf2 = turn._ToolCallBuffer()
+    buf2.feed({"index": 0, "function_name": "cook", "function_arguments": "[1, 2]"})
+    assert buf2.finalize(0)["bad_args"] is True
 
 
 def test_build_default_client_follows_user_config(tmp_store, monkeypatch):

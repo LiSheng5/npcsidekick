@@ -61,6 +61,11 @@ class _ToolCallBuffer:
             self.arguments += str(delta["function_arguments"])
 
     def finalize(self, index: int) -> Dict[str, Any]:
+        """拼好的调用：`{id, name, args}`；参数不是合法 JSON 对象时**带** `bad_args=True` 标记。
+
+        坏参数的调用绝不拿去执行（空参数执行 = 拿玩家的游戏世界瞎赌），
+        回合循环看到标记只回一条工具消息让模型自己重发。
+        """
         raw = self.arguments.strip()
         args: Any = {}
         if raw:
@@ -72,7 +77,11 @@ class _ToolCallBuffer:
         if not isinstance(args, dict):
             args = {}
             self.bad_args = True
-        return {"id": self.call_id or f"call_{index + 1}", "name": self.name, "args": args}
+        call: Dict[str, Any] = {"id": self.call_id or f"call_{index + 1}",
+                                "name": self.name, "args": args}
+        if self.bad_args:
+            call["bad_args"] = True
+        return call
 
 
 # ── 动作执行：同步调用 mod 的 execute_url（协议 §3）──────────
@@ -186,7 +195,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
 
                 keys = sorted(buffers)
                 calls = [buffers[k].finalize(k) for k in keys]
-                bad_ids = {c["id"] for k, c in zip(keys, calls) if buffers[k].bad_args}
+                bad_ids = {c["id"] for c in calls if c.get("bad_args")}
                 calls = [c for c in calls if c["name"]]
                 if not calls:
                     break
@@ -205,10 +214,12 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                     } for c in calls],
                 })
                 for c in calls:
-                    if c["id"] in bad_ids:
-                        # 参数不是合法 JSON：别拿空参数去执行动作，回给模型让它重发
+                    is_action = bool(execute_url) and tools.is_action_tool(c["name"], capabilities)
+                    if is_action and c["id"] in bad_ids:
+                        # 参数不是合法 JSON：别拿空参数去执行动作（等于拿玩家的世界瞎赌），
+                        # 回给模型让它重发；记忆工具照旧执行（落在自己的缺参提示上）
                         tool_text = f"{c['name']} 的参数不是合法 JSON，请按工具定义重发一次"
-                    elif execute_url and tools.is_action_tool(c["name"], capabilities):
+                    elif is_action:
                         # 动作工具：同步调 mod 的 /execute，结果当场回上下文继续推理
                         outcome = await invoke_action(execute_url, npc_id, c["name"],
                                                       c["args"], mod, execute_timeout(),
