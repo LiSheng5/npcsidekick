@@ -164,6 +164,6 @@ curl -X POST http://127.0.0.1:8765/api/action_result -H "Content-Type: applicati
 |---|---|---|
 | `NPC_MOD_HEARTBEAT_TIMEOUT` | `60` | mod 心跳超时（秒）：超时视离线，动作工具不再进 LLM 工具定义 |
 | `NPC_EXECUTE_TIMEOUT` | `30` | 同步执行动作的等待上限（秒）：超时记 `unknown`，**不写失败卡**，转待定等回报 |
-| `NPC_PENDING_TTL` | `300` | 待定动作存活上限（秒）：到点还没等到回报 → 写 `没做成: 一直没等到结果` |
+| `NPC_PENDING_TTL` | `120` | 待定动作存活上限（秒）：到点还没等到回报 → 写 `没做成: 一直没等到结果` |
 
 三个都**现读可热切**（每次用的时候读环境变量，改完不用重启）；非法值回默认。

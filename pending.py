@@ -8,7 +8,7 @@
   · 回报带 `call_id` → 精确取出（同一 NPC 同名动作并发也不会串）
   · 旧 mod 不带 `call_id` → 按 `(npc_id, action)` 取**最早**一条（FIFO），旧 mod 的回报不能丢
 
-存活上限用 `NPC_PENDING_TTL`（秒，默认 300，现读可热切）。纯内存、无锁：
+存活上限用 `NPC_PENDING_TTL`（秒，默认 120，现读可热切）。纯内存、无锁：
 只在事件循环里同步改，方法内不留 `await`（同一实例挂在 `app.state.pending`）。
 """
 from __future__ import annotations
@@ -22,12 +22,12 @@ from core.config_flags import env_num
 from core.logging_config import log
 
 # 待定动作存活上限（秒）：超过 = 认定没做成，写一条失败记忆（清理是顺手做，不开后台任务）
-DEFAULT_PENDING_TTL = 300.0
+DEFAULT_PENDING_TTL = 120.0
 _ENV_PENDING_TTL = "NPC_PENDING_TTL"
 
 
 def pending_ttl() -> float:
-    """待定动作存活上限（现读，可热切）：NPC_PENDING_TTL 秒，默认 300。"""
+    """待定动作存活上限（现读，可热切）：NPC_PENDING_TTL 秒，默认 120。"""
     return max(0.0, env_num(_ENV_PENDING_TTL, DEFAULT_PENDING_TTL))
 
 

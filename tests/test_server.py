@@ -882,17 +882,17 @@ def test_pending_ttl_expiry_writes_failure_memory(tmp_store, write_persona, make
 
 
 def test_pending_ttl_env(monkeypatch):
-    """NPC_PENDING_TTL 现读、可热切；非法值回默认 300s。"""
+    """NPC_PENDING_TTL 现读、可热切；非法值回默认 120s。"""
     import pending
 
     monkeypatch.delenv("NPC_PENDING_TTL", raising=False)
-    assert pending.pending_ttl() == 300.0
+    assert pending.pending_ttl() == 120.0
 
     monkeypatch.setenv("NPC_PENDING_TTL", "5")
     assert pending.pending_ttl() == 5.0
 
     monkeypatch.setenv("NPC_PENDING_TTL", " 坏 ")
-    assert pending.pending_ttl() == 300.0
+    assert pending.pending_ttl() == 120.0
 
 
 def test_action_result_with_mod_refreshes_heartbeat(tmp_store, write_persona, make_app_client):

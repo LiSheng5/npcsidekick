@@ -102,7 +102,7 @@ v4 为此做了三处提示：① 页面上红字 + 「删掉明文 key」按钮
 | `NPC_SUMMARY_KEEP_RECENT` | `8` | 摘要后仍逐字保留的最近轮数 |
 | `NPC_MOD_HEARTBEAT_TIMEOUT` | `60` | mod 心跳超时（秒）：超时视离线，不再调任何动作 |
 | `NPC_EXECUTE_TIMEOUT` | `30` | 动作执行等待上限（秒）：超时**不当成失败**（mod 可能已做了），转待定等回报 |
-| `NPC_PENDING_TTL` | `300` | 待定动作存活上限（秒）：到点还没等到 mod 回报 → 写一条「没做成: 一直没等到结果」 |
+| `NPC_PENDING_TTL` | `120` | 待定动作存活上限（秒）：到点还没等到 mod 回报 → 写一条「没做成: 一直没等到结果」 |
 | `NPC_LLM_RETRY` / `NPC_LLM_RETRY_DELAYS` | 关 | LLM 网关抖动重试（见 `core/client.py`） |
 
 ## 控制台（调试面）
