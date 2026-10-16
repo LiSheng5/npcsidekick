@@ -28,9 +28,10 @@ from core.client import LLMClient
 from core.config_flags import env_text
 from core.llm_runtime import scrub, thinking_effort
 from core.logging_config import log
-from core.personas import build_system_prompt, rule_reply
+from core.personas import rule_reply
 
 import chatlog
+import context
 import memory
 import pending
 import tools
@@ -278,15 +279,11 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 history = await asyncio.to_thread(chatlog.build_history, npc_id, probe,
                                                   store_dir=store_dir)
                 trace_summarized = probe.chat_calls > 0
-                system_content = build_system_prompt(persona, observation)
-                messages: List[Dict[str, Any]] = [
-                    {"role": "system", "content": system_content}]
-                messages.extend(history)
-                messages.append({"role": "user", "content": message})
-                trace_tokens["system"] = chatlog.estimate_tokens(system_content)
-                trace_tokens["history"] = sum(
-                    chatlog.estimate_tokens(str(m.get("content", ""))) for m in history)
-                trace_tokens["user"] = chatlog.estimate_tokens(message)
+                # 装配抽到 context.assemble（任务 2，纯函数、行为不变）；
+                # trace 的 tokens 分层直接取它的 section_tokens
+                assembled = context.assemble(persona, observation, history, message)
+                messages = assembled.messages
+                trace_tokens.update(assembled.section_tokens)
                 tool_defs = tools.build_tool_definitions(capabilities)
 
                 # 工具轮预算用满后追加一次**收尾轮**（不带工具）：否则模型可能连续几轮只调工具，
