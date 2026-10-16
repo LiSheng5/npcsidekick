@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from core.client import LLMClient
+from core.config_flags import env_text
 from core.llm_runtime import scrub, thinking_effort
 from core.logging_config import log
 from core.personas import build_system_prompt, rule_reply
@@ -43,6 +45,43 @@ RECALL_TOP_K = 5
 
 def _sse(payload: Dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# ── 回合 trace（任务 1）────────────────────────────────────
+# 每回合结束输出一条 `turn_trace` 结构化日志（含降级回合）：
+# 记什么、不记什么见各字段说明 —— 默认**只记长度不记原文**（隐私 + 日志体积）。
+# NPC_TRACE_FILE 非空时同一条记录再以 JSONL 追加写入该文件；写失败只告警，不影响回合。
+
+_ENV_TRACE_FILE = "NPC_TRACE_FILE"
+
+
+def _emit_turn_trace(record: Dict[str, Any]) -> None:
+    """输出一条 turn_trace：结构化日志 + 可选 JSONL 落盘。全程不抛、不影响回合。"""
+    try:
+        log.info("turn_trace", **record)
+    except Exception as exc:                       # 日志坏了也不能连累回合
+        log.warning("turn_trace_log_failed", error=scrub(str(exc))[:120])
+    path = env_text(_ENV_TRACE_FILE, "").strip()
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        log.warning("turn_trace_write_failed", path=path, error=scrub(str(exc))[:120])
+
+
+def _trace_tool(name: str, capabilities: Optional[List[dict]], ok: bool,
+                status: str, ms: float) -> Dict[str, Any]:
+    """trace 的一条工具记录。`status` 如实保留执行侧取值（done/running/unknown/failed、
+    memory 的 success/error/rejected，以及 bad_args / ignored / 之后的 deduped）。"""
+    return {
+        "name": name,
+        "kind": "action" if tools.is_action_tool(name, capabilities) else "memory",
+        "ok": bool(ok),
+        "status": status,
+        "ms": round(ms, 1),
+    }
 
 
 # ── 流式工具调用累积 ─────────────────────────────────────
@@ -155,6 +194,25 @@ def action_tool_text(name: str, outcome: Dict[str, Any]) -> str:
     return f"没做成: {note or name}"
 
 
+class _SummarizeProbe:
+    """把 LLM 包一层，只数 `build_history` 期间摘要用的 `chat` 调用（trace 的 `summarized`）。
+
+    `build_history` 内部自己调 `maybe_summarize` 且不向外返回结果；
+    包一层计数是不动 chatlog 签名的最小做法。`chat_calls > 0` ⇔ 本回合触发了摘要。
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.chat_calls = 0
+
+    def chat(self, *args: Any, **kwargs: Any) -> Any:
+        self.chat_calls += 1
+        return self._inner.chat(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 # ── 回合 ─────────────────────────────────────────────────
 
 async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
@@ -174,142 +232,205 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     - `pending_actions` = 待定动作登记表（`running` 的动作等 mod 回报；不传 = 不登记）
     - `store_dir` = 记忆卡/聊天记录的运行时数据目录（None = 工程默认 store/）
     """
+    t_start = time.perf_counter()           # 回合开始（含等锁）—— trace 的计时基准
+    t_start = time.perf_counter()           # 回合开始（含等锁）—— trace 的计时基准
     full_parts: List[str] = []
     executed: List[Dict[str, Any]] = []     # 本回合已执行的动作（流末尾出 action 帧）
     emitted = False
     recorded = False                        # 聊天记录是否已落盘（finally 兜底用）
-    async with lock:
-        try:
-            if llm is None:
-                raise RuntimeError("LLM 不可用")
-            # 同步阻塞调用一律挪到线程池：本函数是 SSE 生成器，跑在事件循环上，
-            # 直接调用会把整个服务器卡住 —— 尤其 build_history 内那次同步摘要 LLM 请求。
-            await asyncio.to_thread(memory.prune, npc_id,
-                                    store_dir=store_dir)   # 确定性遗忘（半衰期修剪，不走 LLM）
-            history = await asyncio.to_thread(chatlog.build_history, npc_id, llm,
-                                              store_dir=store_dir)
-            messages: List[Dict[str, Any]] = [
-                {"role": "system", "content": build_system_prompt(persona, observation)}]
-            messages.extend(history)
-            messages.append({"role": "user", "content": message})
-            tool_defs = tools.build_tool_definitions(capabilities)
+    # 回合 trace（任务 1）：只记状态/长度/耗时，不记玩家原文与台词原文（隐私 + 日志体积）
+    trace_rounds = 0                        # 实际发起的 LLM 轮数
+    trace_tools: List[Dict[str, Any]] = []  # 每次工具调用 {name, kind, ok, status, ms}
+    trace_llm_fallback = False              # 是否走了规则回复
+    trace_summarized = False                # 本回合是否触发了摘要
+    trace_tokens: Dict[str, int] = {"system": 0, "history": 0, "user": 0}
+    trace_first_delta_at: Optional[float] = None
+    trace_emitted = False                   # turn_trace 只出一条（finally 兜底防重发）
 
-            # 工具轮预算用满后追加一次**收尾轮**（不带工具）：否则模型可能连续几轮只调工具，
-            # 预算一耗尽就"哑巴收场"—— 动作做了，台词一句没有。
-            for round_no in range(MAX_TOOL_ROUNDS + 1):
-                closing = round_no == MAX_TOOL_ROUNDS
-                buffers: Dict[int, _ToolCallBuffer] = {}
-                round_text: List[str] = []
-                async for chunk in llm.stream(messages,
-                                              tools=None if closing else tool_defs,
-                                              reasoning_effort=thinking_effort(store_dir)):
-                    if chunk.has_content:
-                        round_text.append(chunk.content)
-                        full_parts.append(chunk.content)
-                        emitted = True
-                        yield _sse({"type": "delta", "text": chunk.content})
-                    if chunk.has_tool_call:
-                        delta = chunk.tool_call_delta or {}
-                        buffers.setdefault(
-                            int(delta.get("index") or 0), _ToolCallBuffer()).feed(delta)
+    def _trace_record() -> Dict[str, Any]:
+        """拼 turn_trace 记录（发出时现算耗时；tokens.total = 各层之和）。"""
+        return {
+            "npc_id": npc_id,
+            "rounds": trace_rounds,
+            "llm_fallback": trace_llm_fallback,
+            "summarized": trace_summarized,
+            "no_dialogue": not emitted,
+            "tools": trace_tools,
+            "tokens": {**trace_tokens, "total": sum(trace_tokens.values())},
+            "first_token_ms": (None if trace_first_delta_at is None
+                               else round((trace_first_delta_at - t_start) * 1000, 1)),
+            "total_ms": round((time.perf_counter() - t_start) * 1000, 1),
+            "message_len": len(message),
+            "reply_len": len("".join(full_parts)),
+        }
 
-                keys = sorted(buffers)
-                calls = [buffers[k].finalize(k) for k in keys]
-                bad_ids = {c["id"] for c in calls if c.get("bad_args")}
-                calls = [c for c in calls if c["name"]]
-                if not calls:
-                    break
-                if closing:
-                    # 收尾轮没给工具，正常不会再有调用；模型硬报也只记账、不再执行（防跑飞）
-                    log.warning("talk_closing_round_tool_call_ignored", npc_id=npc_id)
-                    break
+    try:
+        async with lock:
+            try:
+                if llm is None:
+                    raise RuntimeError("LLM 不可用")
+                # 同步阻塞调用一律挪到线程池：本函数是 SSE 生成器，跑在事件循环上，
+                # 直接调用会把整个服务器卡住 —— 尤其 build_history 内那次同步摘要 LLM 请求。
+                await asyncio.to_thread(memory.prune, npc_id,
+                                        store_dir=store_dir)   # 确定性遗忘（半衰期修剪，不走 LLM）
+                # 包一层只为数摘要调用（trace 的 summarized），不改 build_history 行为
+                probe = _SummarizeProbe(llm)
+                history = await asyncio.to_thread(chatlog.build_history, npc_id, probe,
+                                                  store_dir=store_dir)
+                trace_summarized = probe.chat_calls > 0
+                system_content = build_system_prompt(persona, observation)
+                messages: List[Dict[str, Any]] = [
+                    {"role": "system", "content": system_content}]
+                messages.extend(history)
+                messages.append({"role": "user", "content": message})
+                trace_tokens["system"] = chatlog.estimate_tokens(system_content)
+                trace_tokens["history"] = sum(
+                    chatlog.estimate_tokens(str(m.get("content", ""))) for m in history)
+                trace_tokens["user"] = chatlog.estimate_tokens(message)
+                tool_defs = tools.build_tool_definitions(capabilities)
 
-                messages.append({
-                    "role": "assistant",
-                    "content": "".join(round_text),
-                    "tool_calls": [{
-                        "id": c["id"], "type": "function",
-                        "function": {"name": c["name"],
-                                     "arguments": json.dumps(c["args"], ensure_ascii=False)},
-                    } for c in calls],
-                })
-                for c in calls:
-                    is_action = bool(execute_url) and tools.is_action_tool(c["name"], capabilities)
-                    if is_action and c["id"] in bad_ids:
-                        # 参数不是合法 JSON：别拿空参数去执行动作（等于拿玩家的世界瞎赌），
-                        # 回给模型让它重发；记忆工具照旧执行（落在自己的缺参提示上）
-                        tool_text = f"{c['name']} 的参数不是合法 JSON，请按工具定义重发一次"
-                    elif is_action:
-                        # 动作工具：同步调 mod 的 /execute，结果当场回上下文继续推理
-                        outcome = await invoke_action(execute_url, npc_id, c["name"],
-                                                      c["args"], mod, execute_timeout(),
-                                                      executor)
-                        # 记录进 action 帧：name / params 之外再带上结果（ok / status）与 call_id，
-                        # 否则失败的动作在帧里看起来跟做成了一样（mod 依旧不需要照它做任何事）
-                        executed.append({"name": c["name"], "params": c["args"],
-                                         "ok": bool(outcome["ok"]),
-                                         "status": outcome["status"],
-                                         "call_id": outcome["call_id"]})
-                        tool_text = action_tool_text(c["name"], outcome)
-                        if outcome["status"] in ("running", "unknown"):
-                            # 结果还没定（mod 说在做 / 超时没等到回应）：登记 call_id 等 §4 的回报，
-                            # 不写卡 —— 超时不能当成"没做成"（mod 可能已经做了）
-                            if pending_actions is not None:
-                                pending_actions.register(outcome["call_id"], npc_id, c["name"],
-                                                         c["args"], mod)
-                        else:
-                            # 当场写卡（协议 §3）：成功/失败都写
-                            try:
-                                await asyncio.to_thread(
-                                    memory.add_action_result, npc_id, c["name"],
-                                    outcome["ok"], outcome["note"], store_dir=store_dir)
-                            except Exception as exc:    # 写卡失败不连累这一回合
-                                log.warning("action_memory_write_failed", npc_id=npc_id,
-                                            action=c["name"], error=scrub(str(exc))[:120])
-                    else:
-                        # 同义词族**按请求显式传入**（取自本 NPC 的角色卡）——
-                        # 检索没有进程级全局表，多 NPC 并发时互不污染
-                        result = await asyncio.to_thread(
-                            tools.run_tool, c["name"], c["args"], npc_id, capabilities,
-                            top_k=RECALL_TOP_K,
-                            synonyms=persona.get("entity_synonyms"),
-                            store_dir=store_dir)
-                        tool_text = str(result.data if result.ok else (result.error or ""))
+                # 工具轮预算用满后追加一次**收尾轮**（不带工具）：否则模型可能连续几轮只调工具，
+                # 预算一耗尽就"哑巴收场"—— 动作做了，台词一句没有。
+                for round_no in range(MAX_TOOL_ROUNDS + 1):
+                    closing = round_no == MAX_TOOL_ROUNDS
+                    buffers: Dict[int, _ToolCallBuffer] = {}
+                    round_text: List[str] = []
+                    trace_rounds += 1
+                    async for chunk in llm.stream(messages,
+                                                  tools=None if closing else tool_defs,
+                                                  reasoning_effort=thinking_effort(store_dir)):
+                        if chunk.has_content:
+                            round_text.append(chunk.content)
+                            full_parts.append(chunk.content)
+                            emitted = True
+                            if trace_first_delta_at is None:
+                                trace_first_delta_at = time.perf_counter()
+                            yield _sse({"type": "delta", "text": chunk.content})
+                        if chunk.has_tool_call:
+                            delta = chunk.tool_call_delta or {}
+                            buffers.setdefault(
+                                int(delta.get("index") or 0), _ToolCallBuffer()).feed(delta)
+
+                    keys = sorted(buffers)
+                    calls = [buffers[k].finalize(k) for k in keys]
+                    bad_ids = {c["id"] for c in calls if c.get("bad_args")}
+                    calls = [c for c in calls if c["name"]]
+                    if not calls:
+                        break
+                    if closing:
+                        # 收尾轮没给工具，正常不会再有调用；模型硬报也只记账、不再执行（防跑飞）
+                        log.warning("talk_closing_round_tool_call_ignored", npc_id=npc_id)
+                        for c in calls:
+                            trace_tools.append(_trace_tool(c["name"], capabilities, False,
+                                                          "ignored", 0.0))
+                        break
+
                     messages.append({
-                        "role": "tool", "tool_call_id": c["id"], "content": tool_text,
+                        "role": "assistant",
+                        "content": "".join(round_text),
+                        "tool_calls": [{
+                            "id": c["id"], "type": "function",
+                            "function": {"name": c["name"],
+                                         "arguments": json.dumps(c["args"], ensure_ascii=False)},
+                        } for c in calls],
                     })
-                if round_no == MAX_TOOL_ROUNDS - 1:
-                    log.warning("talk_tool_rounds_exhausted", npc_id=npc_id)
-        except Exception as exc:                            # 降级：LLM 出错就回退角色卡的规则回复
-            log.warning("talk_llm_failed", npc_id=npc_id, error=scrub(str(exc))[:160])
-            if not emitted:
-                fallback = rule_reply(persona, message)
-                full_parts.append(fallback)
-                emitted = True
-                yield _sse({"type": "delta", "text": fallback})
-        else:
-            # 正常走完：异步落盘（同步 IO 挪线程池，不卡事件循环）
-            await asyncio.to_thread(chatlog.append_turn, npc_id, message,
-                                    "".join(full_parts), store_dir=store_dir)
-            recorded = True
-        finally:
-            # 兜底：异常 / 客户端断连 / 取消时也要落盘，否则这一回合的话直接丢。
-            # 此时**不能 await**（生成器在 GeneratorExit / CancelledError 挂起中再 await 会报
-            # "async generator ignored GeneratorExit"），故同步落盘 —— 仅异常路径，量极小。
-            if not recorded:
-                try:
-                    chatlog.append_turn(npc_id, message, "".join(full_parts),
-                                        store_dir=store_dir)
-                except Exception as exc:
-                    log.warning("chatlog_append_failed", npc_id=npc_id,
-                                error=scrub(str(exc))[:120])
+                    for c in calls:
+                        t_tool = time.perf_counter()
+                        is_action = bool(execute_url) and tools.is_action_tool(c["name"], capabilities)
+                        if is_action and c["id"] in bad_ids:
+                            # 参数不是合法 JSON：别拿空参数去执行动作（等于拿玩家的世界瞎赌），
+                            # 回给模型让它重发；记忆工具照旧执行（落在自己的缺参提示上）
+                            tool_text = f"{c['name']} 的参数不是合法 JSON，请按工具定义重发一次"
+                            trace_tools.append(_trace_tool(c["name"], capabilities, False,
+                                                          "bad_args", 0.0))
+                        elif is_action:
+                            # 动作工具：同步调 mod 的 /execute，结果当场回上下文继续推理
+                            outcome = await invoke_action(execute_url, npc_id, c["name"],
+                                                          c["args"], mod, execute_timeout(),
+                                                          executor)
+                            trace_tools.append(_trace_tool(
+                                c["name"], capabilities, bool(outcome["ok"]),
+                                outcome["status"], (time.perf_counter() - t_tool) * 1000))
+                            # 记录进 action 帧：name / params 之外再带上结果（ok / status）与 call_id，
+                            # 否则失败的动作在帧里看起来跟做成了一样（mod 依旧不需要照它做任何事）
+                            executed.append({"name": c["name"], "params": c["args"],
+                                             "ok": bool(outcome["ok"]),
+                                             "status": outcome["status"],
+                                             "call_id": outcome["call_id"]})
+                            tool_text = action_tool_text(c["name"], outcome)
+                            if outcome["status"] in ("running", "unknown"):
+                                # 结果还没定（mod 说在做 / 超时没等到回应）：登记 call_id 等 §4 的回报，
+                                # 不写卡 —— 超时不能当成"没做成"（mod 可能已经做了）
+                                if pending_actions is not None:
+                                    pending_actions.register(outcome["call_id"], npc_id, c["name"],
+                                                             c["args"], mod)
+                            else:
+                                # 当场写卡（协议 §3）：成功/失败都写
+                                try:
+                                    await asyncio.to_thread(
+                                        memory.add_action_result, npc_id, c["name"],
+                                        outcome["ok"], outcome["note"], store_dir=store_dir)
+                                except Exception as exc:    # 写卡失败不连累这一回合
+                                    log.warning("action_memory_write_failed", npc_id=npc_id,
+                                                action=c["name"], error=scrub(str(exc))[:120])
+                        else:
+                            # 同义词族**按请求显式传入**（取自本 NPC 的角色卡）——
+                            # 检索没有进程级全局表，多 NPC 并发时互不污染
+                            result = await asyncio.to_thread(
+                                tools.run_tool, c["name"], c["args"], npc_id, capabilities,
+                                top_k=RECALL_TOP_K,
+                                synonyms=persona.get("entity_synonyms"),
+                                store_dir=store_dir)
+                            trace_tools.append(_trace_tool(
+                                c["name"], capabilities, bool(result.ok),
+                                result.status.value, (time.perf_counter() - t_tool) * 1000))
+                            tool_text = str(result.data if result.ok else (result.error or ""))
+                        messages.append({
+                            "role": "tool", "tool_call_id": c["id"], "content": tool_text,
+                        })
+                    if round_no == MAX_TOOL_ROUNDS - 1:
+                        log.warning("talk_tool_rounds_exhausted", npc_id=npc_id)
+            except Exception as exc:                        # 降级：LLM 出错就回退角色卡的规则回复
+                log.warning("talk_llm_failed", npc_id=npc_id, error=scrub(str(exc))[:160])
+                if not emitted:
+                    fallback = rule_reply(persona, message)
+                    full_parts.append(fallback)
+                    emitted = True
+                    trace_llm_fallback = True
+                    if trace_first_delta_at is None:
+                        trace_first_delta_at = time.perf_counter()
+                    yield _sse({"type": "delta", "text": fallback})
+            else:
+                # 正常走完：异步落盘（同步 IO 挪线程池，不卡事件循环）
+                await asyncio.to_thread(chatlog.append_turn, npc_id, message,
+                                        "".join(full_parts), store_dir=store_dir)
+                recorded = True
+            finally:
+                # 兜底：异常 / 客户端断连 / 取消时也要落盘，否则这一回合的话直接丢。
+                # 此时**不能 await**（生成器在 GeneratorExit / CancelledError 挂起中再 await 会报
+                # "async generator ignored GeneratorExit"），故同步落盘 —— 仅异常路径，量极小。
+                if not recorded:
+                    try:
+                        chatlog.append_turn(npc_id, message, "".join(full_parts),
+                                            store_dir=store_dir)
+                    except Exception as exc:
+                        log.warning("chatlog_append_failed", npc_id=npc_id,
+                                    error=scrub(str(exc))[:120])
 
-    for record in executed:                    # 已执行动作的记录（mod 不需要照它做任何事）
-        yield _sse({"type": "action", "action": record})
-    if wants_voice and tts.available():
-        # 台词流已走完，这里才整段合成 —— 不阻塞 delta 的逐字输出
-        voice = tts.voice_for(persona)
-        audio = await tts.synthesize_safe("".join(full_parts), voice)
-        if audio:
-            yield _sse({"type": "audio", "audio": tts.to_base64(audio), "voice": voice})
-    yield _sse({"type": "done"})
+        for record in executed:                # 已执行动作的记录（mod 不需要照它做任何事）
+            yield _sse({"type": "action", "action": record})
+        if wants_voice and tts.available():
+            # 台词流已走完，这里才整段合成 —— 不阻塞 delta 的逐字输出
+            voice = tts.voice_for(persona)
+            audio = await tts.synthesize_safe("".join(full_parts), voice)
+            if audio:
+                yield _sse({"type": "audio", "audio": tts.to_base64(audio), "voice": voice})
+        # 回合收尾：一条 turn_trace（结构化日志 + 可选 JSONL）。先置位再发 —— to_thread 被
+        # 取消也不至于 finally 再发一条；trace 写失败只告警（_emit_turn_trace 内吞掉），不影响回合。
+        trace_emitted = True
+        await asyncio.to_thread(_emit_turn_trace, _trace_record())
+        yield _sse({"type": "done"})
+    finally:
+        if not trace_emitted:
+            # 断连 / 取消兜底：此时不能再 await，同步发（同上面 chatlog 落盘的理由）
+            _emit_turn_trace(_trace_record())
