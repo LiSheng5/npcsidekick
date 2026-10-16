@@ -60,7 +60,7 @@ curl -X POST http://127.0.0.1:8765/api/capabilities -H "Content-Type: applicatio
 |---|---|---|---|
 | `npc_id` | string | ✅ | 对应 `personas/{npc_id}.json` |
 | `message` | string | ✅ | 玩家这一句 |
-| `observation` | any | | 游戏侧观察（`{"summary": "...", "nearby": [...]}` 之类），进系统提示词 |
+| `observation` | any | | 游戏侧观察（`{"summary": "...", "nearby": [...]}` 之类），进本轮上下文的「当前情况」块（用户消息前缀，受 `NPC_BUDGET_STATE` 预算约束） |
 | `mod` | string | | 捎带即刷新该 mod 的心跳 |
 | `voice` | bool | | `true` 才出 `audio` 帧（需装 edge-tts） |
 

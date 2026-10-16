@@ -93,6 +93,8 @@ def test_talk_plain_text(tmp_store, write_persona, make_app_client, make_provide
 
 
 def test_talk_observation_reaches_prompt(tmp_store, write_persona, make_app_client, make_provider):
+    """任务 3 起观测不再进 system：system 只放人设+规矩（固定层，利于前缀缓存），
+    观测进最后一条 user 消息的【当前情况】块。"""
     write_persona("cang")
     provider = make_provider(turns=[{"text": "嗯。"}])
     client = make_app_client(provider=provider)
@@ -101,10 +103,57 @@ def test_talk_observation_reaches_prompt(tmp_store, write_persona, make_app_clie
         "npc_id": "cang", "message": "在吗",
         "observation": {"summary": "玩家在厨房，刚下班", "nearby": ["玩家", "冰箱"]}})
 
-    system = provider.stream_calls[0]["messages"][0]
+    messages = provider.stream_calls[0]["messages"]
+    system = messages[0]
     assert system["role"] == "system"
-    assert "玩家在厨房，刚下班" in system["content"]
+    assert "玩家在厨房，刚下班" not in system["content"]   # 观测不在 system（固定层）
     assert "台词" in system["content"]                     # 台词纪律（只输出角色说的话）进了提示词
+    user = messages[-1]
+    assert user["role"] == "user"
+    assert "玩家在厨房，刚下班" in user["content"]          # 观测进了 user 前缀块
+    assert user["content"].endswith("玩家说：在吗")
+
+
+def test_talk_oversized_observation_truncated_with_log(tmp_store, write_persona,
+                                                       make_app_client, make_provider,
+                                                       monkeypatch, caplog):
+    """超长观测按 NPC_BUDGET_STATE 截断、尾部带标记，并记 context_section_truncated 日志。"""
+    import logging
+
+    monkeypatch.setenv("NPC_BUDGET_STATE", "20")
+    caplog.set_level(logging.WARNING)
+    write_persona("cang")
+    provider = make_provider(turns=[{"text": "嗯。"}])
+    client = make_app_client(provider=provider)
+
+    client.post("/api/talk", json={
+        "npc_id": "cang", "message": "在吗",
+        "observation": {"summary": "观" * 300}})
+
+    user = provider.stream_calls[0]["messages"][-1]["content"]
+    assert "…（已截断）" in user                           # 截断留标记，不静默丢弃
+    assert user.endswith("玩家说：在吗")
+    assert "观" * 300 not in user                          # 超预算部分真的被截掉了
+    assert "context_section_truncated" in caplog.text      # 带层名的日志
+
+
+def test_talk_chatlog_stores_raw_message_without_prefix(tmp_store, write_persona,
+                                                        make_app_client, make_provider):
+    """任务 3：资料块只是 LLM 上下文的前缀，聊天记录里仍只存玩家原话。"""
+    import chatlog
+
+    write_persona("cang")
+    provider = make_provider(turns=[{"text": "嗯。"}])
+    client = make_app_client(provider=provider)
+
+    client.post("/api/talk", json={
+        "npc_id": "cang", "message": "在吗",
+        "observation": {"summary": "玩家在厨房"}})
+
+    turns = chatlog.load_turns("cang", store_dir=tmp_store)
+    assert [m["content"] for m in turns] == ["在吗", "嗯。"]  # 玩家原话，无前缀
+    assert "【当前情况】" not in turns[0]["content"]
+    assert "玩家说：" not in turns[0]["content"]
 
 
 def test_talk_missing_fields_400(tmp_store, write_persona, make_app_client):

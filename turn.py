@@ -244,7 +244,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     trace_tools: List[Dict[str, Any]] = []  # 每次工具调用 {name, kind, ok, status, ms}
     trace_llm_fallback = False              # 是否走了规则回复
     trace_summarized = False                # 本回合是否触发了摘要
-    trace_tokens: Dict[str, int] = {"system": 0, "history": 0, "user": 0}
+    trace_tokens: Dict[str, int] = {"system": 0, "history": 0, "state": 0, "user": 0}
     trace_first_delta_at: Optional[float] = None
     trace_emitted = False                   # turn_trace 只出一条（finally 兜底防重发）
 
@@ -276,14 +276,19 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                                         store_dir=store_dir)   # 确定性遗忘（半衰期修剪，不走 LLM）
                 # 包一层只为数摘要调用（trace 的 summarized），不改 build_history 行为
                 probe = _SummarizeProbe(llm)
-                history = await asyncio.to_thread(chatlog.build_history, npc_id, probe,
-                                                  store_dir=store_dir)
+                history = await asyncio.to_thread(
+                    chatlog.build_history, npc_id, probe,
+                    token_budget=context.budget_history(),   # 对话层预算（任务 3）
+                    store_dir=store_dir)
                 trace_summarized = probe.chat_calls > 0
-                # 装配抽到 context.assemble（任务 2，纯函数、行为不变）；
-                # trace 的 tokens 分层直接取它的 section_tokens
-                assembled = context.assemble(persona, observation, history, message)
+                # 装配走 context.assemble（任务 3：system 固定层，观测等易变块挪到
+                # user 前缀并受预算约束）；trace 的 tokens 分层直接取它的 section_tokens
+                assembled = context.assemble(persona, observation, history, message,
+                                             state_budget=context.budget_state())
                 messages = assembled.messages
                 trace_tokens.update(assembled.section_tokens)
+                for cut in assembled.truncated:            # 截断绝不静默：每层一条日志
+                    log.warning("context_section_truncated", npc_id=npc_id, **cut)
                 tool_defs = tools.build_tool_definitions(capabilities)
 
                 # 工具轮预算用满后追加一次**收尾轮**（不带工具）：否则模型可能连续几轮只调工具，

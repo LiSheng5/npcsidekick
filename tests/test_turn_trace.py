@@ -65,8 +65,9 @@ def test_turn_trace_two_tool_calls_records_rounds_and_tools(tmp_store, write_per
     assert trace["first_token_ms"] is not None and trace["first_token_ms"] >= 0
     assert trace["total_ms"] >= trace["first_token_ms"]
     tokens = trace["tokens"]
-    assert set(tokens) == {"system", "history", "user", "total"}
-    assert tokens["total"] == tokens["system"] + tokens["history"] + tokens["user"]
+    assert set(tokens) == {"system", "history", "state", "user", "total"}
+    assert tokens["total"] == (tokens["system"] + tokens["history"]
+                               + tokens["state"] + tokens["user"])
     assert tokens["system"] > 0 and tokens["user"] > 0
     # 默认只记长度，不记玩家原文与台词原文（隐私 + 日志体积）
     assert trace["message_len"] == len("做碗面")

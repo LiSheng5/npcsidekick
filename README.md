@@ -98,6 +98,9 @@ v4 为此做了三处提示：① 页面上红字 + 「删掉明文 key」按钮
 | `NPC_BASE_URL` | 无 | OpenAI 兼容端点；不设时按模型名猜厂商兜底，猜不出 = 未配置 |
 | `NPC_LLM_EXTRA_BODY` | 无 | 一段 JSON 原样并入请求体（各家方言自己填，覆盖 v4 的默认参数） |
 | `NPC_REASONING_EFFORT` | 未设置 | 思考模式：`off`/`disabled`/`none` 显式关；`low`/`medium`/`high`/`max` 开；未设置 = 服务端默认 |
+| `NPC_BUDGET_STATE` | `800` | 上下文「当前情况」（观测）块的 token 预算，超了截断并留标记 |
+| `NPC_BUDGET_MEMORY` | `600` | 上下文「相关记忆」块的 token 预算（超了截断并留标记） |
+| `NPC_BUDGET_HISTORY` | `4000` | 对话层（聊天记录）的 token 预算；**调小时建议把 `NPC_SUMMARY_TOKEN_THRESHOLD` 一并调小** |
 | `NPC_SUMMARY_TOKEN_THRESHOLD` | `20000` | 滚动摘要触发阈值（绝对 token 数） |
 | `NPC_SUMMARY_KEEP_RECENT` | `8` | 摘要后仍逐字保留的最近轮数 |
 | `NPC_MOD_HEARTBEAT_TIMEOUT` | `60` | mod 心跳超时（秒）：超时视离线，不再调任何动作 |
