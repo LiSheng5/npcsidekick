@@ -40,7 +40,7 @@ import tts
 # 单次对话内的工具调用轮次上限（记忆 + 动作共用这个预算，防跑飞）
 MAX_TOOL_ROUNDS = 3
 
-# 记忆检索返回条数（recall 工具）
+# 记忆检索返回条数（recall 工具 + 回合开始的记忆预取共用这个 top-k）
 RECALL_TOP_K = 5
 
 
@@ -214,6 +214,40 @@ class _SummarizeProbe:
         return getattr(self._inner, name)
 
 
+# ── 记忆预取（任务 4）────────────────────────────────────
+# 回合开始、第一次调用 LLM 之前，按玩家这句话确定性预取 top-k 记忆放进
+# 【相关记忆】块 —— 不再靠 LLM 多花一轮 recall。recall 工具保留不动，仍用于深挖。
+# 没有命中时整块省略（format_for_context 的空结果文案「（没有想起相关的事）」
+# **不进**上下文）。预取失败只告警，回合照常（不带记忆块）。
+
+def _prefetch_memory_text(npc_id: str, message: str, persona: Dict[str, Any],
+                          store_dir: Optional[Path] = None) -> str:
+    """确定性预取相关记忆，返回格式化好的块正文（无命中/出错 → ""）。
+
+    同步 IO（读记忆卡）—— 调用方包 `asyncio.to_thread`。本函数不抛。
+    """
+    try:
+        entries = memory.retrieve(npc_id, message, top_k=RECALL_TOP_K,
+                                  synonyms=persona.get("entity_synonyms"),
+                                  store_dir=store_dir)
+        # pinned 条目不论检索得分总是进记忆块（**需确认**，受预算约束）——
+        # 排在块首，块被截断时先砍后面按得分检索来的条目
+        seen = {e.get("id") for e in entries}
+        pinned = [e for e in memory.load_card(npc_id, store_dir=store_dir)
+                  if e.get("pinned")]
+        for e in reversed(pinned):
+            if e.get("id") not in seen:
+                entries.insert(0, e)
+                seen.add(e.get("id"))
+    except Exception as exc:
+        log.warning("memory_prefetch_failed", npc_id=npc_id,
+                    error=scrub(str(exc))[:120])
+        return ""
+    if not entries:
+        return ""
+    return memory.format_for_context(entries)
+
+
 # ── 回合 ─────────────────────────────────────────────────
 
 async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
@@ -234,7 +268,6 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     - `store_dir` = 记忆卡/聊天记录的运行时数据目录（None = 工程默认 store/）
     """
     t_start = time.perf_counter()           # 回合开始（含等锁）—— trace 的计时基准
-    t_start = time.perf_counter()           # 回合开始（含等锁）—— trace 的计时基准
     full_parts: List[str] = []
     executed: List[Dict[str, Any]] = []     # 本回合已执行的动作（流末尾出 action 帧）
     emitted = False
@@ -244,7 +277,8 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     trace_tools: List[Dict[str, Any]] = []  # 每次工具调用 {name, kind, ok, status, ms}
     trace_llm_fallback = False              # 是否走了规则回复
     trace_summarized = False                # 本回合是否触发了摘要
-    trace_tokens: Dict[str, int] = {"system": 0, "history": 0, "state": 0, "user": 0}
+    trace_tokens: Dict[str, int] = {"system": 0, "history": 0, "state": 0,
+                                    "memory": 0, "user": 0}
     trace_first_delta_at: Optional[float] = None
     trace_emitted = False                   # turn_trace 只出一条（finally 兜底防重发）
 
@@ -276,6 +310,9 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                                         store_dir=store_dir)   # 确定性遗忘（半衰期修剪，不走 LLM）
                 # 包一层只为数摘要调用（trace 的 summarized），不改 build_history 行为
                 probe = _SummarizeProbe(llm)
+                # 记忆预取（任务 4）：第一次调用 LLM 之前确定性取 top-k，失败只告警
+                memory_text = await asyncio.to_thread(
+                    _prefetch_memory_text, npc_id, message, persona, store_dir)
                 history = await asyncio.to_thread(
                     chatlog.build_history, npc_id, probe,
                     token_budget=context.budget_history(),   # 对话层预算（任务 3）
@@ -284,7 +321,9 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 # 装配走 context.assemble（任务 3：system 固定层，观测等易变块挪到
                 # user 前缀并受预算约束）；trace 的 tokens 分层直接取它的 section_tokens
                 assembled = context.assemble(persona, observation, history, message,
-                                             state_budget=context.budget_state())
+                                             state_budget=context.budget_state(),
+                                             memory_text=memory_text,
+                                             memory_budget=context.budget_memory())
                 messages = assembled.messages
                 trace_tokens.update(assembled.section_tokens)
                 for cut in assembled.truncated:            # 截断绝不静默：每层一条日志
