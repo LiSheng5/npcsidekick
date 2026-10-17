@@ -40,7 +40,11 @@ def new_call_id() -> str:
 
 
 class PendingActions:
-    """`call_id -> {call_id, npc_id, action, params, mod, created_at}`，插入序即 FIFO 序。"""
+    """`call_id -> {call_id, npc_id, action, params, mod, state, created_at}`，插入序即 FIFO 序。
+
+    `state`（任务 5）：`running`（mod 已受理、还在做）/ `unknown`（同步等待超时、
+    没收到回应，不确定做没做成）—— 近况层据此把两类**分开写**（「进行中」/「待确认」）。
+    """
 
     def __init__(self, ttl: Optional[float] = None) -> None:
         self._items: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
@@ -55,17 +59,33 @@ class PendingActions:
 
     def register(self, call_id: str, npc_id: str, action: str,
                  params: Optional[Dict[str, Any]] = None,
-                 mod: Optional[str] = None) -> Dict[str, Any]:
-        """登记一条待定动作（`running` / 超时未知）。同 id 重复登记 = 覆盖。"""
+                 mod: Optional[str] = None,
+                 state: str = "unknown") -> Dict[str, Any]:
+        """登记一条待定动作。同 id 重复登记 = 覆盖。
+
+        `state` = `running`（mod 回了「还在做」）或 `unknown`（同步等待超时）。
+        """
         info: Dict[str, Any] = {
             "call_id": call_id, "npc_id": npc_id, "action": action,
             "params": dict(params) if isinstance(params, dict) else {},
-            "mod": mod, "created_at": time.time(),
+            "mod": mod, "state": state, "created_at": time.time(),
         }
         self._items[call_id] = info
         log.info("pending_registered", call_id=call_id, npc_id=npc_id, action=action,
-                 pending=len(self._items))
+                 state=state, pending=len(self._items))
         return info
+
+    def alive(self, npc_id: Optional[str] = None,
+              now: Optional[float] = None) -> List[Dict[str, Any]]:
+        """未过期的待定动作（按登记序），可按 npc_id 过滤 —— 任务 5 近况层读这个。
+
+        过期条目由调用方先 `expire()` 清理（写失败卡），这里只做纯读。
+        """
+        moment = time.time() if now is None else now
+        ttl = self.ttl()
+        return [info for info in self._items.values()
+                if (npc_id is None or info["npc_id"] == npc_id)
+                and moment - float(info.get("created_at", moment)) <= ttl]
 
     def resolve(self, call_id: str) -> Optional[Dict[str, Any]]:
         """按 `call_id` 精确取出并移除（取不到 = 重复回报 / 已过期 / 未知）。"""

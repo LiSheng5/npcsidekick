@@ -80,7 +80,11 @@ def test_memory_prefetch_empty_card_has_no_block(tmp_store, write_persona,
 
 def test_memory_prefetch_excludes_action_category(tmp_store, write_persona,
                                                   make_app_client, make_provider):
-    """category == "action" 的条目（动作结果卡）不进记忆块 —— 近况归任务 5 管。"""
+    """category == "action" 的条目（动作结果卡）不进【相关记忆】块 —— 近况归任务 5 管。
+
+    改写说明（任务 5）：动作结果现在出现在【最近发生】块，旧断言"整个 user 里不出现"
+    与新行为冲突，收窄为"不进【相关记忆】块"，并钉住它进了【最近发生】。
+    """
     memory.add_action_result("cang", "cook", True, "面煮好了", store_dir=tmp_store)
     memory.add_entry("cang", "玩家上次说爱吃面", importance=8, store_dir=tmp_store)
     write_persona("cang")
@@ -91,9 +95,11 @@ def test_memory_prefetch_excludes_action_category(tmp_store, write_persona,
 
     assert text_of(res) == "嗯。"
     user = provider.stream_calls[0]["messages"][-1]["content"]
-    assert "玩家上次说爱吃面" in user
-    assert "面煮好了" not in user                          # action 类不进块
-    assert "完成:" not in user
+    mem_section = user[user.index("【相关记忆】"):user.index("【最近发生】")]
+    assert "玩家上次说爱吃面" in mem_section
+    assert "面煮好了" not in mem_section                    # action 类不进记忆块
+    assert "完成:" not in mem_section
+    assert "完成: 面煮好了" in user                        # 但进了【最近发生】（任务 5）
 
 
 def test_memory_prefetch_recent_n_default_5(tmp_store, write_persona,
@@ -232,9 +238,13 @@ def test_memory_prefetch_ignores_synonyms_and_query(tmp_store, write_persona,
 def test_memory_prefetch_pinned_always_in_front(tmp_store, write_persona,
                                                 make_app_client, make_provider):
     """改写自旧的「pinned 无论相关度都进」：简化方案下 pinned 恒进且排块首，
-    不占「最近 N 条」名额（其余断言改为钉住排序与排除 action 类）。"""
+    不占「最近 N 条」名额（其余断言改为钉住排序与排除 action 类）。
+
+    改写说明（任务 5）：action 类条目现在进【最近发生】块，旧断言"整个 user 里不出现"
+    与新行为冲突，收窄为"不进【相关记忆】块"，并钉住它进了【最近发生】。
+    """
     memory.add_entry("cang", "面煮好了", importance=5,
-                     category="action", store_dir=tmp_store)   # action 类不进
+                     category="action", store_dir=tmp_store)   # action 类不进记忆块
     memory.add_entry("cang", "普通的一条", importance=5, store_dir=tmp_store)
     memory.add_entry("cang", "永远记得的约定：日落关城门", importance=5,
                      category="promise", pinned=True, store_dir=tmp_store)
@@ -248,9 +258,11 @@ def test_memory_prefetch_pinned_always_in_front(tmp_store, write_persona,
     user = provider.stream_calls[0]["messages"][-1]["content"]
     assert "【相关记忆】" in user
     assert "日落关城门" in user
-    lines = [ln for ln in user.splitlines() if ln.startswith("- ")]
+    mem_section = user[user.index("【相关记忆】"):user.index("【最近发生】")]
+    lines = [ln for ln in mem_section.splitlines() if ln.startswith("- ")]
     assert lines[0] == "- 永远记得的约定：日落关城门"    # pinned 排最前
-    assert "面煮好了" not in user                        # action 类被排除
+    assert "面煮好了" not in mem_section                 # action 类不进记忆块
+    assert "面煮好了" in user                           # 但进了【最近发生】（任务 5）
 
 
 def test_memory_prefetch_recorded_in_trace(tmp_store, write_persona, make_app_client,

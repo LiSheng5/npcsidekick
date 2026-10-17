@@ -261,6 +261,115 @@ def _prefetch_memory_text(npc_id: str,
     return memory.format_for_context(kept), hits, filtered
 
 
+# ── 近况层（任务 5）：最近动作结果 + 进行中 / 待确认 ──────────
+# 【最近发生】块的三部分：
+#   1. 最近动作结果：category == "action" 的记忆条目（add_action_result 写的卡），
+#      最近 N 条且在最近 M 分钟内（NPC_RECENT_RESULTS=5 / NPC_RECENT_MINUTES=30，**需确认**）
+#   2. 进行中：pending 里 mod 已受理（state=running）且未过期的 —— 「…— 进行中，已 X 秒」
+#   3. 待确认：同步等待超时、至今没回报（state=unknown）—— 「…— 没收到回应，不确定是否已做成，已 X 秒」
+# 两类 pending **分开写**，不能都写成"进行中"。措辞先用最朴素的中文，作者之后会改。
+# 顺序：过期清理已在 /api/talk 开始时做完（server.expire_pending_actions，先写
+# 「没做成: 一直没等到结果」卡再移除），这里只读 pending.alive()（未过期的）——
+# 不会把已过期的条目显示成进行中。
+
+# 最近动作结果的条数 N 与时间窗 M 分钟（**需确认**默认 5 / 30）：现读可热切。
+DEFAULT_RECENT_RESULTS = 5
+DEFAULT_RECENT_MINUTES = 30.0
+_ENV_RECENT_RESULTS = "NPC_RECENT_RESULTS"
+_ENV_RECENT_MINUTES = "NPC_RECENT_MINUTES"
+
+_PARAMS_SUMMARY_MAX = 60        # 参数摘要截断到约 60 字符
+
+
+def recent_results_limit() -> int:
+    """近况层「最近动作结果」的条数上限（现读，可热切）：NPC_RECENT_RESULTS，默认 5。"""
+    return max(0, int(env_num(_ENV_RECENT_RESULTS, DEFAULT_RECENT_RESULTS, cast=int)))
+
+
+def recent_results_minutes() -> float:
+    """近况层「最近动作结果」的时间窗（现读，可热切）：NPC_RECENT_MINUTES 分钟，默认 30。"""
+    return max(0.0, env_num(_ENV_RECENT_MINUTES, DEFAULT_RECENT_MINUTES))
+
+
+def _params_summary(params: Any) -> str:
+    """动作参数 → 摘要文本（k=v 用「，」连），截断到约 60 字符；没参数 → ""。"""
+    if not isinstance(params, dict) or not params:
+        return ""
+    text = "，".join(f"{k}={v}" for k, v in params.items())
+    return text if len(text) <= _PARAMS_SUMMARY_MAX else text[:_PARAMS_SUMMARY_MAX] + "…"
+
+
+def _pending_label(action: str, params: Any) -> str:
+    """「动作名(参数摘要)」；没参数就只写动作名。"""
+    summary = _params_summary(params)
+    return f"{action}({summary})" if summary else str(action)
+
+
+def _pending_lines(infos: List[Dict[str, Any]],
+                   now: Optional[float] = None) -> Tuple[List[str], List[str]]:
+    """pending 条目 → (进行中行, 待确认行)，按 state **分开写**（任务 5）。"""
+    moment = time.time() if now is None else now
+    running: List[str] = []
+    unknown: List[str] = []
+    for info in infos:
+        secs = max(0, int(moment - float(info.get("created_at", moment))))
+        label = _pending_label(info.get("action", ""), info.get("params"))
+        if str(info.get("state") or "unknown") == "running":
+            running.append(f"{label} — 进行中，已 {secs} 秒")
+        else:
+            unknown.append(f"{label} — 没收到回应，不确定是否已做成，已 {secs} 秒")
+    return running, unknown
+
+
+def _recent_result_lines(npc_id: str, store_dir: Optional[Path] = None,
+                         now: Optional[float] = None) -> List[str]:
+    """最近 M 分钟内 category == "action" 的记忆条目，取最近 N 条（新→旧）→ 行文本。
+
+    行文本 = 卡片正文原样（「完成: …」/「没做成: …」由 add_action_result 写卡时定）。
+    同步 IO（读记忆卡）—— 调用方包 `asyncio.to_thread`。读卡失败只告警 → 空列表。
+    """
+    limit = recent_results_limit()
+    if limit <= 0:
+        return []
+    moment = time.time() if now is None else now
+    window = recent_results_minutes() * 60.0
+    try:
+        entries = memory.load_card(npc_id, store_dir=store_dir)
+    except Exception as exc:
+        log.warning("recent_results_failed", npc_id=npc_id,
+                    error=scrub(str(exc))[:120])
+        return []
+    action = [e for e in entries if e.get("category") == "action"]
+    action.sort(key=lambda e: float(e.get("created_at", 0.0)), reverse=True)
+    lines: List[str] = []
+    for e in action:
+        if moment - float(e.get("created_at", moment)) > window:
+            break                                  # 已按新→旧排，出窗后面更旧
+        text = str(e.get("content") or "").strip()
+        if text:
+            lines.append(text)
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _recent_layer(npc_id: str, pending_infos: List[Dict[str, Any]],
+                  store_dir: Optional[Path] = None,
+                  now: Optional[float] = None) -> Tuple[List[str], List[str], List[str]]:
+    """近况层三组行（任务 5）→ (最近动作结果, 进行中, 待确认)。
+
+    同步 IO（读记忆卡）—— 调用方包 `asyncio.to_thread`。本函数不抛：
+    近况只是参考资料，取不到就少一块，绝不连累回合。
+    """
+    moment = time.time() if now is None else now
+    try:
+        running, unknown = _pending_lines(pending_infos, moment)
+        return _recent_result_lines(npc_id, store_dir, moment), running, unknown
+    except Exception as exc:                        # 防御：上面各步已各自兜底
+        log.warning("recent_layer_failed", npc_id=npc_id, error=scrub(str(exc))[:120])
+        return [], [], []
+
+
 # ── 回合 ─────────────────────────────────────────────────
 
 async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
@@ -329,17 +438,26 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 # 记忆预取（任务 4，简化方案）：pinned + 最近 N 条，失败只告警
                 memory_text, trace_mem_hits, trace_mem_filtered = await asyncio.to_thread(
                     _prefetch_memory_text, npc_id, store_dir)
+                # 近况层（任务 5）：最近动作结果 + 进行中 / 待确认。pending.alive() 是纯内存
+                # 读（过期清理已在 /api/talk 开始时做完），最近动作结果那次读卡挪线程池
+                pending_infos = pending_actions.alive(npc_id) if pending_actions else []
+                recent_results, recent_running, recent_unknown = await asyncio.to_thread(
+                    _recent_layer, npc_id, pending_infos, store_dir)
                 history = await asyncio.to_thread(
                     chatlog.build_history, npc_id, probe,
                     token_budget=context.budget_history(),   # 对话层预算（任务 3）
                     store_dir=store_dir)
                 trace_summarized = probe.chat_calls > 0
                 # 装配走 context.assemble（任务 3：system 固定层，观测等易变块挪到
-                # user 前缀并受预算约束）；trace 的 tokens 分层直接取它的 section_tokens
+                # user 前缀并受预算约束；任务 5 近况块与观测共享 state 预算）；
+                # trace 的 tokens 分层直接取它的 section_tokens
                 assembled = context.assemble(persona, observation, history, message,
                                              state_budget=context.budget_state(),
                                              memory_text=memory_text,
-                                             memory_budget=context.budget_memory())
+                                             memory_budget=context.budget_memory(),
+                                             recent_results=recent_results,
+                                             recent_running=recent_running,
+                                             recent_unknown=recent_unknown)
                 messages = assembled.messages
                 trace_tokens.update(assembled.section_tokens)
                 for cut in assembled.truncated:            # 截断绝不静默：每层一条日志
@@ -417,10 +535,13 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                             tool_text = action_tool_text(c["name"], outcome)
                             if outcome["status"] in ("running", "unknown"):
                                 # 结果还没定（mod 说在做 / 超时没等到回应）：登记 call_id 等 §4 的回报，
-                                # 不写卡 —— 超时不能当成"没做成"（mod 可能已经做了）
+                                # 不写卡 —— 超时不能当成"没做成"（mod 可能已经做了）。
+                                # state 记下"是 running 还是 unknown"（任务 5）：近况层据此把
+                                # 「进行中」和「待确认」分开写
                                 if pending_actions is not None:
                                     pending_actions.register(outcome["call_id"], npc_id, c["name"],
-                                                             c["args"], mod)
+                                                             c["args"], mod,
+                                                             state=outcome["status"])
                             else:
                                 # 当场写卡（协议 §3）：成功/失败都写
                                 try:
