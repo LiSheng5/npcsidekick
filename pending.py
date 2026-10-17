@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import json
 import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
@@ -37,6 +38,12 @@ def new_call_id() -> str:
     **不复用** LLM 的 tool_call id —— 那个由模型侧生成，不保证唯一（跨轮重复、缺失都可能）。
     """
     return uuid4().hex
+
+
+def _norm_params(params: Any) -> str:
+    """参数的规范化 JSON 文本（键排序、紧凑分隔）—— 只用来比较"参数是否相同"。"""
+    data = params if isinstance(params, dict) else {}
+    return json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
 class PendingActions:
@@ -86,6 +93,19 @@ class PendingActions:
         return [info for info in self._items.values()
                 if (npc_id is None or info["npc_id"] == npc_id)
                 and moment - float(info.get("created_at", moment)) <= ttl]
+
+    def find_in_flight(self, npc_id: str, action: str,
+                       params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """同 NPC 下「动作名 + 参数都相同」的在途条目（`running` / `unknown` 都算），没有 → None。
+
+        重复动作保护（任务 7）：LLM 自己重发同一动作会生成**新的** `call_id`，
+        `call_id` 幂等拦不住，只能按名 + 参（规范化 JSON 比较）识别。只读，不移除。
+        """
+        target = _norm_params(params)
+        for info in self.alive(npc_id):
+            if info["action"] == action and _norm_params(info.get("params")) == target:
+                return info
+        return None
 
     def resolve(self, call_id: str) -> Optional[Dict[str, Any]]:
         """按 `call_id` 精确取出并移除（取不到 = 重复回报 / 已过期 / 未知）。"""

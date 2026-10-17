@@ -51,6 +51,20 @@ def test_resolve_legacy_takes_earliest_by_npc_and_action():
     assert len(table) == 1                              # ali 那条不受影响
 
 
+def test_find_in_flight_matches_name_and_normalized_params():
+    """任务 7 重复动作保护：名 + 参（规范化 JSON，键序无关）都相同才算在途重复。"""
+    table = pending.PendingActions()
+    table.register("c1", "cang", "cook", {"dish": "面", "fire": "大火"}, "mygame")
+
+    assert table.find_in_flight("cang", "cook", {"fire": "大火", "dish": "面"})["call_id"] == "c1"
+    assert table.find_in_flight("cang", "cook", {"dish": "面"}) is None    # 参数不同 = 新指令
+    assert table.find_in_flight("cang", "goto", {"dish": "面"}) is None    # 动作名不同
+    assert table.find_in_flight("ali", "cook", {"fire": "大火", "dish": "面"}) is None
+    assert table.find_in_flight("cang", "cook") is None                  # 空参 ≠ 有参
+    table.register("c2", "cang", "goto", {}, "mygame")
+    assert table.find_in_flight("cang", "goto")["call_id"] == "c2"       # 空参对空参
+
+
 def test_expire_returns_over_ttl_and_keeps_fresh():
     table = pending.PendingActions(ttl=10.0)
     old = table.register("c1", "cang", "cook", {"dish": "面"})

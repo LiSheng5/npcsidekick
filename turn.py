@@ -143,18 +143,30 @@ async def _http_execute(url: str, payload: Dict[str, Any], timeout: float) -> Di
 
 async def invoke_action(execute_url: str, npc_id: str, name: str, args: Dict[str, Any],
                         mod: Optional[str], timeout: float,
-                        executor: Optional[Any] = None) -> Dict[str, Any]:
+                        executor: Optional[Any] = None,
+                        pending_actions: Optional[pending.PendingActions] = None) -> Dict[str, Any]:
     """同步请求 mod 执行一个动作，返回统一形态 `{ok, status, note, call_id}`。
 
     - 连不上 / 响应非法 → `ok=False` 的失败（请求大概率没到 mod），**绝不假装做成**（协议 §3）
     - **超时** → `status="unknown"`：请求可能已经到 mod 并被执行了，只是没等到回应，
       故不当作失败，由调用方登记待定（`pending`）等回报，TTL 到点再算账
+    - **重复动作保护**（任务 7）：`pending_actions` 里已有同 NPC 同名同参的在途条目
+      （`running` / `unknown`）→ 不发给 mod，直接回 `status="deduped"`（调用方据此
+      不写卡、不进 action 帧）。LLM 重发同一动作会生成新的 `call_id`，幂等拦不住，
+      只能按名 + 参识别；参数不同 = 新指令，正常放行
     - `status`：`done`（已做完，默认）/ `running`（mod 说还在做）/ `unknown`（超时未定）
-      / `failed`（大脑侧失败 —— 只给超时以外那些确定没做成的）
+      / `failed`（大脑侧失败 —— 只给超时以外那些确定没做成的）/ `deduped`（重复，没下发）
     - `call_id`：本次调用的关联 id（`uuid4().hex`，随请求发给 mod，Mod 回报时原样带回）——
       不复用 LLM 的 tool_call id，那个不保证唯一
     - `executor` 可注入（测试用假实现）；缺省走真实 HTTP（`_http_execute`）
     """
+    if pending_actions is not None:
+        dup = pending_actions.find_in_flight(npc_id, name, args)
+        if dup is not None:
+            log.warning("action_deduped", npc_id=npc_id, action=name,
+                        state=dup.get("state"), call_id=dup.get("call_id"))
+            return {"ok": False, "status": "deduped", "call_id": "",
+                    "note": "这件事还在进行或待确认，这次没有重复下达"}
     call_id = pending.new_call_id()
     payload = {"npc_id": npc_id, "action": name, "params": args, "mod": mod,
                "call_id": call_id}
@@ -190,6 +202,9 @@ def action_tool_text(name: str, outcome: Dict[str, Any]) -> str:
     if status == "unknown":
         # 同步等待超时：mod 可能已经做了 —— 只说"不知道"，别替它下结论
         return f"{name} 没等到回应，不确定是否已经做成"
+    if status == "deduped":
+        # 重复动作保护（任务 7）：同名同参的动作还在进行/待确认，这次没重复下发
+        return note or "这件事还在进行或待确认，这次没有重复下达"
     if outcome.get("ok"):
         return note or f"{name} 已完成"
     return f"没做成: {note or name}"
@@ -534,35 +549,41 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                             # 动作工具：同步调 mod 的 /execute，结果当场回上下文继续推理
                             outcome = await invoke_action(execute_url, npc_id, c["name"],
                                                           c["args"], mod, execute_timeout(),
-                                                          executor)
+                                                          executor, pending_actions)
                             trace_tools.append(_trace_tool(
                                 c["name"], capabilities, bool(outcome["ok"]),
                                 outcome["status"], (time.perf_counter() - t_tool) * 1000))
-                            # 记录进 action 帧：name / params 之外再带上结果（ok / status）与 call_id，
-                            # 否则失败的动作在帧里看起来跟做成了一样（mod 依旧不需要照它做任何事）
-                            executed.append({"name": c["name"], "params": c["args"],
-                                             "ok": bool(outcome["ok"]),
-                                             "status": outcome["status"],
-                                             "call_id": outcome["call_id"]})
                             tool_text = action_tool_text(c["name"], outcome)
-                            if outcome["status"] in ("running", "unknown"):
-                                # 结果还没定（mod 说在做 / 超时没等到回应）：登记 call_id 等 §4 的回报，
-                                # 不写卡 —— 超时不能当成"没做成"（mod 可能已经做了）。
-                                # state 记下"是 running 还是 unknown"（任务 5）：近况层据此把
-                                # 「进行中」和「待确认」分开写
-                                if pending_actions is not None:
-                                    pending_actions.register(outcome["call_id"], npc_id, c["name"],
-                                                             c["args"], mod,
-                                                             state=outcome["status"])
+                            if outcome["status"] == "deduped":
+                                # 重复动作保护（任务 7）：同名同参的在途动作没下发给 mod ——
+                                # 不写卡、不登记、不进 action 帧，只回上面那条工具结果
+                                pass
                             else:
-                                # 当场写卡（协议 §3）：成功/失败都写
-                                try:
-                                    await asyncio.to_thread(
-                                        memory.add_action_result, npc_id, c["name"],
-                                        outcome["ok"], outcome["note"], store_dir=store_dir)
-                                except Exception as exc:    # 写卡失败不连累这一回合
-                                    log.warning("action_memory_write_failed", npc_id=npc_id,
-                                                action=c["name"], error=scrub(str(exc))[:120])
+                                # 记录进 action 帧：name / params 之外再带上结果（ok / status）与 call_id，
+                                # 否则失败的动作在帧里看起来跟做成了一样（mod 依旧不需要照它做任何事）
+                                executed.append({"name": c["name"], "params": c["args"],
+                                                 "ok": bool(outcome["ok"]),
+                                                 "status": outcome["status"],
+                                                 "call_id": outcome["call_id"]})
+                                if outcome["status"] in ("running", "unknown"):
+                                    # 结果还没定（mod 说在做 / 超时没等到回应）：登记 call_id 等 §4 的回报，
+                                    # 不写卡 —— 超时不能当成"没做成"（mod 可能已经做了）。
+                                    # state 记下"是 running 还是 unknown"（任务 5）：近况层据此把
+                                    # 「进行中」和「待确认」分开写
+                                    if pending_actions is not None:
+                                        pending_actions.register(outcome["call_id"], npc_id,
+                                                                 c["name"], c["args"], mod,
+                                                                 state=outcome["status"])
+                                else:
+                                    # 当场写卡（协议 §3）：成功/失败都写
+                                    try:
+                                        await asyncio.to_thread(
+                                            memory.add_action_result, npc_id, c["name"],
+                                            outcome["ok"], outcome["note"], store_dir=store_dir)
+                                    except Exception as exc:    # 写卡失败不连累这一回合
+                                        log.warning("action_memory_write_failed", npc_id=npc_id,
+                                                    action=c["name"],
+                                                    error=scrub(str(exc))[:120])
                         else:
                             # 同义词族**按请求显式传入**（取自本 NPC 的角色卡）——
                             # 检索没有进程级全局表，多 NPC 并发时互不污染
