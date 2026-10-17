@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 store/
 avatars/
+out/
 api_key.txt
 # 内部工作文档：不进公开仓库（本地保留）
 .codebuddy/
