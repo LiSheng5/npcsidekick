@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -166,14 +167,48 @@ def load_summary(npc_id: str, store_dir: Optional[Path] = None) -> Dict[str, Any
 
 def _save_summary(npc_id: str, summary: str, covered: int,
                   store_dir: Optional[Path] = None) -> None:
+    """原子写摘要（先写 `.tmp` 再 `os.replace`，照 memory.save_card 的写法）——
+    后台摘要（任务 6）会和回合读取并发，不能让读到半截文件。"""
     path = summary_path(npc_id, store_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(
         {"summary": summary, "covered": covered, "updated_at": time.time()},
         ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # ── 滚动摘要（超阈值就把最旧的轮次压成一段）────────────────
+
+def _fold_plan(npc_id: str, keep_recent: Optional[int] = None,
+               store_dir: Optional[Path] = None):
+    """摘要计划 → `(turns, state, covered, cutoff)`；不该摘要 / 没得压 → None。纯读。
+
+    触发条件 = 总 token 超阈值，且保留窗口之外还有没被摘要覆盖的旧轮次。
+    `maybe_summarize` 与 `needs_summary` 共用这份判断，两处口径永远一致。
+    """
+    threshold = token_threshold()
+    keep = keep_recent_turns() if keep_recent is None else max(0, keep_recent)
+    turns = load_turns(npc_id, store_dir=store_dir)
+    total = sum(estimate_tokens(m["content"]) for m in turns)
+    if total <= threshold:
+        return None
+    state = load_summary(npc_id, store_dir=store_dir)
+    covered = min(state["covered"], len(turns))
+    cutoff = len(turns) - keep * 2
+    if cutoff <= covered:
+        return None                       # 没有可压的旧轮次
+    return turns, state, covered, cutoff
+
+
+def needs_summary(npc_id: str, keep_recent: Optional[int] = None,
+                  store_dir: Optional[Path] = None) -> bool:
+    """现在该不该摘要（超阈值且有可压的旧轮次）？纯读、不惊动 LLM。
+
+    回合结束用它决定要不要后台触发摘要（turn.py，任务 6）。
+    """
+    return _fold_plan(npc_id, keep_recent, store_dir) is not None
+
 
 def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None,
                     store_dir: Optional[Path] = None) -> Optional[str]:
@@ -182,19 +217,10 @@ def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None,
     成功返回新摘要文本并落盘（covered 推进）；失败不写任何东西，
     聊天记录一行不动。
     """
-    threshold = token_threshold()
-    keep = keep_recent_turns() if keep_recent is None else max(0, keep_recent)
-
-    turns = load_turns(npc_id, store_dir=store_dir)
-    total = sum(estimate_tokens(m["content"]) for m in turns)
-    if total <= threshold:
+    plan = _fold_plan(npc_id, keep_recent, store_dir)
+    if plan is None:
         return None
-
-    state = load_summary(npc_id, store_dir=store_dir)
-    covered = min(state["covered"], len(turns))
-    cutoff = len(turns) - keep * 2
-    if cutoff <= covered:
-        return None                       # 没有可压的旧轮次
+    turns, state, covered, cutoff = plan
 
     old = turns[covered:cutoff]
     payload = []
@@ -222,9 +248,16 @@ def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None,
 
 
 def build_history(npc_id: str, llm, token_budget: Optional[int] = None,
-                  store_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """拼上下文用的历史：可选的摘要消息 + 最近若干轮（受 token 预算约束）。"""
-    maybe_summarize(npc_id, llm, store_dir=store_dir)
+                  store_dir: Optional[Path] = None,
+                  summarize: bool = True) -> List[Dict[str, Any]]:
+    """拼上下文用的历史：可选的摘要消息 + 最近若干轮（受 token 预算约束）。
+
+    `summarize=True`（默认）= 旧行为：拼历史前同步摘要一次；
+    turn.py 传 `False`（任务 6）—— 摘要移出回合关键路径，改在回合结束后台触发，
+    回合内只读现成的摘要状态。
+    """
+    if summarize:
+        maybe_summarize(npc_id, llm, store_dir=store_dir)
     state = load_summary(npc_id, store_dir=store_dir)
     turns = load_turns(npc_id, store_dir=store_dir)
     covered = min(state["covered"], len(turns))

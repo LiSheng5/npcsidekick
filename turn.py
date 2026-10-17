@@ -195,23 +195,36 @@ def action_tool_text(name: str, outcome: Dict[str, Any]) -> str:
     return f"没做成: {note or name}"
 
 
-class _SummarizeProbe:
-    """把 LLM 包一层，只数 `build_history` 期间摘要用的 `chat` 调用（trace 的 `summarized`）。
+# ── 后台摘要（任务 6：摘要移出关键路径）────────────────────
+# 回合结束、`append_turn` 之后后台触发 `maybe_summarize` —— 摘要 LLM 不再挡玩家
+# 看到第一个字；摘要期间的新回合照常读旧摘要状态，由对话层预算保证上下文有界。
+# · 任务引用放 `_SUMMARY_TASKS`，跑完移除 —— 不留引用会被垃圾回收半路取消
+# · 同一 NPC 同时只允许一个摘要在跑（`_SUMMARIZING` 记正在摘要的 npc_id，跑完移除）
+# · 异常只告警，不上抛（`maybe_summarize` 内部已吞 LLM 错误，这里兜别的）
 
-    `build_history` 内部自己调 `maybe_summarize` 且不向外返回结果；
-    包一层计数是不动 chatlog 签名的最小做法。`chat_calls > 0` ⇔ 本回合触发了摘要。
-    """
+_SUMMARY_TASKS: set = set()
+_SUMMARIZING: set = set()
 
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.chat_calls = 0
 
-    def chat(self, *args: Any, **kwargs: Any) -> Any:
-        self.chat_calls += 1
-        return self._inner.chat(*args, **kwargs)
+async def _summarize_in_background(llm: Any, npc_id: str,
+                                   store_dir: Optional[Path]) -> None:
+    try:
+        await asyncio.to_thread(chatlog.maybe_summarize, npc_id, llm, store_dir=store_dir)
+    except Exception as exc:                    # 后台摘要失败绝不连累回合
+        log.warning("summary_background_failed", npc_id=npc_id, error=scrub(str(exc))[:120])
+    finally:
+        _SUMMARIZING.discard(npc_id)
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
+
+def _schedule_summary(llm: Any, npc_id: str, store_dir: Optional[Path]) -> bool:
+    """回合结束触发后台摘要；同 NPC 已有摘要在跑 / 没有 LLM → 跳过。返回是否启动。"""
+    if llm is None or npc_id in _SUMMARIZING:
+        return False
+    _SUMMARIZING.add(npc_id)                    # 先占位再起任务，同回合内不可重入
+    task = asyncio.create_task(_summarize_in_background(llm, npc_id, store_dir))
+    _SUMMARY_TASKS.add(task)
+    task.add_done_callback(_SUMMARY_TASKS.discard)
+    return True
 
 
 # ── 记忆预取（任务 4，简化方案）────────────────────────
@@ -398,7 +411,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     trace_rounds = 0                        # 实际发起的 LLM 轮数
     trace_tools: List[Dict[str, Any]] = []  # 每次工具调用 {name, kind, ok, status, ms}
     trace_llm_fallback = False              # 是否走了规则回复
-    trace_summarized = False                # 本回合是否触发了摘要
+    trace_summarized = False                # 本回合是否触发了摘要（任务 6：启动了后台摘要）
     trace_tokens: Dict[str, int] = {"system": 0, "history": 0, "state": 0,
                                     "memory": 0, "user": 0}
     trace_mem_hits = 0                      # 记忆预取进块条数（含 pinned）
@@ -430,11 +443,9 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 if llm is None:
                     raise RuntimeError("LLM 不可用")
                 # 同步阻塞调用一律挪到线程池：本函数是 SSE 生成器，跑在事件循环上，
-                # 直接调用会把整个服务器卡住 —— 尤其 build_history 内那次同步摘要 LLM 请求。
+                # 直接调用会把整个服务器卡住。
                 await asyncio.to_thread(memory.prune, npc_id,
                                         store_dir=store_dir)   # 确定性遗忘（半衰期修剪，不走 LLM）
-                # 包一层只为数摘要调用（trace 的 summarized），不改 build_history 行为
-                probe = _SummarizeProbe(llm)
                 # 记忆预取（任务 4，简化方案）：pinned + 最近 N 条，失败只告警
                 memory_text, trace_mem_hits, trace_mem_filtered = await asyncio.to_thread(
                     _prefetch_memory_text, npc_id, store_dir)
@@ -443,11 +454,12 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 pending_infos = pending_actions.alive(npc_id) if pending_actions else []
                 recent_results, recent_running, recent_unknown = await asyncio.to_thread(
                     _recent_layer, npc_id, pending_infos, store_dir)
+                # summarize=False（任务 6）：回合内不跑摘要 LLM，只读现成的摘要状态；
+                # 摘要在回合结束、append_turn 之后后台触发（见文末 _schedule_summary）
                 history = await asyncio.to_thread(
-                    chatlog.build_history, npc_id, probe,
+                    chatlog.build_history, npc_id, llm,
                     token_budget=context.budget_history(),   # 对话层预算（任务 3）
-                    store_dir=store_dir)
-                trace_summarized = probe.chat_calls > 0
+                    store_dir=store_dir, summarize=False)
                 # 装配走 context.assemble（任务 3：system 固定层，观测等易变块挪到
                 # user 前缀并受预算约束；任务 5 近况块与观测共享 state 预算）；
                 # trace 的 tokens 分层直接取它的 section_tokens
@@ -594,6 +606,12 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                     except Exception as exc:
                         log.warning("chatlog_append_failed", npc_id=npc_id,
                                     error=scrub(str(exc))[:120])
+
+        # 摘要移出关键路径（任务 6）：append_turn 之后才后台触发，不挡首字。
+        # 该不该摘要用 needs_summary（纯读）判断；同 NPC 已有摘要在跑就跳过。
+        # trace 的 summarized = 本回合启动了后台摘要（不是"摘要已经跑完"）。
+        needed = await asyncio.to_thread(chatlog.needs_summary, npc_id, store_dir=store_dir)
+        trace_summarized = needed and _schedule_summary(llm, npc_id, store_dir)
 
         for record in executed:                # 已执行动作的记录（mod 不需要照它做任何事）
             yield _sse({"type": "action", "action": record})

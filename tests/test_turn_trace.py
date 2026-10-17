@@ -147,7 +147,11 @@ def test_turn_trace_no_dialogue_flag(tmp_store, write_persona, make_app_client,
 
 def test_turn_trace_summarized_flag(tmp_store, write_persona, make_app_client,
                                     make_provider, monkeypatch, tmp_path):
-    """触发摘要的回合：summarized=true（摘要走 llm.chat，被探针数到）。"""
+    """触发摘要的回合：summarized=true（任务 6 后 = 本回合启动了后台摘要）。
+
+    摘要已移出关键路径：回合的 stream 先跑（台词「嗯。」），摘要的 llm.chat
+    在回合结束后台才跑（回「摘要内容」）—— 假 Provider 的 turns 顺序按此排列。
+    """
     trace_file = tmp_path / "trace.jsonl"
     monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
     monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
@@ -156,7 +160,7 @@ def test_turn_trace_summarized_flag(tmp_store, write_persona, make_app_client,
     for i in range(5):
         chatlog.append_turn("cang", "问" * 20 + str(i), "答" * 20 + str(i),
                             store_dir=tmp_store)
-    provider = make_provider(turns=[{"text": "摘要内容"}, {"text": "嗯。"}])
+    provider = make_provider(turns=[{"text": "嗯。"}, {"text": "摘要内容"}])
     client = make_app_client(provider=provider)
 
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"})
