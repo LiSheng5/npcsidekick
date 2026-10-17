@@ -18,7 +18,7 @@ def read_traces(path) -> list[dict]:
 
 
 TRACE_KEYS = {"npc_id", "rounds", "llm_fallback", "summarized", "no_dialogue",
-              "tools", "tokens", "first_token_ms", "total_ms",
+              "tools", "tokens", "memory_prefetch", "first_token_ms", "total_ms",
               "message_len", "reply_len"}
 
 

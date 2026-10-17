@@ -22,10 +22,10 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 from core.client import LLMClient
-from core.config_flags import env_text
+from core.config_flags import env_num, env_text
 from core.llm_runtime import scrub, thinking_effort
 from core.logging_config import log
 from core.personas import rule_reply
@@ -214,38 +214,51 @@ class _SummarizeProbe:
         return getattr(self._inner, name)
 
 
-# ── 记忆预取（任务 4）────────────────────────────────────
-# 回合开始、第一次调用 LLM 之前，按玩家这句话确定性预取 top-k 记忆放进
-# 【相关记忆】块 —— 不再靠 LLM 多花一轮 recall。recall 工具保留不动，仍用于深挖。
-# 没有命中时整块省略（format_for_context 的空结果文案「（没有想起相关的事）」
-# **不进**上下文）。预取失败只告警，回合照常（不带记忆块）。
+# ── 记忆预取（任务 4，简化方案）────────────────────────
+# 回合开始、第一次调用 LLM 之前，把「pinned 条目 + 最近 N 条」放进【相关记忆】块，
+# 不再靠 LLM 多花一轮 recall。recall 工具保留不动，仍用于深挖。
+# · 不做检索、不打分、不用 entity_synonyms —— 与这句话相不相关不判断，
+#   相关性深挖交给 recall 工具（memory.retrieve 语义不动）。
+# · 排除 category == "action" 的条目（动作结果另有任务 5 的近况层负责）。
+# · 没有可放的条目 → 整块省略（「（没有想起相关的事）」不进上下文）。
+# · 块内排序：pinned 在前、其余按 created_at 从新到旧 —— 预算截断从尾部砍，
+#   等于 pinned 最后才被砍（"截断时 pinned 优先"）。
+# 预取失败只告警，回合照常（不带记忆块）。
 
-def _prefetch_memory_text(npc_id: str, message: str, persona: Dict[str, Any],
-                          store_dir: Optional[Path] = None) -> str:
-    """确定性预取相关记忆，返回格式化好的块正文（无命中/出错 → ""）。
+# 「最近 N 条」的 N（**需确认**默认 5）：现读可热切。
+DEFAULT_PREFETCH_RECENT = 5
+_ENV_PREFETCH_RECENT = "NPC_PREFETCH_RECENT"
 
-    同步 IO（读记忆卡）—— 调用方包 `asyncio.to_thread`。本函数不抛。
+
+def prefetch_recent() -> int:
+    """记忆预取的「最近 N 条」（现读，可热切）：NPC_PREFETCH_RECENT，默认 5。"""
+    return max(0, int(env_num(_ENV_PREFETCH_RECENT, DEFAULT_PREFETCH_RECENT, cast=int)))
+
+
+def _prefetch_memory_text(npc_id: str,
+                          store_dir: Optional[Path] = None) -> Tuple[str, int, int]:
+    """pinned 条目 + 最近 N 条（都排除 action 类）→ (块正文, 进块条数, 被滤条数)。
+
+    无可放条目/出错 → ("", 0, …)（出错时被滤数无意义，记 0）。同步 IO（读记忆卡）——
+    调用方包 `asyncio.to_thread`。本函数不抛。
+    被滤条数 = 读到但没进块的条数（action 类 + 排不进最近 N 的）。pinned 不占 N 的名额。
     """
     try:
-        entries = memory.retrieve(npc_id, message, top_k=RECALL_TOP_K,
-                                  synonyms=persona.get("entity_synonyms"),
-                                  store_dir=store_dir)
-        # pinned 条目不论检索得分总是进记忆块（**需确认**，受预算约束）——
-        # 排在块首，块被截断时先砍后面按得分检索来的条目
-        seen = {e.get("id") for e in entries}
-        pinned = [e for e in memory.load_card(npc_id, store_dir=store_dir)
-                  if e.get("pinned")]
-        for e in reversed(pinned):
-            if e.get("id") not in seen:
-                entries.insert(0, e)
-                seen.add(e.get("id"))
+        card = memory.load_card(npc_id, store_dir=store_dir)
+        entries = [e for e in card if e.get("category") != "action"]
+        entries.sort(key=lambda e: float(e.get("created_at", 0.0)), reverse=True)
+        pinned = [e for e in entries if e.get("pinned")]
+        recent = [e for e in entries if not e.get("pinned")][:prefetch_recent()]
+        kept = pinned + recent        # pinned 在前，预算截断先砍尾部（新→旧）
+        hits = len(kept)
+        filtered = len(card) - hits
     except Exception as exc:
         log.warning("memory_prefetch_failed", npc_id=npc_id,
                     error=scrub(str(exc))[:120])
-        return ""
-    if not entries:
-        return ""
-    return memory.format_for_context(entries)
+        return "", 0, 0
+    if not kept:
+        return "", hits, filtered
+    return memory.format_for_context(kept), hits, filtered
 
 
 # ── 回合 ─────────────────────────────────────────────────
@@ -279,6 +292,8 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     trace_summarized = False                # 本回合是否触发了摘要
     trace_tokens: Dict[str, int] = {"system": 0, "history": 0, "state": 0,
                                     "memory": 0, "user": 0}
+    trace_mem_hits = 0                      # 记忆预取进块条数（含 pinned）
+    trace_mem_filtered = 0                  # 记忆预取被相关性阈值滤掉的条数
     trace_first_delta_at: Optional[float] = None
     trace_emitted = False                   # turn_trace 只出一条（finally 兜底防重发）
 
@@ -292,6 +307,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
             "no_dialogue": not emitted,
             "tools": trace_tools,
             "tokens": {**trace_tokens, "total": sum(trace_tokens.values())},
+            "memory_prefetch": {"hits": trace_mem_hits, "filtered": trace_mem_filtered},
             "first_token_ms": (None if trace_first_delta_at is None
                                else round((trace_first_delta_at - t_start) * 1000, 1)),
             "total_ms": round((time.perf_counter() - t_start) * 1000, 1),
@@ -310,9 +326,9 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                                         store_dir=store_dir)   # 确定性遗忘（半衰期修剪，不走 LLM）
                 # 包一层只为数摘要调用（trace 的 summarized），不改 build_history 行为
                 probe = _SummarizeProbe(llm)
-                # 记忆预取（任务 4）：第一次调用 LLM 之前确定性取 top-k，失败只告警
-                memory_text = await asyncio.to_thread(
-                    _prefetch_memory_text, npc_id, message, persona, store_dir)
+                # 记忆预取（任务 4，简化方案）：pinned + 最近 N 条，失败只告警
+                memory_text, trace_mem_hits, trace_mem_filtered = await asyncio.to_thread(
+                    _prefetch_memory_text, npc_id, store_dir)
                 history = await asyncio.to_thread(
                     chatlog.build_history, npc_id, probe,
                     token_budget=context.budget_history(),   # 对话层预算（任务 3）
