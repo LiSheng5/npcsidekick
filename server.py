@@ -227,6 +227,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
         except Exception as exc:                 # 无 key / 初始化失败 → 规则回复兜底
             log.warning("llm_unavailable", error=scrub(str(exc))[:160])
             llm_client = None
+    llm_holder["client"] = llm_client             # 自动创建的大脑也要进 holder（页面可热换）
 
     def lock_for(npc_id: str) -> asyncio.Lock:
         return locks.setdefault(npc_id, asyncio.Lock())
