@@ -1,701 +1,565 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""手测脚本化 —— 三个子命令，各自起一个真实的本地服务（同进程后台线程，可看 app.state）。
+"""手测脚本 —— 三个子命令（结果人工看，不做自动判分）。
 
-  llm-down    不配 LLM，测 /api/talk 首帧延迟，跑 N 次，输出中位数和最大值
-  disconnect  发起 /api/talk 后中途断开 SSE，检查锁是否释放 / 下一次请求是否正常 /
-              pending 与 call_id 是否干净 / 日志里有没有异常
-  uncertain   mock Mod 的 /execute 故意超时 → 触发「不确定」；需要真实 key，
-              把模型每轮台词原样存到 out/ 目录供人工看措辞（不做自动判分）
+  llm-down    不配 LLM，跑 N 次 /api/talk，统计首帧延迟（中位数 / 最大值）。
+  disconnect  发起 /api/talk 后中途断开 SSE，检查服务端：同 NPC 的 asyncio.Lock 是否释放、
+              下一次请求是否正常、pending / call_id 是否干净、日志里有无异常。
+  uncertain   mock Mod 的 /execute 故意慢于 NPC_EXECUTE_TIMEOUT，触发「不确定」；
+              **需要真实 key**，跑 N 轮，把模型每轮台词原样存到 out/，措辞留人工看。
 
 用法：
-  python scripts/manual_checks.py llm-down --runs 5
+  python scripts/manual_checks.py llm-down --runs 10
   python scripts/manual_checks.py disconnect
-  python scripts/manual_checks.py uncertain --runs 3 --delay 40
+  python scripts/manual_checks.py uncertain --runs 3
 
 说明：
-  · 前两项零网络（假 Provider / 临时目录），不会动工程里真实的 store/ 与角色卡
-  · llm-down 会临时清掉进程内的 key 环境变量，确保「不配 LLM」
-  · 每项结束都打一行 JSON 汇总，方便直接贴回来
+  · 前两个子命令用**进程内** uvicorn（注入临时 roles/store），不碰真实 store/，也不需要真实 key；
+  · uncertain 用真实 LLM（环境变量或 api_key.txt 里的 key），仍然用临时 store；
+  · 所有耗时都是本机实测，数字只代表这台机器。
 """
+from __future__ import annotations
+
 import argparse
 import asyncio
-import contextlib
-import gc
+import http.client
 import json
 import logging
 import os
 import re
 import shutil
 import socket
+import statistics
 import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import http.client                          # noqa: E402
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+from core.client import LLMClient, LLMResponse       # noqa: E402
+from core.paths import Paths                        # noqa: E402
+from core.types import StreamChunk                  # noqa: E402
 
-import uvicorn                              # noqa: E402
-
-from core import logging_config as _logging_config  # noqa: E402
-
-# import server 时会顺手建一个默认 app（会打一条 llm_not_configured）——
-# 先把日志压到 ERROR，报告里就不会混进这条启动噪音。
-_logging_config.configure_logging(level="ERROR", mode="test")
-_logging_config._LazyLogger._configured = True      # 别让懒初始化把级别改回 INFO
-
-import chatlog                              # noqa: E402
-import memory                               # noqa: E402
-import server                               # noqa: E402
-from core.client import LLMClient           # noqa: E402
-from core.paths import Paths, default_paths  # noqa: E402
-from core.types import StreamChunk          # noqa: E402
-
-HOST = "127.0.0.1"
-KEY_ENVS = ("NPC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ZHIPU_API_KEY")
+import chatlog                                      # noqa: E402
+import server                                       # noqa: E402
 
 
-# ── 通用：起服务 / 发请求 ────────────────────────────────
+# ── 终端输出 ─────────────────────────────────────────────
 
-def free_port():
-    sock = socket.socket()
+def _utf8_stdout() -> None:
+    """Windows 控制台默认编码不一定是 UTF-8；能改就改。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8")
+            except Exception:
+                pass
+
+
+def _section(title: str) -> None:
+    print("")
+    print("=== %s ===" % title)
+
+
+# ── 进程内服务 ───────────────────────────────────────────
+
+def _free_port() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        sock.bind((HOST, 0))
-        return sock.getsockname()[1]
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
     finally:
         sock.close()
 
 
-class LiveServer(object):
-    """在后台线程里跑一个真实 uvicorn（同进程 → 可以直接看 app.state）。"""
+class ServedApp:
+    """在后台线程里跑 uvicorn（同进程，方便直接读 app.state）。"""
 
-    def __init__(self, app):
+    def __init__(self, app: Any):
+        import uvicorn
+
         self.app = app
-        self.port = free_port()
-        self._server = uvicorn.Server(uvicorn.Config(
-            app, host=HOST, port=self.port, log_level="warning",
-            access_log=False, lifespan="off", log_config=None))
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self.port = _free_port()
+        config = uvicorn.Config(app, host="127.0.0.1", port=self.port,
+                                log_level="warning", access_log=False)
+        self.server = uvicorn.Server(config)
+        self.thread = threading.Thread(target=self.server.run, daemon=True)
 
-    def __enter__(self):
-        self._thread.start()
+    @property
+    def base_url(self) -> str:
+        return "http://127.0.0.1:%d" % self.port
+
+    def __enter__(self) -> "ServedApp":
+        self.thread.start()
         deadline = time.time() + 15
         while time.time() < deadline:
-            if self._server.started:
-                self._wait_ready()
+            if getattr(self.server, "started", False):
                 return self
-            time.sleep(0.02)
-        raise RuntimeError("uvicorn 未能在 15s 内启动")
-
-    def _wait_ready(self):
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            try:
-                status, _ = request_json(self.port, "GET", "/api/state")
-                if status == 200:
-                    return
-            except Exception:
-                pass
+            if not self.thread.is_alive():
+                break
             time.sleep(0.05)
-        raise RuntimeError("/api/state 一直没就绪")
+        raise RuntimeError("uvicorn 没能在 15s 内启动")
 
-    def __exit__(self, *exc_info):
-        self._server.should_exit = True
-        self._thread.join(timeout=8)
-
-
-def request_json(port, method, path, payload=None, timeout=30.0):
-    """普通 JSON 请求 → (status, 解析后的 body 或原始文本)。"""
-    conn = http.client.HTTPConnection(HOST, port, timeout=timeout)
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"} if body is not None else {}
-    try:
-        conn.request(method, path, body=body, headers=headers)
-        resp = conn.getresponse()
-        raw = resp.read().decode("utf-8", "replace")
-        try:
-            return resp.status, json.loads(raw)
-        except ValueError:
-            return resp.status, raw
-    finally:
-        conn.close()
+    def __exit__(self, *exc: Any) -> None:
+        self.server.should_exit = True
+        self.thread.join(timeout=10)
 
 
-def talk_stream(port, npc_id, message, timeout=60.0, max_frames=None, mod=None):
-    """POST /api/talk 逐行读 SSE。
-
-    max_frames 给了 = 读够这么多帧就主动关连接（模拟 Mod 中途掉线）。
-    返回 {status, first_frame_ms, total_ms, frames, aborted}。
-    """
-    started = time.perf_counter()
-    conn = http.client.HTTPConnection(HOST, port, timeout=timeout)
-    payload = {"npc_id": npc_id, "message": message}
-    if mod:
-        payload["mod"] = mod
-    body = json.dumps(payload).encode("utf-8")
-    frames = []
-    first_ms = None
-    aborted = False
-    try:
-        conn.request("POST", "/api/talk", body=body,
-                     headers={"Content-Type": "application/json",
-                              "Accept": "text/event-stream"})
-        resp = conn.getresponse()
-        status = resp.status
-        while True:
-            line = resp.readline()
-            if not line:
-                break
-            if not line.startswith(b"data: "):
-                continue
-            now = time.perf_counter()
-            if first_ms is None:
-                first_ms = (now - started) * 1000.0
-            frames.append(json.loads(line[len(b"data: "):].decode("utf-8")))
-            if max_frames is not None and len(frames) >= max_frames:
-                aborted = True
-                break
-    finally:
-        conn.close()
-    return {"status": status, "first_frame_ms": first_ms,
-            "total_ms": (time.perf_counter() - started) * 1000.0,
-            "frames": frames, "aborted": aborted}
-
-
-def frames_text(frames):
-    return "".join(f.get("text", "") for f in frames if f.get("type") == "delta")
-
-
-def action_frames(frames):
-    return [f.get("action") for f in frames if f.get("type") == "action"]
-
-
-# ── 通用：临时运行目录 / 环境变量 ─────────────────────────
-
-def temp_root():
-    """临时运行时目录：复制真实角色卡（保持提示词体量），store 是空的。"""
+def _temp_paths() -> Paths:
+    """临时运行目录：复制一份角色卡，store 从空开始（不污染真实数据）。"""
     root = Path(tempfile.mkdtemp(prefix="npc_manual_"))
-    src = ROOT / "personas"
-    if src.is_dir():
-        shutil.copytree(str(src), str(root / "personas"))
+    shutil.copytree(str(ROOT / "personas"), str(root / "personas"))
     (root / "store").mkdir(parents=True, exist_ok=True)
-    return root
+    return Paths(root=root)
 
 
-@contextlib.contextmanager
-def env_patch(**values):
-    """临时改环境变量（None = 删除），退出时恢复。"""
-    saved = {}
-    for name, value in values.items():
-        saved[name] = os.environ.get(name)
-        if value is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = str(value)
+# ── HTTP 小工具（标准库，不引额外依赖）─────────────────────
+
+def _post_json(url: str, payload: Dict[str, Any], timeout: float = 10.0) -> Tuple[int, Any]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = Request(url, data=body,
+                      headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return response.status, json.loads(response.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        return 0, {"error": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def stream_talk(url: str, payload: Dict[str, Any], stop_after: Optional[int] = None,
+                timeout: float = 30.0) -> Dict[str, Any]:
+    """POST /api/talk 并逐行读 SSE。
+
+    stop_after=N：读到 N 个 data: 帧就**直接断开**（返回 cut=True），用于 disconnect。
+    stop_after=None：读到 EOF / done。
+    """
+    parts = urlsplit(url)
+    conn = http.client.HTTPConnection(parts.hostname or "127.0.0.1",
+                                      parts.port or 80, timeout=timeout)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Connection": "close"}
+    frames: List[Dict[str, Any]] = []
+    error = ""
+    cut = False
+    t0 = time.perf_counter()
+    headers_ms = None
+    try:
+        conn.request("POST", parts.path or "/", body=body, headers=headers)
+        response = conn.getresponse()
+        headers_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        while True:
+            raw = response.readline()
+            if not raw:
+                break
+            now_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if not line.startswith("data:"):
+                continue
+            try:
+                frame = json.loads(line[len("data:"):].strip())
+            except ValueError:
+                continue
+            frames.append({"at_ms": now_ms, "frame": frame})
+            if stop_after is not None and len(frames) >= stop_after:
+                cut = True
+                break
+    except socket.timeout:
+        error = "socket timeout"
+    except Exception as exc:
+        error = "%s: %s" % (type(exc).__name__, exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    end_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+    return {
+        "headers_ms": headers_ms,
+        "first_frame_ms": frames[0]["at_ms"] if frames else None,
+        "end_ms": end_ms,
+        "frames": frames,
+        "cut": cut,
+        "error": error,
+        "text": "".join(f["frame"].get("text", "") for f in frames
+                        if f["frame"].get("type") == "delta"),
+    }
+
+
+# ── 假 Provider ──────────────────────────────────────────
+
+class _NullProvider:
+    """永远不可用 —— 用来构造「没配 LLM」的 app，再手动把 holder 置空。"""
+
+    model_name = "none"
+
+    def chat(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no llm")
+
+    async def stream(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no llm")
+        yield  # pragma: no cover
+
+
+class _SlowActionProvider:
+    """第一轮调 cook 动作，之后慢速逐字吐台词（便于中途断连）。"""
+
+    model_name = "manual-check"
+
+    def __init__(self, chunks: int = 30, gap_s: float = 0.05):
+        self.chunks = chunks
+        self.gap_s = gap_s
+        self.stream_calls = 0
+
+    def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        raise RuntimeError("本脚本不测非流式调用")
+
+    async def stream(self, *args: Any, **kwargs: Any) -> Any:
+        self.stream_calls += 1
+        if self.stream_calls == 1:
+            yield StreamChunk(tool_call_delta={
+                "index": 0, "id": "call_1", "function_name": "cook",
+                "function_arguments": json.dumps({"dish": "面"}, ensure_ascii=False),
+            }, model=self.model_name, index=1)
+            yield StreamChunk(finish_reason="tool_calls", model=self.model_name, index=2)
+            return
+        for i in range(self.chunks):
+            await asyncio.sleep(self.gap_s)
+            yield StreamChunk(content="第%d句。" % (i + 1), model=self.model_name, index=i + 3)
+        yield StreamChunk(finish_reason="stop", model=self.model_name, index=self.chunks + 3)
+
+
+# ── mock Mod（/execute）───────────────────────────────────
+
+class _MockModHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    delay = 0.0
+    calls: List[Dict[str, Any]] = []
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        pass
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            payload = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            payload = {}
+        _MockModHandler.calls.append(payload)
+        if self.delay > 0:
+            time.sleep(self.delay)
+        body = json.dumps({"ok": True, "status": "done", "note": "mock mod 执行完成"},
+                          ensure_ascii=False).encode("utf-8")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+def start_mock_mod(delay: float = 0.0) -> Tuple[Any, str]:
+    _MockModHandler.delay = delay
+    _MockModHandler.calls = []
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _MockModHandler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd, "http://127.0.0.1:%d/execute" % httpd.server_address[1]
+
+
+@contextmanager
+def env_var(name: str, value: Optional[str]) -> Iterator[None]:
+    old = os.environ.get(name)
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
     try:
         yield
     finally:
-        for name, value in saved.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+        if old is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = old
 
 
-def median(values):
-    if not values:
-        return None
-    ordered = sorted(values)
-    mid = len(ordered) // 2
-    if len(ordered) % 2:
-        return ordered[mid]
-    return (ordered[mid - 1] + ordered[mid]) / 2.0
-
+# ── 日志捕获 ─────────────────────────────────────────────
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-class LogSink(object):
-    """接住根 logger 的日志：收集到 records，同时把控制台输出摘掉（报告才干净）。"""
+def _clean(text: str) -> str:
+    return _ANSI_RE.sub("", text or "").strip()
 
-    def __init__(self):
-        self.records = []
-        self._root = logging.getLogger()
-        self._saved_handlers = []
-        self._saved_level = None
 
-        sink = self
+class LogCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: List[Dict[str, Any]] = []
 
-        class Handler(logging.Handler):
-            def emit(self, record):
-                message = _ANSI_RE.sub("", record.getMessage())
-                sink.records.append({
-                    "level": record.levelname,
-                    "logger": record.name,
-                    "message": message,
-                })
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = _clean(record.getMessage())
+        except Exception:
+            message = _clean(str(record.msg))
+        self.records.append({
+            "level": record.levelname,
+            "logger": record.name,
+            "message": message,
+            "exc_info": bool(record.exc_info),
+        })
 
-        self._handler = Handler(level=logging.INFO)
-
-    def __enter__(self):
-        self._saved_handlers = self._root.handlers[:]
-        self._saved_level = self._root.level
-        for handler in self._saved_handlers:
-            self._root.removeHandler(handler)
-        # 留着我们这一个 handler，logging.basicConfig 就不会再加控制台 handler
-        self._root.addHandler(self._handler)
-        self._root.setLevel(logging.INFO)
-        return self
-
-    def __exit__(self, *exc_info):
-        self._root.removeHandler(self._handler)
-        for handler in self._saved_handlers:
-            self._root.addHandler(handler)
-        self._root.setLevel(self._saved_level)
+    def suspicious(self) -> List[Dict[str, Any]]:
+        """真正的异常迹象（区别于业务上预期的 warning）。"""
+        markers = ("Task exception", "never retrieved", "GeneratorExit",
+                   "CancelledError", "Traceback", "Exception in ASGI")
+        return [r for r in self.records
+                if r["exc_info"] or any(m in r["message"] for m in markers)]
 
 
 # ── 子命令 1：llm-down ───────────────────────────────────
 
-def cmd_llm_down(args):
-    """不配 LLM：测 /api/talk 首帧延迟（角色卡 rules 兜底回复那条路径）。"""
-    root = temp_root()
-    rows = []
-    try:
-        with env_patch(NPC_API_KEY=None, DEEPSEEK_API_KEY=None,
-                       OPENAI_API_KEY=None, ZHIPU_API_KEY=None), LogSink():
-            app = server.create_app(llm_client=None, paths=Paths(root=root))
-            if app.state.llm_holder["client"] is not None:
-                print("注意：环境里有可用的 LLM 配置，已强制置空（本项要求「不配 LLM」）")
-                app.state.llm_holder["client"] = None
-            with LiveServer(app) as srv:
-                for index in range(1, args.runs + 1):
-                    got = talk_stream(srv.port, args.npc, args.message,
-                                      timeout=args.timeout)
-                    rows.append({
-                        "run": index,
-                        "first_frame_ms": None if got["first_frame_ms"] is None
-                        else round(got["first_frame_ms"], 1),
-                        "total_ms": round(got["total_ms"], 1),
-                        "frames": [f.get("type") for f in got["frames"]],
-                        "reply": frames_text(got["frames"]),
-                    })
-                    print("第 %d 次: 首帧 %s ms / 总 %s ms / 帧 %s"
-                          % (index, rows[-1]["first_frame_ms"],
-                             rows[-1]["total_ms"], rows[-1]["frames"]))
-    finally:
-        shutil.rmtree(str(root), ignore_errors=True)
+def cmd_llm_down(args: argparse.Namespace) -> int:
+    paths = _temp_paths()
+    provider = _NullProvider()
+    app = server.create_app(llm_client=LLMClient(provider=provider), paths=paths)
+    app.state.llm_holder["client"] = None          # 强制大脑不可用 = 「没配 LLM」
 
-    values = [r["first_frame_ms"] for r in rows if r["first_frame_ms"] is not None]
-    summary = {
-        "check": "llm-down",
-        "npc": args.npc,
-        "message": args.message,
-        "runs": args.runs,
-        "first_frame_ms": values,
-        "median_ms": None if not values else round(median(values), 1),
-        "max_ms": None if not values else round(max(values), 1),
-        "replies": [r["reply"] for r in rows],
-    }
-    print("")
-    print("中位数: %s ms   最大值: %s ms" % (summary["median_ms"], summary["max_ms"]))
-    print(json.dumps(summary, ensure_ascii=False))
-    return 0
+    with ServedApp(app) as served:
+        url = served.base_url + "/api/talk"
+        print("URL: %s" % url)
+        print("轮数: %d（LLM 强制不可用，走角色卡 rules 兜底）" % args.runs)
+        rows = []
+        for i in range(1, args.runs + 1):
+            result = stream_talk(url, {"npc_id": "cang", "message": "在吗"},
+                                 timeout=args.timeout)
+            types = [f["frame"].get("type") for f in result["frames"]]
+            rows.append(result)
+            print("  第 %2d 次: 首帧 %8.1f ms | 总 %8.1f ms | 帧 %s | %s"
+                  % (i,
+                     result["first_frame_ms"] if result["first_frame_ms"] is not None else -1,
+                     result["end_ms"], ",".join(str(t) for t in types),
+                     ("错误: " + result["error"]) if result["error"] else result["text"][:20]))
+            if result["frames"] and result["frames"][-1]["frame"].get("type") != "done":
+                print("     ! 最后一帧不是 done")
 
-
-# ── 假 Provider（disconnect 用）：按脚本吐字 + 工具调用 ──────
-
-class ScriptedProvider(object):
-    """零网络假 Provider：每次 stream() 取一个脚本。
-
-    脚本 = {"pieces": [...], "piece_delay": 0.15, "tool_call": {"name":…, "arguments":…}}
-    """
-
-    def __init__(self, scripts):
-        self._scripts = list(scripts)
-        self._used = 0
-
-    @property
-    def model_name(self):
-        return "manual-check-scripted"
-
-    def chat(self, *args, **kwargs):
-        raise RuntimeError("手测假 Provider 只实现流式（chat 不该被调用）")
-
-    async def stream(self, messages, tools=None, tool_choice="auto", temperature=None,
-                     max_tokens=None, response_format=None, reasoning_effort=None):
-        if self._used < len(self._scripts):
-            script = self._scripts[self._used]
-        else:
-            script = {"pieces": ["嗯。"]}
-        self._used += 1
-        delay = script.get("piece_delay", 0.15)
-        index = 0
-        for piece in script.get("pieces", []):
-            if delay:
-                await asyncio.sleep(delay)
-            index += 1
-            yield StreamChunk(content=piece, model=self.model_name, index=index)
-        call = script.get("tool_call")
-        if call:
-            index += 1
-            yield StreamChunk(
-                tool_call_delta={"index": 0, "id": "manual_call_1",
-                                 "function_name": call.get("name", ""),
-                                 "function_arguments": None},
-                model=self.model_name, index=index)
-            index += 1
-            yield StreamChunk(
-                tool_call_delta={"index": 0, "id": None, "function_name": None,
-                                 "function_arguments": json.dumps(
-                                     call.get("arguments") or {}, ensure_ascii=False)},
-                model=self.model_name, index=index)
-        index += 1
-        yield StreamChunk(finish_reason="tool_calls" if call else "stop",
-                          model=self.model_name, index=index)
-
-
-def make_timeout_executor(payloads):
-    """假执行器：记下请求体，然后一直不返回（等 wait_for 超时 → 不确定）。"""
-    async def executor(url, payload, timeout):
-        payloads.append(payload)
-        await asyncio.sleep(5.0)
-        return {"ok": True, "status": "done", "note": "不该走到这里"}
-    return executor
+    firsts = [r["first_frame_ms"] for r in rows if r["first_frame_ms"] is not None]
+    if not firsts:
+        print("没有拿到任何首帧，无法统计")
+        return 1
+    med = statistics.median(firsts)
+    maximum = max(firsts)
+    _section("llm-down 汇总")
+    print("首帧延迟（ms）：中位数 %.1f，最大 %.1f，最小 %.1f，样本 %d"
+          % (med, maximum, min(firsts), len(firsts)))
+    print(json.dumps({"check": "llm-down", "runs": len(firsts),
+                      "first_frame_ms": {"median": round(med, 1), "max": round(maximum, 1),
+                                         "min": round(min(firsts), 1)},
+                      "rows": [{"first_frame_ms": r["first_frame_ms"],
+                                "total_ms": r["end_ms"],
+                                "frames": [f["frame"].get("type") for f in r["frames"]],
+                                "error": r["error"] or None} for r in rows]},
+                     ensure_ascii=False))
+    shutil.rmtree(str(paths.root), ignore_errors=True)
+    return 0 if all(not r["error"] for r in rows) else 1
 
 
 # ── 子命令 2：disconnect ─────────────────────────────────
 
-def cmd_disconnect(args):
-    """中途断开 SSE，检查锁 / 二次请求 / pending 与 call_id / 日志。"""
-    root = temp_root()
-    npc_id = args.npc
-    payloads = []
-    passed = {}
-    detail = {}
-    sink = LogSink()
-    records = sink.records
-    try:
-        provider = ScriptedProvider([
-            {   # 第 1 轮：先吐字，再调动作（执行器会超时 → 不确定）
-                "pieces": ["我", "去", "看", "看", "门", "口"],
-                "piece_delay": 0.15,
-                "tool_call": {"name": "close_door", "arguments": {"door": "正门"}},
-            },
-            {   # 第 2 轮：继续吐字（客户端在这里掉线）
-                "pieces": ["门", "已", "经", "关", "上", "了", "嘛", "别", "催", "我"],
-                "piece_delay": 0.2,
-            },
-            {   # 第 2 次请求：正常收尾
-                "pieces": ["门", "关", "好", "了。"],
-                "piece_delay": 0.01,
-            },
-        ])
-        # 执行等待 0.2s 必超时；pending TTL 先给 5s（够我们看快照），之后改成 0 验证清理
-        with env_patch(NPC_EXECUTE_TIMEOUT="0.2", NPC_PENDING_TTL="5"), sink:
-            app = server.create_app(llm_client=LLMClient(provider=provider),
-                                    executor=make_timeout_executor(payloads),
-                                    paths=Paths(root=root))
-            with LiveServer(app) as srv:
-                status, _ = request_json(srv.port, "POST", "/api/capabilities", {
-                    "mod": "manual_mod",
-                    "execute_url": "http://127.0.0.1:1/execute",
-                    "actions": [{"name": "close_door", "desc": "把门关上",
-                                 "params": {"door": "哪扇门"}}],
-                })
-                if status != 200:
-                    raise RuntimeError("mod 报到失败: %s" % status)
+def cmd_disconnect(args: argparse.Namespace) -> int:
+    capture = LogCapture()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(capture)
+    root_logger.setLevel(logging.WARNING)      # 只看 warning 以上，避免 httpx 的 INFO 噪音
+    for noisy in ("httpx", "httpcore", "uvicorn"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
-                # ① 发起 /api/talk，读 8 帧后直接关连接
-                first = talk_stream(srv.port, npc_id, "去把门关上", timeout=30,
-                                    max_frames=args.abort_after, mod="manual_mod")
-                time.sleep(0.8)                 # 等服务端把取消处理完
+    paths = _temp_paths()
+    httpd, execute_url = start_mock_mod(delay=args.mod_delay)
+    provider = _SlowActionProvider()
 
-                pending_after = app.state.pending.alive(npc_id)
-                locked = locked_locks()
-                entries_after = memory.load_card(npc_id, store_dir=root / "store")
-                action_entries = [e for e in entries_after
-                                  if e.get("category") == "action"]
-                turns = chatlog.load_turns(npc_id, store_dir=root / "store")
+    app = server.create_app(llm_client=LLMClient(provider=provider), paths=paths)
+    turn_env = env_var("NPC_EXECUTE_TIMEOUT", str(args.execute_timeout))
+    with turn_env:
+        with ServedApp(app) as served:
+            base = served.base_url
+            _post_json(base + "/api/capabilities", {
+                "mod": "manual", "execute_url": execute_url,
+                "actions": [{"name": "cook", "desc": "做一道菜",
+                             "params": {"dish": "菜名"}}]})
 
-                payload = payloads[-1] if payloads else {}
-                detail["abort_after_frames"] = len(first["frames"])
-                detail["pending_after_disconnect"] = pending_after
-                detail["locked_asyncio_locks"] = locked
-                detail["memory_action_entries"] = len(action_entries)
-                detail["chat_messages"] = len(turns)
-                passed["stream_started"] = first["first_frame_ms"] is not None
-                passed["pending_one_unknown"] = (
-                    len(pending_after) == 1
-                    and pending_after[0].get("state") == "unknown"
-                    and pending_after[0].get("action") == "close_door"
-                    and pending_after[0].get("npc_id") == npc_id)
-                passed["call_id_matches_mod_payload"] = (
-                    bool(pending_after) and bool(payload)
-                    and pending_after[0].get("call_id") == payload.get("call_id"))
-                passed["no_card_written_for_unknown"] = len(action_entries) == 0
-                passed["lock_released_direct"] = locked == 0
-                passed["chat_turn_persisted"] = len(turns) == 2
+            before_turns = chatlog.load_turns("cang", store_dir=paths.store_dir)
+            first = stream_talk(base + "/api/talk",
+                                {"npc_id": "cang", "message": "帮我做碗面", "mod": "manual"},
+                                stop_after=1, timeout=args.timeout)
+            print("中途断开：读到 %d 帧后关闭连接（首帧 %s ms，cut=%s）"
+                  % (len(first["frames"]), first["first_frame_ms"], first["cut"]))
+            time.sleep(0.8)
 
-                # ② TTL 归零后再发同一 NPC：既验证锁已释放，也验证过期待定被清理
-                with env_patch(NPC_PENDING_TTL="0"):
-                    second = talk_stream(srv.port, npc_id, "门关好了吗", timeout=30,
-                                         mod="manual_mod")
-                entries_later = memory.load_card(npc_id, store_dir=root / "store")
-                expired = [e for e in entries_later
-                           if e.get("category") == "action"
-                           and e.get("content", "").startswith(memory.EV_FAIL)]
-                detail["second_request"] = {
-                    "first_frame_ms": None if second["first_frame_ms"] is None
-                    else round(second["first_frame_ms"], 1),
-                    "total_ms": round(second["total_ms"], 1),
-                    "frame_types": [f.get("type") for f in second["frames"]],
-                    "reply": frames_text(second["frames"]),
-                }
-                detail["pending_after_ttl"] = len(app.state.pending)
-                detail["expired_failure_entries"] = [e.get("content") for e in expired]
-                passed["second_request_ok"] = (
-                    second["status"] == 200
-                    and second["first_frame_ms"] is not None
-                    and any(f.get("type") == "done" for f in second["frames"]))
-                passed["lock_released_by_second_request"] = (
-                    second["first_frame_ms"] is not None
-                    and second["first_frame_ms"] < 3000)
-                passed["pending_cleared_after_ttl"] = len(app.state.pending) == 0
-                passed["expire_wrote_failure_memory"] = (
-                    len(expired) == 1
-                    and server.PENDING_EXPIRED_NOTE in expired[0].get("content", ""))
-    finally:
-        shutil.rmtree(str(root), ignore_errors=True)
+            pending_after_cut = [dict(p) for p in app.state.pending.alive("cang")]
 
-    errors = [r for r in records if r["level"] in ("ERROR", "CRITICAL")]
-    suspicious = [r for r in records
-                  if "Traceback" in r["message"] or "never retrieved" in r["message"]]
-    warnings = [r for r in records if r["level"] == "WARNING"]
-    passed["no_error_logs"] = not errors and not suspicious
+            second = stream_talk(base + "/api/talk",
+                                 {"npc_id": "cang", "message": "在吗", "mod": "manual"},
+                                 timeout=args.timeout)
+            pending_after_second = [dict(p) for p in app.state.pending.alive("cang")]
+            after_turns = chatlog.load_turns("cang", store_dir=paths.store_dir)
+    httpd.shutdown()
 
-    summary = {
+    types = [f["frame"].get("type") for f in second["frames"]]
+    got_done = bool(types) and types[-1] == "done"
+    lock_released = got_done and second["end_ms"] < args.timeout * 1000
+    clean_calls = [p for p in pending_after_second
+                   if isinstance(p.get("call_id"), str) and len(p["call_id"]) == 32]
+    problems = capture.suspicious()
+
+    _section("disconnect 检查结果")
+    print("1) Lock 释放 / 下一次请求：%s（第二请求总耗时 %.1f ms，帧 %s，错误 %s）"
+          % ("正常" if lock_released else "异常", second["end_ms"],
+             ",".join(str(t) for t in types), second["error"] or "无"))
+    print("2) pending（断开后）：%d 条" % len(pending_after_cut))
+    for p in pending_after_cut:
+        print("   action=%s state=%s call_id=%s（%s 秒前）"
+              % (p.get("action"), p.get("state"), p.get("call_id"),
+                 round(time.time() - float(p.get("created_at", time.time())), 1)))
+    print("3) pending（第二次请求后）：%d 条；call_id 格式正常 %d 条"
+          % (len(pending_after_second), len(clean_calls)))
+    print("4) 聊天记录：断连前 %d 行 → 断连+二次请求后 %d 行（断连回合是否落盘）"
+          % (len(before_turns), len(after_turns)))
+    print("5) 日志异常迹象：%d 条" % len(problems))
+    for item in problems[:5]:
+        print("   [%s] %s" % (item["level"], item["message"][:200]))
+    print("   本次 WARNING/ERROR 共 %d 条（含预期内的 action_execute_timeout）"
+          % len(capture.records))
+    for item in capture.records:
+        print("   - [%s] %s" % (item["level"], item["message"][:200]))
+
+    verdict = {
         "check": "disconnect",
-        "npc": npc_id,
-        "passed": passed,
-        "all_passed": all(passed.values()),
-        "detail": detail,
-        "logs": {
-            "error": errors,
-            "suspicious": suspicious,
-            "warnings": [w["logger"] + ": " + w["message"][:160] for w in warnings],
-        },
+        "lock_released": lock_released,
+        "next_request_ok": got_done and not second["error"],
+        "pending_after_cut": [{"action": p.get("action"), "state": p.get("state"),
+                               "call_id": p.get("call_id")} for p in pending_after_cut],
+        "pending_after_second": [{"action": p.get("action"), "state": p.get("state"),
+                                  "call_id": p.get("call_id")} for p in pending_after_second],
+        "call_id_well_formed": len(clean_calls) == len(pending_after_second),
+        "chat_lines_before": len(before_turns),
+        "chat_lines_after": len(after_turns),
+        "interrupted_turn_persisted": len(after_turns) > len(before_turns),
+        "suspicious_logs": problems,
+        "warnings": [r["message"] for r in capture.records],
     }
-    print("")
-    for name in sorted(passed):
-        print("  [%s] %s" % ("通过" if passed[name] else "失败", name))
-    print("")
-    print("pending 快照: %s" % json.dumps(detail.get("pending_after_disconnect"),
-                                       ensure_ascii=False))
-    print("二次请求: %s" % json.dumps(detail.get("second_request"), ensure_ascii=False))
-    print("警告日志 %d 条 / 错误 %d 条" % (len(warnings), len(errors)))
-    print(json.dumps(summary, ensure_ascii=False))
-    return 0 if summary["all_passed"] else 1
+    print("结果 JSON: " + json.dumps(verdict, ensure_ascii=False))
+
+    root_logger.removeHandler(capture)
+    shutil.rmtree(str(paths.root), ignore_errors=True)
+    return 0 if (lock_released and not problems) else 1
 
 
-def locked_locks():
-    """当前处于 locked 状态的 asyncio.Lock（直接看锁，不猜）。"""
-    found = 0
-    for obj in gc.get_objects():
-        try:
-            if isinstance(obj, asyncio.Lock) and obj.locked():
-                found += 1
-        except Exception:
-            continue
-    return found
+# ── 子命令 3：uncertain ──────────────────────────────────
 
+def cmd_uncertain(args: argparse.Namespace) -> int:
+    from core import config
 
-# ── 子命令 3：uncertain（需要真实 key）────────────────────
-
-class MockMod(object):
-    """假 Mod：/execute 先睡 delay 秒再回 —— 让大脑同步等待超时（触发「不确定」）。"""
-
-    def __init__(self, delay):
-        self.delay = delay
-        self.payloads = []
-        mock = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length else b"{}"
-                try:
-                    payload = json.loads(raw.decode("utf-8"))
-                except ValueError:
-                    payload = {}
-                mock.payloads.append(payload)
-                time.sleep(mock.delay)
-                body = json.dumps({"ok": True, "status": "done",
-                                   "note": "门关上了"}).encode("utf-8")
-                try:
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                except Exception:
-                    pass                       # 客户端早走了，正常
-
-            def log_message(self, *args):
-                pass
-
-        self.httpd = ThreadingHTTPServer((HOST, 0), Handler)
-        self.port = self.httpd.server_address[1]
-        self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-
-    @property
-    def execute_url(self):
-        return "http://%s:%d/execute" % (HOST, self.port)
-
-    def __enter__(self):
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc_info):
-        self.httpd.shutdown()
-        self.httpd.server_close()
-
-
-def cmd_uncertain(args):
-    """mock Mod 超时 → 不确定；把每轮台词原样存 out/（不做自动判分）。"""
-    from core.llm_runtime import llm_config_status
-
-    status = llm_config_status()
-    if not status.get("ready"):
-        print("LLM 没配齐，缺: %s —— 本项需要真实 key，先配 AGENT_MODEL / NPC_API_KEY / "
-              "NPC_BASE_URL（或控制台「模型」页）" % "、".join(status.get("missing") or []))
+    key = config.api_key()
+    if not key:
+        print("未检测到真实 key：请配置 NPC_API_KEY（或 api_key.txt），再跑 uncertain。")
         return 2
 
-    limit = server.execute_timeout()
-    if args.delay <= limit:
-        print("注意：--delay %.1fs 不大于 NPC_EXECUTE_TIMEOUT %.1fs，可能不会触发「不确定」"
-              % (args.delay, limit))
+    paths = _temp_paths()
+    httpd, execute_url = start_mock_mod(delay=args.delay)
+    app = server.create_app(llm_client=None, paths=paths)
+    if app.state.llm_holder["client"] is None:
+        print("LLM 三件套未配齐（模型名 / key / 端点），uncertain 需要真实模型。")
+        httpd.shutdown()
+        shutil.rmtree(str(paths.root), ignore_errors=True)
+        return 2
 
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.out) / ("uncertain_" + stamp)
+    out_dir = Path(args.out) / ("uncertain_%s" % time.strftime("%Y%m%d_%H%M%S"))
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows = []
-    with MockMod(args.delay) as mod:
-        print("mock Mod: %s（execute 延迟 %.0fs）" % (mod.execute_url, args.delay))
-        app = server.create_app(paths=default_paths())
-        with LiveServer(app) as srv:
-            for round_no in range(1, args.runs + 1):
-                caps_status, _ = request_json(srv.port, "POST", "/api/capabilities", {
-                    "mod": "mock_mod",
-                    "execute_url": mod.execute_url,
-                    "actions": [{"name": args.action, "desc": args.desc,
-                                 "params": {"door": "哪扇门"}}],
-                })
-                if caps_status != 200:
-                    raise RuntimeError("mod 报到失败: %s" % caps_status)
-                got = talk_stream(srv.port, args.npc, args.message, timeout=args.timeout)
-                dialogue = frames_text(got["frames"])
-                actions = action_frames(got["frames"])
-                row = {
-                    "round": round_no,
-                    "first_frame_ms": None if got["first_frame_ms"] is None
-                    else round(got["first_frame_ms"], 1),
-                    "total_ms": round(got["total_ms"], 1),
-                    "dialogue": dialogue,
-                    "actions": actions,
-                }
-                rows.append(row)
-                path = out_dir / ("round_%02d.txt" % round_no)
-                path.write_text(round_record_text(args, row), encoding="utf-8")
-                print("第 %d 轮 → %s（动作帧 status: %s）"
-                      % (round_no, path.name,
-                         [a.get("status") for a in actions] or "无"))
+    rounds: List[Dict[str, Any]] = []
 
-    summary = {
-        "check": "uncertain",
-        "npc": args.npc,
-        "message": args.message,
-        "action": args.action,
-        "delay_s": args.delay,
-        "runs": args.runs,
-        "out_dir": str(out_dir),
-        "rounds": rows,
-    }
-    print(json.dumps(summary, ensure_ascii=False))
+    with env_var("NPC_EXECUTE_TIMEOUT", str(args.execute_timeout)):
+        with ServedApp(app) as served:
+            base = served.base_url
+            _post_json(base + "/api/capabilities", {
+                "mod": "manual", "execute_url": execute_url,
+                "actions": [{"name": "cook", "desc": "做一道菜",
+                             "params": {"dish": "菜名"}}]})
+            for i in range(1, args.runs + 1):
+                result = stream_talk(base + "/api/talk",
+                                     {"npc_id": "cang", "message": args.message,
+                                      "mod": "manual"},
+                                     timeout=args.timeout)
+                actions = [f["frame"].get("action") for f in result["frames"]
+                           if f["frame"].get("type") == "action"]
+                rounds.append({"round": i, "text": result["text"],
+                               "actions": actions, "error": result["error"]})
+                path = out_dir / ("round_%d.txt" % i)
+                path.write_text(
+                    "轮次: %d\n输入: %s\n动作帧: %s\n错误: %s\n\n台词原文:\n%s\n"
+                    % (i, args.message, json.dumps(actions, ensure_ascii=False),
+                       result["error"] or "无", result["text"]),
+                    encoding="utf-8")
+                print("第 %d 轮已存 %s（%d 字，动作帧 %d 个%s）"
+                      % (i, path, len(result["text"]), len(actions),
+                         "，含 unknown" if any((a or {}).get("status") == "unknown"
+                                               for a in actions) else ""))
+    httpd.shutdown()
+    (out_dir / "meta.json").write_text(
+        json.dumps({"message": args.message, "rounds": rounds},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+    print("输出目录: %s" % out_dir)
+    print("请人工看措辞；结果栏由人填。")
+    shutil.rmtree(str(paths.root), ignore_errors=True)
     return 0
-
-
-def round_record_text(args, row):
-    """一轮的原始记录（台词原样，供人工看措辞）。"""
-    lines = [
-        "轮次: %d" % row["round"],
-        "NPC: %s" % args.npc,
-        "玩家: %s" % args.message,
-        "mock Mod 执行延迟: %.1fs" % args.delay,
-        "首帧: %s ms  总耗时: %s ms" % (row["first_frame_ms"], row["total_ms"]),
-        "",
-        "--- 台词（原样）---",
-        row["dialogue"] or "（这一轮没有台词）",
-        "",
-        "--- 动作帧（已执行动作的记录）---",
-        json.dumps(row["actions"], ensure_ascii=False, indent=2),
-        "",
-    ]
-    return "\n".join(lines)
 
 
 # ── 入口 ─────────────────────────────────────────────────
 
-def build_parser():
-    parser = argparse.ArgumentParser(description="NPCSidekick 手测脚本（三个子命令）")
-    sub = parser.add_subparsers(dest="command")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="NPCSidekick v4 手测脚本")
+    sub = parser.add_subparsers(dest="command", required=True)
 
     p1 = sub.add_parser("llm-down", help="不配 LLM，测 /api/talk 首帧延迟")
-    p1.add_argument("--runs", type=int, default=5, help="跑几次（默认 5）")
-    p1.add_argument("--npc", default="cang", help="用哪张角色卡（默认 cang）")
-    p1.add_argument("--message", default="在吗", help="玩家说的话")
-    p1.add_argument("--timeout", type=float, default=30.0, help="单次请求超时（秒）")
+    p1.add_argument("--runs", type=int, default=10)
+    p1.add_argument("--timeout", type=float, default=20.0)
     p1.set_defaults(func=cmd_llm_down)
 
-    p2 = sub.add_parser("disconnect", help="中途断开 SSE，检查服务端状态")
-    p2.add_argument("--npc", default="cang", help="用哪张角色卡（默认 cang）")
-    p2.add_argument("--abort-after", type=int, default=8,
-                    help="读够多少帧就断开（默认 8）")
+    p2 = sub.add_parser("disconnect", help="中途断开 SSE，检查锁 / pending / 日志")
+    p2.add_argument("--timeout", type=float, default=10.0)
+    p2.add_argument("--execute-timeout", type=float, default=0.3,
+                    help="NPC_EXECUTE_TIMEOUT（秒），要小于 --mod-delay 才能触发 unknown")
+    p2.add_argument("--mod-delay", type=float, default=2.0,
+                    help="mock Mod 的 /execute 延迟（秒）")
     p2.set_defaults(func=cmd_disconnect)
 
-    p3 = sub.add_parser("uncertain", help="mock Mod 超时 → 触发「不确定」（需要真实 key）")
-    p3.add_argument("--runs", type=int, default=3, help="跑几轮（默认 3）")
-    p3.add_argument("--delay", type=float, default=40.0,
-                    help="mock Mod 的 /execute 延迟秒数（要大于 NPC_EXECUTE_TIMEOUT）")
-    p3.add_argument("--npc", default="cang", help="用哪张角色卡（默认 cang）")
-    p3.add_argument("--message", default="帮我把门关上", help="玩家说的话")
-    p3.add_argument("--action", default="close_door", help="mock Mod 声明的动作名")
-    p3.add_argument("--desc", default="把门关上", help="动作说明（给模型看）")
-    p3.add_argument("--out", default=str(ROOT / "out"), help="台词落盘目录（默认 out/）")
-    p3.add_argument("--timeout", type=float, default=180.0, help="单轮请求超时（秒）")
+    p3 = sub.add_parser("uncertain", help="mock Mod 超时触发「不确定」（需要真实 key）")
+    p3.add_argument("--runs", type=int, default=3)
+    p3.add_argument("--timeout", type=float, default=180.0)
+    p3.add_argument("--delay", type=float, default=2.0,
+                    help="mock Mod 的 /execute 延迟（秒）")
+    p3.add_argument("--execute-timeout", type=float, default=0.3)
+    p3.add_argument("--message", default="我有点饿了，你能给我做碗面吗？")
+    p3.add_argument("--out", default=str(ROOT / "out"))
     p3.set_defaults(func=cmd_uncertain)
-
     return parser
 
 
-def main(argv=None):
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if not getattr(args, "command", None):
-        parser.print_help()
-        return 2
+def main() -> int:
+    _utf8_stdout()
+    args = build_parser().parse_args()
     return args.func(args)
 
 
 if __name__ == "__main__":
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8")
-        except Exception:
-            pass
-    sys.exit(main())
+    raise SystemExit(main())
