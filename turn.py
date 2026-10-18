@@ -433,6 +433,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     trace_mem_filtered = 0                  # 记忆预取被相关性阈值滤掉的条数
     trace_first_delta_at: Optional[float] = None
     trace_emitted = False                   # turn_trace 只出一条（finally 兜底防重发）
+    turn_reasoning = ""                     # 最终答复那一轮的思考内容（落盘，下一回合回传）
 
     def _trace_record() -> Dict[str, Any]:
         """拼 turn_trace 记录（发出时现算耗时；tokens.total = 各层之和）。"""
@@ -457,6 +458,9 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
             try:
                 if llm is None:
                     raise RuntimeError("LLM 不可用")
+                # DeepSeek 带 tools 时硬要求把 assistant 的 reasoning_content 原样回传
+                # （缺了直接 400）；别的家没有这个字段，别塞给它们
+                replay_reasoning = bool(getattr(llm, "replays_reasoning_content", False))
                 # 同步阻塞调用一律挪到线程池：本函数是 SSE 生成器，跑在事件循环上，
                 # 直接调用会把整个服务器卡住。
                 await asyncio.to_thread(memory.prune, npc_id,
@@ -474,7 +478,8 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 history = await asyncio.to_thread(
                     chatlog.build_history, npc_id, llm,
                     token_budget=context.budget_history(),   # 对话层预算（任务 3）
-                    store_dir=store_dir, summarize=False)
+                    store_dir=store_dir, summarize=False,
+                    reasoning_replay=replay_reasoning)       # DeepSeek 带 tools 要回传 CoT
                 # 装配走 context.assemble（任务 3：system 固定层，观测等易变块挪到
                 # user 前缀并受预算约束；任务 5 近况块与观测共享 state 预算）；
                 # trace 的 tokens 分层直接取它的 section_tokens
@@ -497,10 +502,13 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                     closing = round_no == MAX_TOOL_ROUNDS
                     buffers: Dict[int, _ToolCallBuffer] = {}
                     round_text: List[str] = []
+                    round_reasoning: List[str] = []
                     trace_rounds += 1
                     async for chunk in llm.stream(messages,
                                                   tools=None if closing else tool_defs,
                                                   reasoning_effort=thinking_effort(store_dir)):
+                        if chunk.has_reasoning:
+                            round_reasoning.append(chunk.reasoning)
                         if chunk.has_content:
                             round_text.append(chunk.content)
                             full_parts.append(chunk.content)
@@ -513,6 +521,8 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                             buffers.setdefault(
                                 int(delta.get("index") or 0), _ToolCallBuffer()).feed(delta)
 
+                    reasoning_text = "".join(round_reasoning)
+                    turn_reasoning = reasoning_text        # 台词轮覆盖掉工具轮
                     keys = sorted(buffers)
                     calls = [buffers[k].finalize(k) for k in keys]
                     bad_ids = {c["id"] for c in calls if c.get("bad_args")}
@@ -527,7 +537,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                                                           "ignored", 0.0))
                         break
 
-                    messages.append({
+                    assistant_msg = {
                         "role": "assistant",
                         "content": "".join(round_text),
                         "tool_calls": [{
@@ -535,7 +545,11 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                             "function": {"name": c["name"],
                                          "arguments": json.dumps(c["args"], ensure_ascii=False)},
                         } for c in calls],
-                    })
+                    }
+                    if replay_reasoning and reasoning_text:
+                        # DeepSeek: 带 tools 的这一轮必须把思维链一起带回去，否则 400
+                        assistant_msg["reasoning_content"] = reasoning_text
+                    messages.append(assistant_msg)
                     for c in calls:
                         t_tool = time.perf_counter()
                         is_action = bool(execute_url) and tools.is_action_tool(c["name"], capabilities)
@@ -614,7 +628,8 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
             else:
                 # 正常走完：异步落盘（同步 IO 挪线程池，不卡事件循环）
                 await asyncio.to_thread(chatlog.append_turn, npc_id, message,
-                                        "".join(full_parts), store_dir=store_dir)
+                                        "".join(full_parts), store_dir=store_dir,
+                                        reasoning=turn_reasoning)
                 recorded = True
             finally:
                 # 兜底：异常 / 客户端断连 / 取消时也要落盘，否则这一回合的话直接丢。
@@ -623,7 +638,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 if not recorded:
                     try:
                         chatlog.append_turn(npc_id, message, "".join(full_parts),
-                                            store_dir=store_dir)
+                                            store_dir=store_dir, reasoning=turn_reasoning)
                     except Exception as exc:
                         log.warning("chatlog_append_failed", npc_id=npc_id,
                                     error=scrub(str(exc))[:120])

@@ -81,13 +81,18 @@ def estimate_tokens(text: str) -> int:
 
 
 def select_recent(turns: List[Dict[str, Any]], token_budget: int) -> List[Dict[str, Any]]:
-    """从最新往前取到预算为止（至少保留最新一条），返回按时间正序。"""
+    """从最新往前取到预算为止（至少保留最新一条），返回按时间正序。
+
+    思考内容也算进预算：它会被一起回传给模型（DeepSeek 带 tools 时强制），
+    不算预算就会让上下文悄悄超支。
+    """
     if not turns:
         return []
     picked: List[Dict[str, Any]] = []
     used = 0
     for msg in reversed(turns):
         cost = estimate_tokens(str(msg.get("content", "")))
+        cost += estimate_tokens(str(msg.get("reasoning") or ""))
         if picked and used + cost > token_budget:
             break
         picked.append(msg)
@@ -99,14 +104,21 @@ def select_recent(turns: List[Dict[str, Any]], token_budget: int) -> List[Dict[s
 # ── 读写 ─────────────────────────────────────────────────
 
 def append_turn(npc_id: str, user_text: str, assistant_text: str,
-                store_dir: Optional[Path] = None) -> None:
-    """追加一轮：用户一行 + 助手一行。"""
+                store_dir: Optional[Path] = None, reasoning: str = "") -> None:
+    """追加一轮：用户一行 + 助手一行。
+
+    reasoning = 该轮答复的思考内容（DeepSeek 带 tools 时下一轮必须原样回传，
+    见 turn.py / build_history 的 reasoning_replay）。空则不写这行字段。
+    """
     path = chat_path(npc_id, store_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = time.time()
+    assistant: Dict[str, Any] = {"role": "assistant", "content": assistant_text, "ts": now}
+    if reasoning:
+        assistant["reasoning"] = reasoning
     lines = [
         json.dumps({"role": "user", "content": user_text, "ts": now}, ensure_ascii=False),
-        json.dumps({"role": "assistant", "content": assistant_text, "ts": now}, ensure_ascii=False),
+        json.dumps(assistant, ensure_ascii=False),
     ]
     with path.open("a", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
@@ -134,10 +146,12 @@ def load_turns(npc_id: str, limit: Optional[int] = None,
         if not isinstance(raw, dict) or not isinstance(raw.get("content"), str):
             log.warning("chatlog_bad_record", npc_id=npc_id, line=lineno)
             continue
+        reasoning = raw.get("reasoning")
         msgs.append({
             "role": raw.get("role") if raw.get("role") in ("user", "assistant") else "user",
             "content": raw["content"],
             "ts": raw.get("ts", 0.0),
+            "reasoning": reasoning if isinstance(reasoning, str) else "",
         })
     if limit is not None and limit >= 0:
         msgs = msgs[-limit:] if limit else []
@@ -247,14 +261,31 @@ def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None,
     return summary
 
 
+def _history_message(msg: Dict[str, Any], reasoning_replay: bool) -> Dict[str, Any]:
+    """一轮聊历史 → 一条 messages 项。
+
+    reasoning_replay=True（DeepSeek 带 tools）时，assistant 的历史思考内容必须
+    以 `reasoning_content` 原样带回，否则服务端 400；其它 Provider 不带这个字段。
+    """
+    out: Dict[str, Any] = {"role": msg["role"], "content": msg["content"]}
+    reasoning = msg.get("reasoning") or ""
+    if reasoning_replay and msg["role"] == "assistant" and reasoning:
+        out["reasoning_content"] = reasoning
+    return out
+
+
 def build_history(npc_id: str, llm, token_budget: Optional[int] = None,
                   store_dir: Optional[Path] = None,
-                  summarize: bool = True) -> List[Dict[str, Any]]:
+                  summarize: bool = True,
+                  reasoning_replay: bool = False) -> List[Dict[str, Any]]:
     """拼上下文用的历史：可选的摘要消息 + 最近若干轮（受 token 预算约束）。
 
     `summarize=True`（默认）= 旧行为：拼历史前同步摘要一次；
     turn.py 传 `False`（任务 6）—— 摘要移出回合关键路径，改在回合结束后台触发，
     回合内只读现成的摘要状态。
+
+    `reasoning_replay=True` 时把落盘的思考内容作为 `reasoning_content` 带回
+    （DeepSeek 带 tools 的硬要求；见 ProviderProtocol.replays_reasoning_content）。
     """
     if summarize:
         maybe_summarize(npc_id, llm, store_dir=store_dir)
@@ -267,6 +298,6 @@ def build_history(npc_id: str, llm, token_budget: Optional[int] = None,
     if state["summary"]:
         history.append({"role": "assistant",
                         "content": f"（此前对话摘要，供你参考）{state['summary']}"})
-    history.extend({"role": m["role"], "content": m["content"]}
+    history.extend(_history_message(m, reasoning_replay)
                    for m in select_recent(turns[covered:], budget))
     return history

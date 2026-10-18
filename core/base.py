@@ -40,6 +40,15 @@ class ProviderProtocol(ABC):
         """返回当前使用的模型名。"""
         ...
 
+    @property
+    def replays_reasoning_content(self) -> bool:
+        """带 tools 时，是否必须把 assistant 的 reasoning_content 原样回传。
+
+        DeepSeek 官方硬要求（缺了直接 400）；其它家没有这个字段，默认 False ——
+        别把未知字段塞给不认它的端点。
+        """
+        return False
+
     @abstractmethod
     def chat(
         self,

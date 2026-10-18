@@ -27,11 +27,12 @@ class FakeProvider(ProviderProtocol):
     """脚本化 Provider：按 turns 顺序回放，不碰网络。
 
     每个 turn 形如:
-      {"text": "行啊，", "tool_calls": [{"name": "remember", "arguments": {...}}]}
+      {"text": "行啊，", "reasoning": "先想想", "tool_calls": [{"name": "remember", "arguments": {...}}]}
     turns 用尽后回放 {"text": "嗯。"}。
 
     stream() 会把 text 切成 chunk_size 大小的多片；tool_call 的
     function_name / function_arguments 分两个 chunk 吐出，用于验证分片拼装。
+    `reasoning` = 思考增量（模拟 DeepSeek 的 reasoning_content），也会按片吐出。
     """
 
     def __init__(self, turns: Optional[List[dict]] = None, chunk_size: int = 2):
@@ -71,6 +72,7 @@ class FakeProvider(ProviderProtocol):
             finish_reason="tool_calls" if calls else "stop",
             model=self.model_name,
             usage=None,
+            reasoning=turn.get("reasoning", ""),
         )
 
     async def stream(self, messages, tools=None, tool_choice="auto", temperature=None,
@@ -79,6 +81,12 @@ class FakeProvider(ProviderProtocol):
                                   "reasoning_effort": reasoning_effort})
         turn = self._next_turn()
         idx = 0
+        reasoning = turn.get("reasoning", "")
+        for i in range(0, len(reasoning), self.chunk_size):
+            idx += 1
+            yield StreamChunk(reasoning=reasoning[i:i + self.chunk_size],
+                              model=self.model_name, index=idx)
+
         text = turn.get("text", "")
         for i in range(0, len(text), self.chunk_size):
             idx += 1

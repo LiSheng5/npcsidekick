@@ -16,6 +16,7 @@ class StreamChunk:
 
     对应 OpenAI streaming API 的一个 delta:
       - content: 文本增量 (None 表示无文本)
+      - reasoning: 思考增量 (DeepSeek: reasoning_content / OpenRouter: reasoning)
       - tool_call_delta: 工具调用增量 (None 表示无工具调用)
       - finish_reason: 终止原因 (最后一个 chunk 才有值)
 
@@ -27,6 +28,7 @@ class StreamChunk:
               ...
     """
     content: str = ""
+    reasoning: str = ""              # 思考增量；带 tools 时 DeepSeek 要求原样回传
     tool_call_delta: Optional[Dict[str, Any]] = None
     finish_reason: Optional[str] = None
     model: str = ""
@@ -40,10 +42,16 @@ class StreamChunk:
     def has_tool_call(self) -> bool:
         return self.tool_call_delta is not None
 
+    @property
+    def has_reasoning(self) -> bool:
+        return bool(self.reasoning)
+
     def __repr__(self) -> str:
         parts = []
         if self.has_content:
             parts.append(f"content={self.content[:40]}...")
+        if self.has_reasoning:
+            parts.append("reasoning=...")
         if self.has_tool_call:
             parts.append("tool_delta=...")
         if self.finish_reason:

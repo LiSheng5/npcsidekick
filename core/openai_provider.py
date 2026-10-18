@@ -30,6 +30,54 @@ _TOP_LEVEL_KEYS = frozenset({
     "parallel_tool_calls", "tool_choice", "response_format", "user",
 })
 
+# 思考档位归一：DeepSeek 官方只认 none/low/high/max（minimal→low、medium/xhigh→high）；
+# OpenAI 官方认 minimal/low/medium/high（max 归一到 high）。
+_DEEPSEEK_EFFORT = {
+    "minimal": "low", "low": "low", "medium": "high",
+    "high": "high", "xhigh": "high", "max": "max",
+}
+_OPENAI_EFFORT = {
+    "minimal": "minimal", "low": "low", "medium": "medium",
+    "high": "high", "xhigh": "high", "max": "high",
+}
+_OFF_VALUES = frozenset({"off", "disabled", "none"})
+
+
+def _reasoning_text(payload: Any) -> str:
+    """把各家的思考内容统一成纯文本（可能是 str / 对象 / 对象列表）。"""
+    if not payload:
+        return ""
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, (list, tuple)):
+        return "".join(_reasoning_text(item) for item in payload)
+    text = getattr(payload, "text", None)
+    if isinstance(text, str):
+        return text
+    return str(payload)
+
+
+def _message_reasoning(message: Any) -> str:
+    """非流式 message 里的思考内容：OpenRouter: reasoning；DeepSeek: reasoning_content。"""
+    for attr in ("reasoning", "reasoning_content"):
+        value = getattr(message, attr, None)
+        if value:
+            return _reasoning_text(value)
+    extra = getattr(message, "model_extra", None) or {}
+    return _reasoning_text(extra.get("reasoning") or extra.get("reasoning_content"))
+
+
+def _delta_reasoning(delta: Any) -> str:
+    """流式 delta 里的思考增量（DeepSeek: reasoning_content，OpenRouter: reasoning）。"""
+    if delta is None:
+        return ""
+    for attr in ("reasoning_content", "reasoning"):
+        value = getattr(delta, attr, None)
+        if value:
+            return _reasoning_text(value)
+    extra = getattr(delta, "model_extra", None) or {}
+    return _reasoning_text(extra.get("reasoning_content") or extra.get("reasoning"))
+
 
 class OpenAIProvider(ProviderProtocol):
     """
@@ -80,27 +128,51 @@ class OpenAIProvider(ProviderProtocol):
     def model_name(self) -> str:
         return self._model
 
-    def _thinking_body(self, re_value: str) -> dict:
-        """把 reasoning_effort 档位翻译成各家 thinking body。
+    def _thinking_params(self, re_value: str) -> dict:
+        """把 reasoning_effort 档位翻译成请求体字段 —— **一律顶层，绝不互相嵌套**。
 
-        OpenRouter: {reasoning:{effort:值, exclude:false}} — 响应经 message.reasoning 回传思考
-        DeepSeek/OpenAI: 支持分级思考 -> {thinking:{type:enabled, reasoning_effort:值}}
-        Zhipu GLM(<5.2): 仅支持开/关 -> {thinking:{type:enabled}}
-        off/disabled/none        -> 显式关闭 {thinking:{type:disabled}}
+        DeepSeek 官方（Thinking Mode）要求 `reasoning_effort` 与 `thinking` 平级：
+            {"model": ..., "reasoning_effort": "high",
+             "thinking": {"type": "enabled"}}
+        把 reasoning_effort 塞进 thinking 里是非法的（服务端可能 400 或静默忽略）。
+
+        各家方言：
+          DeepSeek / 兼容网关 : {"thinking": {"type": "enabled"}, "reasoning_effort": 值}
+          OpenAI 官方         : {"reasoning_effort": 值}（没有 thinking 开关）
+          OpenRouter          : {"reasoning": {"effort": 值, "exclude": False}}
+          Zhipu GLM(<5.2)     : {"thinking": {"type": "enabled"}}（只支持开/关）
+          off/disabled/none   : DeepSeek 系 → {"thinking": {"type": "disabled"}}；
+                                OpenAI / OpenRouter → 不发（它们没有关闭开关）
         """
         val = str(re_value).lower()
-        if val in ("off", "disabled", "none"):
-            # OpenRouter 无显式关闭:不发 reasoning 参数即不回传思考
-            if self._is_openrouter():
-                return {}
-            return {"thinking": {"type": "disabled"}}
+        off = val in _OFF_VALUES
+
         if self._is_openrouter():
+            if off:
+                # OpenRouter 无显式关闭:不发 reasoning 参数即不回传思考
+                return {}
             # OpenRouter effort 仅支持 low/medium/high; max 等高档位归一到 high
             effort = val if val in ("low", "medium", "high") else "high"
             return {"reasoning": {"effort": effort, "exclude": False}}
-        if not self._glm_supports_effort():
-            return {"thinking": {"type": "enabled"}}
-        return {"thinking": {"type": "enabled", "reasoning_effort": re_value}}
+
+        if self._is_openai_official():
+            # OpenAI 官方只有顶层 reasoning_effort（minimal/low/medium/high），
+            # 既没有 thinking 开关，也没有"关闭思考"的参数
+            return {} if off else {"reasoning_effort": _OPENAI_EFFORT.get(val, "medium")}
+
+        if self._is_glm():
+            if off:
+                return {"thinking": {"type": "disabled"}}
+            params = {"thinking": {"type": "enabled"}}
+            if self._glm_supports_effort():
+                params["reasoning_effort"] = _DEEPSEEK_EFFORT.get(val, "high")
+            return params
+
+        # DeepSeek 及 OpenAI 兼容网关：两个字段都在顶层
+        if off:
+            return {"thinking": {"type": "disabled"}}
+        return {"thinking": {"type": "enabled"},
+                "reasoning_effort": _DEEPSEEK_EFFORT.get(val, "high")}
 
     def _user_body(self) -> dict:
         """用户透传的请求体片段（环境变量 NPC_LLM_EXTRA_BODY，现读可热切）。
@@ -146,6 +218,34 @@ class OpenAIProvider(ProviderProtocol):
         """OpenRouter 聚合端点:思考请求/响应字段与 DeepSeek 直连不同。"""
         return "openrouter" in (self._base_url or "").lower()
 
+    def _is_openai_official(self) -> bool:
+        """OpenAI 官方端点:只有顶层 reasoning_effort,不认 thinking / reasoning 包装。"""
+        return "api.openai.com" in (self._base_url or "").lower()
+
+    def _is_glm(self) -> bool:
+        return "glm" in (self._model or "").lower()
+
+    def _is_deepseek(self) -> bool:
+        """DeepSeek（直连或其代理/网关）—— 带 tools 时 reasoning_content 必须回传。
+
+        OpenRouter 即使跑的是 deepseek/* 模型也走它自己的 reasoning 协议，
+        别把 DeepSeek 直连的 reasoning_content 塞过去。
+        """
+        if self._is_openrouter():
+            return False
+        return ("deepseek" in (self._base_url or "").lower()
+                or "deepseek" in (self._model or "").lower())
+
+    @property
+    def replays_reasoning_content(self) -> bool:
+        """是否必须把 assistant 的 reasoning_content 随消息回传。
+
+        DeepSeek 官方硬要求：请求里带 `tools` 时，历史每一轮 assistant 的
+        reasoning_content 都要原样回传，缺了直接 400。其它家（OpenAI/OpenRouter）
+        没有这个字段，别把未知字段塞给它们。
+        """
+        return self._is_deepseek()
+
     def _glm_supports_effort(self) -> bool:
         """GLM 系列仅在 5.2 及以上支持 reasoning_effort 分级思考。"""
         m = self._model.lower()
@@ -182,15 +282,17 @@ class OpenAIProvider(ProviderProtocol):
         if response_format:
             kwargs["response_format"] = response_format
 
-        # reasoning_effort -> 各家 thinking (经 extra_body 传递, 见 _thinking_body)
-        #   off/disabled/none -> 关闭 {thinking:{type:disabled}}
-        #   deepseek/openai -> {thinking:{type:enabled, reasoning_effort:值}}
-        #   zhipu GLM(<5.2) -> {thinking:{type:enabled}} (仅支持开/关)
+        # reasoning_effort -> 各家顶层字段（见 _thinking_params；extra_body 的上层键
+        # 就是 HTTP 请求体的顶层键，不会被再包一层）
+        #   off/disabled/none -> DeepSeek 系 {thinking:{type:disabled}}；OpenAI/OpenRouter 不发
+        #   deepseek/兼容网关 -> {thinking:{type:enabled}, reasoning_effort:值}
+        #   openai 官方       -> {reasoning_effort:值}
+        #   zhipu GLM(<5.2)   -> {thinking:{type:enabled}} (仅支持开/关)
         #   None -> 不指定(服务端默认)
         _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
         if _re:
-            kwargs["extra_body"] = self._thinking_body(_re)
-        # 用户透传（NPC_LLM_EXTRA_BODY）最后合并，可覆盖上面拼好的 thinking
+            kwargs["extra_body"] = self._thinking_params(_re)
+        # 用户透传（NPC_LLM_EXTRA_BODY）最后合并，可覆盖上面拼好的思考参数
         kwargs = self._apply_extra_body(kwargs)
 
         completion = self._client.chat.completions.create(**kwargs)
@@ -198,15 +300,7 @@ class OpenAIProvider(ProviderProtocol):
 
         # 思考可视化: 兼容 OpenRouter/DeepSeek 的思考内容字段
         # (OpenRouter: message.reasoning / reasoning_details; DeepSeek: message.reasoning_content)
-        reasoning = getattr(choice.message, "reasoning", None)
-        if not reasoning:
-            reasoning = getattr(choice.message, "reasoning_content", None)
-        if not reasoning:
-            extra = getattr(choice.message, "model_extra", None) or {}
-            reasoning = extra.get("reasoning") or ""
-        if reasoning and not isinstance(reasoning, str):
-            details = getattr(reasoning, "text", None)
-            reasoning = details if details else str(reasoning)
+        reasoning = _message_reasoning(choice.message)
 
         return LLMResponse(
             content=choice.message.content or "",
@@ -214,7 +308,7 @@ class OpenAIProvider(ProviderProtocol):
             finish_reason=choice.finish_reason,
             model=completion.model,
             usage=completion.usage,
-            reasoning=reasoning or "",
+            reasoning=reasoning,
         )
 
     async def stream(
@@ -245,15 +339,17 @@ class OpenAIProvider(ProviderProtocol):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
 
-        # reasoning_effort -> 各家 thinking (经 extra_body 传递, 见 _thinking_body)
-        #   off/disabled/none -> 关闭 {thinking:{type:disabled}}
-        #   deepseek/openai -> {thinking:{type:enabled, reasoning_effort:值}}
-        #   zhipu GLM(<5.2) -> {thinking:{type:enabled}} (仅支持开/关)
+        # reasoning_effort -> 各家顶层字段（见 _thinking_params；extra_body 的上层键
+        # 就是 HTTP 请求体的顶层键，不会被再包一层）
+        #   off/disabled/none -> DeepSeek 系 {thinking:{type:disabled}}；OpenAI/OpenRouter 不发
+        #   deepseek/兼容网关 -> {thinking:{type:enabled}, reasoning_effort:值}
+        #   openai 官方       -> {reasoning_effort:值}
+        #   zhipu GLM(<5.2)   -> {thinking:{type:enabled}} (仅支持开/关)
         #   None -> 不指定(服务端默认)
         _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
         if _re:
-            kwargs["extra_body"] = self._thinking_body(_re)
-        # 用户透传（NPC_LLM_EXTRA_BODY）最后合并，可覆盖上面拼好的 thinking
+            kwargs["extra_body"] = self._thinking_params(_re)
+        # 用户透传（NPC_LLM_EXTRA_BODY）最后合并，可覆盖上面拼好的思考参数
         kwargs = self._apply_extra_body(kwargs)
 
         stream_response = await self._async_client.chat.completions.create(**kwargs)
@@ -273,6 +369,9 @@ class OpenAIProvider(ProviderProtocol):
                 continue
 
             content = (delta.content or "") if delta else ""
+            # 思考增量：DeepSeek 走 reasoning_content，OpenRouter 走 reasoning。
+            # 带 tools 时 DeepSeek 要求把 CoT 原样回传，所以不能在这里丢掉。
+            reasoning = _delta_reasoning(delta)
 
             tool_call_delta = None
             if delta is not None and delta.tool_calls:
@@ -286,6 +385,7 @@ class OpenAIProvider(ProviderProtocol):
 
             yield StreamChunk(
                 content=content,
+                reasoning=reasoning,
                 tool_call_delta=tool_call_delta,
                 finish_reason=finish_reason,
                 model=event.model,

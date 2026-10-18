@@ -240,7 +240,10 @@ def assemble(persona: Dict[str, Any], observation: Any,
     messages.append({"role": "user", "content": user_text})
     section_tokens = {
         "system": chatlog.estimate_tokens(system_content),
-        "history": sum(chatlog.estimate_tokens(str(m.get("content", ""))) for m in history),
+        # 历史里的思考内容（reasoning_content）也会发给模型，算进历史层预算
+        "history": sum(chatlog.estimate_tokens(str(m.get("content", "")))
+                       + chatlog.estimate_tokens(str(m.get("reasoning_content", "") or ""))
+                       for m in history),
         "state": state_tokens + recent_tokens,   # 观测 + 近况（共享 state 预算，任务 5）
         "memory": memory_tokens,
         "user": chatlog.estimate_tokens(message),

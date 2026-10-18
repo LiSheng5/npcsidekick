@@ -212,6 +212,11 @@ class LLMClient:
         """获取底层 Provider (调试用)。"""
         return self._provider
 
+    @property
+    def replays_reasoning_content(self) -> bool:
+        """当前 Provider 是否要求回传 reasoning_content（DeepSeek 带 tools 时强制）。"""
+        return bool(getattr(self._provider, "replays_reasoning_content", False))
+
 
 class LLMResponse:
     """

@@ -1354,7 +1354,10 @@ async function renderModel(view) {
       h('div', { class: 'kv' }, h('span', { class: 'k', text: '深度思考' }),
         h('span', { class: 'v', text: cur.reasoning_effort || '不指定' })),
       h('div', { class: 'kv' }, h('span', { class: 'k', text: '实际下发' }),
-        h('span', { class: 'v', text: cur.thinking_effort ? `发 ${cur.thinking_effort}` : '一个思考参数都不发' })),
+        h('span', { class: 'v', text: !cur.thinking_effort
+          ? '一个思考参数都不发'
+          : (['off', 'disabled', 'none'].includes(cur.thinking_effort)
+            ? '关闭思考（thinking: disabled）' : `发 ${cur.thinking_effort}`) })),
       h('div', { class: 'kv' }, h('span', { class: 'k', text: 'API Key' }),
         h('span', { class: 'v', text: cur.api_key && cur.api_key.present
           ? `${cur.api_key.masked}（来自 ${cur.api_key.source || '未知'}）`

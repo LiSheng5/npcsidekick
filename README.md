@@ -85,7 +85,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `AGENT_MODEL` / `NPC_MODEL` | 模型名（`NPC_MODEL` 是旧名） | — |
 | `NPC_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY` | API key（旧名为兼容保留；也可放 `api_key.txt` 或控制台） | — |
 | `NPC_BASE_URL` / `DEEPSEEK_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容端点；空 = 按模型名猜厂商 | — |
-| `NPC_REASONING_EFFORT` | 思考档位：`off`/`disabled`/`none`/`low`/`medium`/`high`/`max`；空 = 不指定 | — |
+| `NPC_REASONING_EFFORT` | 思考档位：`off`/`disabled`/`none`/`low`/`medium`/`high`/`max`；空 = 不指定。按 DeepSeek 官方格式下发：`reasoning_effort` 与 `thinking` 都在请求体**顶层**（互不嵌套） | — |
 | `NPC_LLM_RETRY` | LLM 瞬时故障重试开关（布尔词表见下） | 关 |
 | `NPC_LLM_RETRY_DELAYS` | 每次补试前等待的秒数，逗号分隔 | `2,6` |
 | `NPC_LLM_EXTRA_BODY` | 透传进请求体的 JSON 片段（各家方言自填；非法 JSON 只告警） | 空 |
@@ -100,6 +100,8 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `NPC_TRACE_FILE` | 回合 trace 落盘（JSONL，只记长度不记原文） | 不落盘 |
 
 布尔词表：`1` / `true` / `yes` / `on` 为开（大小写、首尾空白不敏感），其余一律关。数值项未设置/空/非法 → 回落默认值。除 `api_key.txt` 权限检测外，全部**每次现读环境变量**，改完不用重启（可热切）。
+
+> 思考模式：请求带 `tools` 时，DeepSeek 官方要求把历史 assistant 的 `reasoning_content` 原样回传（缺了直接 400）。所以回合内的工具轮与历史消息都会带上思考内容，并计入 `NPC_BUDGET_HISTORY` 预算；非 DeepSeek 端点不回传这个字段。
 
 > `NPC_BUDGET_HISTORY` 调小后，摘要阈值 `NPC_SUMMARY_TOKEN_THRESHOLD` 也建议相应调小，否则历史会被预算截断而摘要迟迟不触发。
 
