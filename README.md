@@ -211,14 +211,12 @@ pytest
 手测脚本（真实 HTTP、可打印可直接贴回来的 JSON 汇总）：
 
 ```bash
-python scripts/manual_checks.py llm-down --runs 5     # 不配 LLM 的首帧延迟
+python scripts/manual_checks.py llm-down --runs 10    # 不配 LLM 的首帧延迟
 python scripts/manual_checks.py disconnect            # 中途断开 SSE 后的服务端状态
 python scripts/manual_checks.py uncertain --runs 3    # mock Mod 超时 → 不确定（需要真实 key）
 ```
 
-已跑过的结果记在 [docs/manual_checks.md](docs/manual_checks.md)。
-
-手测脚本：`python scripts/manual_checks.py --help`（子命令 `llm-down` / `disconnect` / `uncertain`），结果与填法见 [docs/manual_checks.md](docs/manual_checks.md)。
+已跑过的结果与填法见 [docs/manual_checks.md](docs/manual_checks.md)。
 
 ## 目录结构
 
