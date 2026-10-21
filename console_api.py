@@ -2,7 +2,7 @@
 
 游戏面 = mod 用的四件事（报到 / 对话 / 动作执行 / 动作结果回报）+ 状态查询；
 本文件只服务于本地控制台 UI：
-角色卡读写、关系网（含头像）、记忆卡增删改查、聊天记录查看、手动修剪。
+角色卡读写、关系网（含头像）、记忆卡增删改查、聊天记录查看。
 
 约定：
   · 找不到资源 → 404；请求体非法 → 400（与游戏面的"字段非法 → 400"区分开）
@@ -357,13 +357,11 @@ def build_router(persona_dir: Path,
     # ── 记忆卡（store/{id}_memory.json）──────────────────
 
     def _decorate(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """给每条附上"当前强度 / 是否豁免修剪"，让控制台与修剪口径一致。"""
+        """给每条附上存在时长，方便控制台展示。"""
         now = time.time()
         out = []
         for e in entries:
             item = dict(e)
-            item["strength"] = round(memory.strength_of(e, now), 3)
-            item["exempt"] = memory.is_exempt(e)
             item["age_hours"] = round(max(0.0, (now - e["created_at"]) / 3600.0), 1)
             out.append(item)
         return out
@@ -375,8 +373,6 @@ def build_router(persona_dir: Path,
             "npc_id": npc_id,
             "entries": _decorate(entries),
             "count": len(entries),
-            "prune_threshold": 1.0,
-            "exempt_importance": 8,
         }
 
     @router.post("/npcs/{npc_id}/memory")
@@ -424,16 +420,6 @@ def build_router(persona_dir: Path,
         if not ok:
             raise HTTPException(status_code=404, detail=f"未找到记忆条目: {entry_id}")
         return {"ok": True, "deleted": entry_id}
-
-    @router.post("/npcs/{npc_id}/prune")
-    async def prune_memory(npc_id: str):
-        """手动触发确定性修剪（与对话开始时自动跑的是同一个函数）。"""
-        async with lock_for(npc_id):
-            removed = await asyncio.to_thread(memory.prune, npc_id, store_dir=store_dir)
-            remaining = await asyncio.to_thread(memory.load_card, npc_id,
-                                                store_dir=store_dir)
-        return {"ok": True, "npc_id": npc_id, "removed": removed,
-                "remaining": len(remaining)}
 
     # ── 聊天记录（store/{id}_chat.jsonl）─────────────────
 

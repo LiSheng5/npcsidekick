@@ -30,7 +30,10 @@ _PARAM_TYPE = "string"
 REMEMBER_TOOL = ToolSchema(
     name=TOOL_REMEMBER,
     description=("把值得记住的事写进记忆卡。只在确实值得记时才调用（玩家说的重要信息、"
-                 "承诺、长期偏好、发生过的关键事件）；寒暄和废话不要记。"),
+                 "承诺、长期偏好、发生过的关键事件）；寒暄和废话不要记。"
+                 "只记玩家明说的话和确实发生过的事，不要记你自己的猜测、推断或对玩家的评价。"
+                 "如果【相关记忆】里已经有同一件事（哪怕说法不同），"
+                 "用 `replaces` 填它方括号里的编号来更新，不要重复记。"),
     parameters={
         "properties": {
             "content": {"type": "string", "description": "要记住的事，一句话写清关键事实"},
@@ -38,6 +41,8 @@ REMEMBER_TOOL = ToolSchema(
                            "description": "重要性 0-9，由你此刻判断（8 以上 = 玩家的正事/长期要求）"},
             "category": {"type": "string",
                          "description": "分类，例如 preference / event / promise"},
+            "replaces": {"type": "string",
+                         "description": "要更新的旧记忆编号（方括号里的 6 位字符）；没有就不填"},
         },
         "required": ["content"],
     },
@@ -121,13 +126,24 @@ def run_tool(name: str, args: Dict[str, Any], npc_id: str,
         content = args.get("content")
         if not isinstance(content, str) or not content.strip():
             return _result(name, ToolResultStatus.ERROR, error="remember 缺少 content", started=started)
-        importance = _as_importance(args.get("importance"))
-        category = args.get("category")
-        category = category if isinstance(category, str) and category.strip() else memory.DEFAULT_CATEGORY
-        entry = memory.add_entry(npc_id, content, importance=importance,
-                                 category=category, store_dir=store_dir)
-        return _result(name, ToolResultStatus.SUCCESS,
-                       data=f"已记住（重要性 {entry['importance']}）", started=started)
+        # importance / category 仅在模型显式给了才传（replaces 更新时没给就保留原值）
+        extra: Dict[str, Any] = {}
+        if args.get("importance") is not None:
+            extra["importance"] = _as_importance(args.get("importance"))
+        raw_cat = args.get("category")
+        if isinstance(raw_cat, str) and raw_cat.strip():
+            extra["category"] = raw_cat
+        raw_rep = args.get("replaces")
+        replaces = raw_rep.strip() if isinstance(raw_rep, str) and raw_rep.strip() else None
+        entry, updated = memory.remember_entry(npc_id, content, replaces=replaces,
+                                               store_dir=store_dir, **extra)
+        if updated:
+            data = "已更新旧记忆"
+        elif replaces:
+            data = (f"没找到要更新的旧记忆，已当新记忆记下（重要性 {entry['importance']}）")
+        else:
+            data = f"已记住（重要性 {entry['importance']}）"
+        return _result(name, ToolResultStatus.SUCCESS, data=data, started=started)
 
     if name == TOOL_RECALL:
         query = args.get("query")

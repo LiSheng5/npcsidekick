@@ -225,7 +225,7 @@ def test_talk_uses_persona_synonyms_explicitly(tmp_store, write_persona,
     检索不看任何别处（P-24 阶段 2 删掉了 `memory.set_synonyms` 全局表）。
     """
     write_persona("cang", entity_synonyms={"木材": ["木材", "柴", "木头"]})
-    memory.add_entry("cang", "存着过冬的木材", importance=5, store_dir=tmp_store)
+    wood = memory.add_entry("cang", "存着过冬的木材", importance=5, store_dir=tmp_store)
     memory.add_entry("cang", "灶边的石头", importance=5, store_dir=tmp_store)
     provider = make_provider(turns=[
         {"text": "", "tool_calls": [{"name": "recall", "arguments": {"query": "柴"}}]},
@@ -237,7 +237,7 @@ def test_talk_uses_persona_synonyms_explicitly(tmp_store, write_persona,
 
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert tool_msg["role"] == "tool"
-    assert tool_msg["content"].splitlines()[0] == "- 存着过冬的木材"   # 用的是角色卡里的表
+    assert tool_msg["content"] == f"- [{wood['id'][:6]}] 存着过冬的木材"   # 用的是角色卡里的表
     assert not hasattr(memory, "_ACTIVE_SYNONYMS")    # 进程级全局表已不存在
     assert kinds(res)[-1] == "done"
 

@@ -1,19 +1,11 @@
-"""记忆卡 — 条目 + 加权检索 + 半衰期修剪。
+"""记忆卡 — 条目 + 相关度检索。
 
-加权公式与半衰期思想的出处（合规留档）：
-  · 加权检索公式与参数 —— AI Town (a16z, MIT License,
-    https://github.com/a16z-infra/ai-town):
-        score = recency × 0.5 + relevance × 3 + importance × 2
-        recency = 0.99 ^ 小时
-  · 半衰期遗忘思想 —— hippo-memory (https://github.com/kitfunso/hippo-memory):
-        强度 = importance × 0.5 ^ (小时 / 72)，强度 < 1.0 的旧条目移除
-
-记忆卡的写入口只有三个：remember 工具、动作结果回报
+记忆卡的写入口只有三个：remember 工具（remember_entry）、动作结果回报
 （add_action_result）、人工手改 JSON 文件。本模块不提供其他写通道。
 
 存储格式：store/{id}_memory.json —— JSON 条目列表，可直接手改。
 条目: {id, content, importance, category, created_at, pinned?}
-  · id 用 uuid；pinned 为 True 时豁免一切自动修剪（红线）
+  · id 用 uuid；pinned 只影响预取优先级（回合开始优先塞进记忆预算）
   · 兼容读旧版记忆卡（content / importance / created_at 字段相同）
 """
 from __future__ import annotations
@@ -23,8 +15,9 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from core.config_flags import env_num
 from core.logging_config import log
 from core.paths import resolve_store
 
@@ -32,18 +25,12 @@ from core.paths import resolve_store
 EV_DONE = "完成: "
 EV_FAIL = "没做成: "
 
-# ── AI Town 加权参数（MIT, a16z-infra）—— 出处见模块 docstring ──
-_GW_RECENCY, _GW_RELEVANCE, _GW_IMPORTANCE = 0.5, 3.0, 2.0
-_DECAY = 0.99              # 每小时衰减
-_HOUR_SECONDS = 3600.0
+# ── recall 检索参数（排序权重是自己定的初值，等评测集再调）──
+RECALL_MIN_REL = 0.2        # 环境变量 NPC_MEM_RECALL_MIN_REL，现读可热切
+_W_REL, _W_IMP = 1.0, 0.3   # 排序权重：相关度为主、重要度为辅
 
-# ── 半衰期修剪（hippo-memory 思想）──
-_HALF_LIFE_HOURS = 72.0
-_PRUNE_STRENGTH = 1.0
-
-# 修剪豁免：高重要度 / 人工钉住 / 反思与合并产物
-_EXEMPT_CATEGORIES = frozenset({"reflection", "consolidated"})
-_EXEMPT_IMPORTANCE = 8
+# 条目短编号（id 前 6 位）：模型用它填 remember 的 replaces
+_SHORT_ID_LEN = 6
 
 # 动作结果写卡的默认重要度（成功=正事、失败=待办感）
 _IMPORTANCE_ACTION_OK = 6
@@ -51,6 +38,9 @@ _IMPORTANCE_ACTION_FAIL = 4
 
 DEFAULT_IMPORTANCE = 5
 DEFAULT_CATEGORY = "general"
+
+# "参数未显式传入"哨兵（与显式传默认值区分开，remember_entry 用）
+_UNSET: Any = object()
 
 # ── 分词（jieba 可选依赖，缺失时优雅降级 —— 零惩罚哲学）──────
 try:                                    # pragma: no cover - 取决于环境
@@ -61,14 +51,47 @@ except ImportError:                     # pragma: no cover
 _PUNCT = "，。？！、；：,.;:!? \t\r\n（）()「」『』\"'“”‘’—…·/\\"
 
 
+def _fallback_tokens(text: str) -> List[str]:
+    """没装 jieba 时的兜底切词：按标点和空白切段后——
+    连续的 ASCII 字母数字当一个词，连续的中日韩字符取字二元组
+    （长度 1 的片段保留该单字）。
+    """
+    tokens: List[str] = []
+    for seg in text.split():
+        runs: List[tuple] = []
+        cur, kind = "", None
+        for ch in seg:
+            k = ("ascii" if ch.isascii() and ch.isalnum()
+                 else "cjk" if not ch.isascii() else None)
+            if k is None:
+                if cur:
+                    runs.append((kind, cur))
+                    cur, kind = "", None
+                continue
+            if k == kind:
+                cur += ch
+            else:
+                if cur:
+                    runs.append((kind, cur))
+                cur, kind = ch, k
+        if cur:
+            runs.append((kind, cur))
+        for k, chunk in runs:
+            if k == "ascii" or len(chunk) == 1:
+                tokens.append(chunk)
+            else:
+                tokens.extend(chunk[i:i + 2] for i in range(len(chunk) - 1))
+    return tokens
+
+
 def _tokenize(text: str) -> List[str]:
-    """中文感知切词：有 jieba 用 jieba，没装退回空白切分。"""
+    """中文感知切词：有 jieba 用 jieba，没装用字二元组兜底。"""
     cleaned = text
     for p in _PUNCT:
         cleaned = cleaned.replace(p, " ")
     if jieba is not None:
         return [w.strip() for w in jieba.lcut(cleaned) if w.strip()]
-    return [w for w in cleaned.split() if w]
+    return _fallback_tokens(cleaned)
 
 
 # ── 同义词族（声明驱动：由角色卡 entity_synonyms 声明，引擎保持游戏无关）──
@@ -107,12 +130,6 @@ def _canonical_terms(text: str, table: Optional[Dict[str, Any]]) -> set:
         if any(a in text for a in aliases):
             found.add(canon)
     return found
-
-
-def _recency_score(created_at: float, now: float) -> float:
-    """AI Town 时效分：0.99 ^ 小时。"""
-    hours = max(0.0, (now - created_at) / _HOUR_SECONDS)
-    return _DECAY ** hours
 
 
 def _relevance_score(content: str, query: str,
@@ -232,77 +249,98 @@ def add_action_result(npc_id: str, action: str, ok: bool, note: str = "",
     )
 
 
-# ── 检索（AI Town 加权公式）───────────────────────────────
+# ── 条目短编号与 replaces（remember 工具的更新通道）────────
+
+def resolve_id(npc_id: str, prefix: str,
+               store_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """按短编号前缀找条目：在非 category == "action" 的条目里**恰好唯一匹配**才返回。
+
+    没有匹配 / 多个匹配 / 指向 action 条目 → None（调用方自行决定当新记忆记）。
+    """
+    p = (prefix or "").strip()
+    if not p:
+        return None
+    matches = [e for e in load_card(npc_id, store_dir=store_dir)
+               if e.get("category") != "action" and str(e["id"]).startswith(p)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def remember_entry(npc_id: str, content: str,
+                   importance: Any = _UNSET, category: Any = _UNSET,
+                   replaces: Optional[str] = None,
+                   store_dir: Optional[Path] = None) -> Tuple[Dict[str, Any], bool]:
+    """remember 工具写卡：replaces 命中旧条目就原地更新，否则新增。返回 (条目, 是否更新)。
+
+    - replaces 能解析到条目（resolve_id 唯一命中）→ 原地更新 content；
+      importance / category 仅在调用方显式传了才改；保留原 id / created_at / pinned；
+      返回 (entry, True)。
+    - replaces 为空 → 等同 add_entry（importance / category 未显式传时用默认值）；
+      返回 (entry, False)。
+    - replaces 给了但解析不到（没匹配 / 多个匹配 / 指向 action 条目）→ 当新记忆记下，
+      返回 (entry, False)，不报错。
+    """
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("记忆内容不能为空")
+    old = resolve_id(npc_id, replaces, store_dir=store_dir) if replaces else None
+    if old is not None:
+        fields: Dict[str, Any] = {"content": content}
+        if importance is not _UNSET:
+            fields["importance"] = importance
+        if category is not _UNSET:
+            fields["category"] = category
+        entry = update_entry(npc_id, old["id"], store_dir=store_dir, **fields)
+        log.debug("memory_replaced", npc_id=npc_id, entry_id=old["id"])
+        return entry, True
+    return add_entry(npc_id, content,
+                     importance=DEFAULT_IMPORTANCE if importance is _UNSET else importance,
+                     category=DEFAULT_CATEGORY if category is _UNSET else category,
+                     store_dir=store_dir), False
+
+
+# ── 检索（相关度门槛 + 相关度为主、重要度为辅）─────────────
+
+def _recall_min_rel() -> float:
+    """recall 相关度门槛（现读，可热切）：NPC_MEM_RECALL_MIN_REL，默认 RECALL_MIN_REL。"""
+    return max(0.0, float(env_num("NPC_MEM_RECALL_MIN_REL", RECALL_MIN_REL)))
+
 
 def retrieve(npc_id: str, query: str, top_k: int = 5,
              synonyms: Optional[Dict[str, Any]] = None,
-             now: Optional[float] = None,
              store_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """加权检索：recency×0.5 + relevance×3 + importance×2，返回前 top_k 条。
+    """相关度检索：候选 = 相关度 ≥ 门槛，排序 = 相关度为主、重要度为辅，返回前 top_k 条。
 
+    不相关的条目不返回（哪怕重要度高）；全不相关 → 空列表。
     synonyms = 本次检索的同义词表（通常来自该 NPC 的角色卡 entity_synonyms）；
     不传 = 没有同义词召回（没有进程级全局表，多 NPC 并发互不污染）。
     """
     entries = load_card(npc_id, store_dir=store_dir)
     if not entries:
         return []
-    now = time.time() if now is None else now
     table = _normalize_synonyms(synonyms)
     q_canon = _canonical_terms(query, table)
     tokens = _tokenize(query)
+    min_rel = _recall_min_rel()
 
     scored = []
     for e in entries:
         rel = _relevance_score(e["content"], query, tokens, q_canon,
                                _canonical_terms(e["content"], table), table=table)
-        score = (_recency_score(e["created_at"], now) * _GW_RECENCY
-                 + rel * _GW_RELEVANCE
-                 + e["importance"] * _GW_IMPORTANCE)
-        scored.append((score, e))
-    scored.sort(key=lambda x: x[0], reverse=True)
+        if rel < min_rel:
+            continue
+        rank = rel * _W_REL + (e["importance"] / 9) * _W_IMP
+        scored.append((rank, e))
+    scored.sort(key=lambda x: (-x[0], -x[1]["created_at"]))
     return [e for _, e in scored[:max(0, top_k)]]
 
 
 def format_for_context(entries: List[Dict[str, Any]]) -> str:
-    """把检索结果格式化成给模型的逐字文本（回忆类回答照原文说，不改写）。"""
+    """把检索结果格式化成给模型的逐字文本（回忆类回答照原文说，不改写）。
+
+    每行带条目 id 的 6 位短编号，供 remember 的 replaces 使用。
+    """
     if not entries:
         return "（没有想起相关的事）"
-    return "\n".join(f"- {e['content']}" for e in entries)
-
-
-# ── 遗忘（确定性半衰期修剪，不走 LLM）─────────────────────
-
-def is_exempt(entry: Dict[str, Any]) -> bool:
-    """是否豁免自动修剪：人工钉住 / importance ≥ 8 / 反思与合并产物。"""
-    return (bool(entry.get("pinned"))
-            or int(entry.get("importance", DEFAULT_IMPORTANCE)) >= _EXEMPT_IMPORTANCE
-            or entry.get("category") in _EXEMPT_CATEGORIES)
-
-
-def strength_of(entry: Dict[str, Any], now: Optional[float] = None) -> float:
-    """当前记忆强度 = importance × 0.5 ^ (小时 / 72)（控制台展示用，与修剪同一口径）。"""
-    now = time.time() if now is None else now
-    hours = max(0.0, (now - float(entry.get("created_at", now))) / _HOUR_SECONDS)
-    return float(entry.get("importance", DEFAULT_IMPORTANCE)) * (0.5 ** (hours / _HALF_LIFE_HOURS))
-
-
-def prune(npc_id: str, now: Optional[float] = None,
-          store_dir: Optional[Path] = None) -> int:
-    """移除强度 < 1.0 的旧条目，返回移除条数。
-
-    强度 = importance × 0.5 ^ (小时 / 72)；豁免：importance ≥ 8、pinned、反思/合并产物。
-    """
-    entries = load_card(npc_id, store_dir=store_dir)
-    if not entries:
-        return 0
-    now = time.time() if now is None else now
-    keep = [e for e in entries
-            if is_exempt(e) or strength_of(e, now) >= _PRUNE_STRENGTH]
-    removed = len(entries) - len(keep)
-    if removed:
-        save_card(npc_id, keep, store_dir=store_dir)
-        log.info("memory_pruned", npc_id=npc_id, removed=removed, kept=len(keep))
-    return removed
+    return "\n".join(f"- [{e['id'][:_SHORT_ID_LEN]}] {e['content']}" for e in entries)
 
 
 # ── 条目级人工编辑（控制台用的就是"直接手改记忆卡"这条通道）─

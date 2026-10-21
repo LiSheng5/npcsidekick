@@ -5,7 +5,7 @@
 ## 它做什么
 
 - **对话**：按角色卡（persona）生成台词，SSE 流式输出，逐字到端不卡首字
-- **记忆**：记忆卡存储 + 加权检索 + 半衰期自动修剪，回合开始确定性预取「置顶 + 最近 N 条」，NPC 记得玩家说过的事
+- **记忆**：记忆卡 + 相关度检索，回合开始按置顶和重要度预取，NPC 记得玩家说过的事
 - **动作**：动作 = LLM 直接调用的工具。mod 报到声明能力清单（白名单），LLM 只能调用声明过的动作，由服务同步转发给 mod 执行，结果当场写进记忆
 - **语音**：可选 TTS 输出通道（装 `edge-tts` 才有声，缺依赖自动降级不出帧）
 - **控制台**：零构建本地 Web 控制台，管理角色卡、记忆卡、聊天记录与关系网
@@ -94,7 +94,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `NPC_PENDING_TTL` | 待定动作存活上限（秒） | 120 |
 | `NPC_SUMMARY_TOKEN_THRESHOLD` | 聊天记录滚动摘要触发阈值（token，本地估算） | 20000 |
 | `NPC_SUMMARY_KEEP_RECENT` | 摘要后仍逐字保留的最近轮数 | 8 |
-| `NPC_PREFETCH_RECENT` | 记忆预取「最近 N 条」的 N（置顶条目不占名额） | 5 |
+| `NPC_MEM_RECALL_MIN_REL` | recall 相关度门槛（低于门槛的条目不返回） | 0.2 |
 | `NPC_RECENT_RESULTS` / `NPC_RECENT_MINUTES` | 近况层「最近动作结果」条数 / 时间窗（分钟） | 5 / 30 |
 | `NPC_BUDGET_STATE` / `NPC_BUDGET_MEMORY` / `NPC_BUDGET_HISTORY` | 上下文各层 token 预算 | 800 / 600 / 4000 |
 | `NPC_TRACE_FILE` | 回合 trace 落盘（JSONL，只记长度不记原文） | 不落盘 |
@@ -172,12 +172,12 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 
 聊天记录超过 `NPC_SUMMARY_TOKEN_THRESHOLD` 后，旧轮次由 LLM 压成滚动摘要（后台、不挡首字）；摘要只保脉络，重要事实走记忆卡。
 
-## 记忆：预取、检索与修剪
+## 记忆：预取与检索
 
-- 写入口只有三个：`remember` 工具、动作结果写卡、人工手改记忆卡（控制台也是走这条通道）。
-- **回合开始预取**：`pinned` 条目 + 最近 N 条（`NPC_PREFETCH_RECENT`，排除 `category=action`），不做相关性打分、不判断与当前这句话是否相关。块内 pinned 在前、其余从新到旧，预算截断从尾部砍，等于 pinned 最后才被砍。
-- `recall` 工具保留，用于深挖：按 `recency×0.5 + relevance×3 + importance×2` 取 top 5，同义词族取自该 NPC 角色卡的 `entity_synonyms`（按请求显式传入，多 NPC 并发不串）。
-- **修剪**：每回合开始做一次确定性半衰期修剪（不走 LLM）：强度 = `importance × 0.5^(小时/72)`，强度 < 1 的旧条目移除；`pinned`、`importance ≥ 8`、`reflection` / `consolidated` 豁免。
+- 写入口只有三个：`remember` 工具（含 `replaces` 更新）、动作结果写卡、人工手改记忆卡（控制台也是走这条通道）。
+- **回合开始预取**：条目按「置顶 → 重要度 → 新旧」的顺序塞进记忆预算（`NPC_BUDGET_MEMORY`），到预算为止，放不下就停——整条进或整条不进，不半截截断。排除 `category=action`（动作结果由近况层负责）。不做相关性打分、不判断与当前这句话是否相关；预取只读卡，不改任何字段。
+- `recall` 工具保留，用于深挖：相关度低于门槛（`NPC_MEM_RECALL_MIN_REL`，默认 0.2）的条目不返回，全不相关返回空；排序 = 相关度为主、重要度为辅（`相关度 × 1.0 + (importance / 9) × 0.3`，同分 `created_at` 新的在前），同义词族取自该 NPC 角色卡的 `entity_synonyms`（按请求显式传入，多 NPC 并发不串）。
+- **`replaces` 更新旧记忆**：【相关记忆】与 recall 结果的每行带条目 id 的 6 位短编号（方括号里那串）。同一件事换了说法时，`remember` 用 `replaces` 填短编号把旧条目原地更新（保留 id / 创建时间 / `pinned`），不重复记；`replaces` 没有恰好唯一匹配到条目就当新记忆记下，不报错。工具描述里同时约束：只记玩家明说的话和确实发生过的事，不记猜测、推断或评价。
 
 ## 回合 trace
 
@@ -208,7 +208,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 pytest
 ```
 
-覆盖回合循环、上下文分层与预算、记忆检索与修剪、记忆预取、滚动摘要、近况层、动作去重、pending / call_id 对账、回合 trace、控制台 API 等。
+覆盖回合循环、上下文分层与预算、记忆检索与 replaces 更新、记忆预取、滚动摘要、近况层、动作去重、pending / call_id 对账、回合 trace、控制台 API 等。
 
 手测脚本（真实 HTTP、可打印可直接贴回来的 JSON 汇总）：
 
@@ -226,7 +226,7 @@ python scripts/manual_checks.py uncertain --runs 3    # mock Mod 超时 → 不�
 server.py       HTTP 服务：mod 契约端点 + 应用装配
 turn.py         回合主体：LLM ↔ 工具多轮循环（产出 SSE 帧 + 回合 trace）
 context.py      上下文分层装配（纯函数，可单测）
-memory.py       记忆卡：条目 + 加权检索 + 半衰期修剪
+memory.py       记忆卡：条目 + 相关度检索
 chatlog.py      持久聊天记录 + 滚动摘要
 tools.py        remember / recall + 动作工具定义（白名单闸门）
 pending.py      待定动作登记（长动作回报对账）
@@ -240,11 +240,6 @@ docs/           手测记录等文档
 tests/          pytest 测试
 store/          运行时数据（聊天记录、记忆卡、摘要）—— 不进仓库
 ```
-
-## 致谢
-
-- 加权记忆检索公式（recency / relevance / importance）借鉴 [AI Town](https://github.com/a16z-infra/ai-town)（MIT）
-- 半衰期遗忘思想借鉴 [hippo-memory](https://github.com/kitfunso/hippo-memory)
 
 ## License
 

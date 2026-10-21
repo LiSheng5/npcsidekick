@@ -804,6 +804,19 @@ select {
   border-color: var(--accent);
 }
 
+.mem-id {
+  flex: none;
+  margin-top: 2px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: default;
+}
+
 .mem-main {
   flex: 1;
   min-width: 0;
@@ -1653,19 +1666,11 @@ select {
 
 /* ── v4 增补（照搬的设计系统不动，这里只补 v4 新面板用到的修饰类）── */
 
-/* 强度条：放在卡片里占满宽度；红=低于修剪阈值，绿=豁免修剪 */
+/* 进度条（聊天记录摘要进度）：放在卡片里占满宽度 */
 .card .bar {
   max-width: none;
   width: 100%;
   height: 8px;
-}
-
-.bar.danger i {
-  background: var(--red);
-}
-
-.bar.exempt i {
-  background: var(--green);
 }
 
 /* 侧栏底部状态（模型 / 思考档位 / mod 在线数） */

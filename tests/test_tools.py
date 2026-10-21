@@ -28,7 +28,10 @@ def test_memory_tool_schemas():
     assert rem["type"] == "function"
     assert rem["function"]["name"] == "remember"
     assert rem["function"]["parameters"]["required"] == ["content"]
-    assert set(rem["function"]["parameters"]["properties"]) == {"content", "importance", "category"}
+    assert set(rem["function"]["parameters"]["properties"]) == {
+        "content", "importance", "category", "replaces"}
+    assert rem["function"]["parameters"]["properties"]["replaces"]["type"] == "string"
+    assert "replaces" in rem["function"]["description"]
 
     rec = tools.RECALL_TOOL.to_openai_function()
     assert rec["function"]["name"] == "recall"
@@ -83,19 +86,41 @@ def test_run_remember_writes_card(tmp_store):
                          store_dir=tmp_store)
 
     assert res.status == ToolResultStatus.SUCCESS
+    assert res.data == "已记住（重要性 7）"                 # 新增：旧文案
     entries = memory.load_card("cang", store_dir=tmp_store)
     assert [e["content"] for e in entries] == ["玩家爱吃面"]
-    assert entries[0]["importance"] == 7
 
 
 def test_run_remember_defaults_and_clamping(tmp_store):
-    tools.run_tool("remember", {"content": "随手一提"}, "cang", store_dir=tmp_store)
-    tools.run_tool("remember", {"content": "超范围", "importance": 99}, "cang",
-                   store_dir=tmp_store)
+    r1 = tools.run_tool("remember", {"content": "随手一提"}, "cang", store_dir=tmp_store)
+    r2 = tools.run_tool("remember", {"content": "超范围", "importance": 99}, "cang",
+                        store_dir=tmp_store)
 
+    assert r1.data == "已记住（重要性 5）"
+    assert r2.data == "已记住（重要性 9）"
+
+
+def test_run_remember_replaces_updates_old(tmp_store):
+    old = memory.add_entry("cang", "玩家爱吃面", importance=7, store_dir=tmp_store)
+
+    res = tools.run_tool("remember", {"content": "玩家喜欢面条",
+                                      "replaces": old["id"][:6]}, "cang",
+                         store_dir=tmp_store)
+
+    assert res.status == ToolResultStatus.SUCCESS
+    assert res.data == "已更新旧记忆"
     entries = memory.load_card("cang", store_dir=tmp_store)
-    assert entries[0]["importance"] == memory.DEFAULT_IMPORTANCE
-    assert entries[1]["importance"] == 9
+    assert [e["content"] for e in entries] == ["玩家喜欢面条"]   # 更新，不是新增
+
+
+def test_run_remember_replaces_unresolved_falls_back(tmp_store):
+    res = tools.run_tool("remember", {"content": "玩家喜欢面条",
+                                      "replaces": "zzzzzz"}, "cang",
+                         store_dir=tmp_store)
+
+    assert res.status == ToolResultStatus.SUCCESS
+    assert res.data == "没找到要更新的旧记忆，已当新记忆记下（重要性 5）"
+    assert len(memory.load_card("cang", store_dir=tmp_store)) == 1
 
 
 def test_run_remember_rejects_empty_content(tmp_store):
@@ -106,13 +131,13 @@ def test_run_remember_rejects_empty_content(tmp_store):
 
 def test_run_recall_returns_verbatim_sorted(tmp_store):
     memory.add_entry("cang", "今天天气不错", store_dir=tmp_store)
-    memory.add_entry("cang", "锅里煮着面", importance=9, store_dir=tmp_store)
+    e = memory.add_entry("cang", "锅里煮着面", importance=9, store_dir=tmp_store)
 
     res = tools.run_tool("recall", {"query": "面"}, "cang", store_dir=tmp_store)
 
     assert res.status == ToolResultStatus.SUCCESS
-    # 逐字返回（回忆结果照原文给模型），按相关度排序
-    assert res.data == "- 锅里煮着面\n- 今天天气不错"
+    # 逐字返回（回忆结果照原文给模型），带 6 位短编号；不相关的不返回
+    assert res.data == f"- [{e['id'][:6]}] 锅里煮着面"
 
 
 def test_run_recall_empty_memory(tmp_store):
@@ -122,12 +147,12 @@ def test_run_recall_empty_memory(tmp_store):
 
 
 def test_run_recall_passes_synonyms(tmp_store):
-    memory.add_entry("cang", "木材", store_dir=tmp_store)
+    e = memory.add_entry("cang", "木材", store_dir=tmp_store)
     memory.add_entry("cang", "石头", store_dir=tmp_store)
 
     res = tools.run_tool("recall", {"query": "柴"}, "cang",
                          synonyms={"木材": ["木材", "柴"]}, store_dir=tmp_store)
-    assert res.data.splitlines()[0] == "- 木材"      # 同义词命中把它排到最前
+    assert res.data == f"- [{e['id'][:6]}] 木材"     # 同义词命中召回；石头不相关不返回
 
 
 def test_action_tool_is_not_executed(tmp_store):

@@ -141,13 +141,6 @@ function npcSelect(onChange, value) {
 
 function impClass(n) { return n >= 8 ? 'imp hi' : n >= 5 ? 'imp mid' : 'imp lo' }
 
-function strengthBar(entry, threshold) {
-  const pct = Math.max(0, Math.min(100, (entry.strength / (threshold * 4)) * 100))
-  const cls = entry.exempt ? 'bar exempt' : entry.strength < threshold ? 'bar danger' : 'bar'
-  return h('div', { class: cls, title: `强度 ${entry.strength}（< ${threshold} 会被修剪）` },
-    h('i', { style: `width:${pct}%` }))
-}
-
 // ── 页面：总览 ────────────────────────────────────────────
 
 async function renderOverview(view) {
@@ -786,16 +779,7 @@ async function renderMemory(view) {
   const box = h('div', { class: 'mem-list' }, stateBlock('', '加载中…'))
   const picker = h('div', { class: 'filter-row' },
     h('span', { class: 'hint', text: 'NPC：' }),
-    npcSelect((id) => loadMemory(box, id), store.npcId),
-    h('span', { class: 'spacer' }),
-    h('button', { class: 'btn', text: '手动修剪', title: '跑一次确定性半衰期修剪（与对话开始时自动跑的同一个函数）',
-      onclick: async () => {
-        try {
-          const r = await api(`/api/npcs/${store.npcId}/prune`, { method: 'POST' })
-          bannerFlash(box, `修剪完成：移除 ${r.removed} 条，剩 ${r.remaining} 条`, 'ok')
-          loadMemory(box, store.npcId)
-        } catch (e) { bannerFlash(box, e.message, 'error') }
-      } }))
+    npcSelect((id) => loadMemory(box, id), store.npcId))
   view.append(picker, box)
   await loadMemory(box, store.npcId)
 }
@@ -834,7 +818,7 @@ async function loadMemory(box, npcId) {
 
     const rows = data.entries.map((e) => memoryRow(box, npcId, e, data))
     box.replaceChildren(compose,
-      h('p', { class: 'hint', text: `${data.count} 条　强度 < ${data.prune_threshold} 会被修剪；importance ≥ ${data.exempt_importance}、钉住、反思/合并产物豁免` }),
+      h('p', { class: 'hint', text: `${data.count} 条` }),
       ...(rows.length ? rows : [h('div', { class: 'state' }, h('p', { text: '这张记忆卡还是空的' }))]))
   } catch (e) {
     box.replaceChildren(banner(`加载失败：${e.message}`, 'error'))
@@ -845,16 +829,14 @@ function memoryRow(box, npcId, entry, data) {
   const meta = h('div', { class: 'mem-meta' },
     h('span', { class: impClass(entry.importance), text: `imp ${entry.importance}` }),
     h('span', { class: 'chip', text: entry.category }),
-    entry.pinned ? h('span', { class: 'chip on', text: '钉住' }) : null,
-    entry.exempt ? h('span', { class: 'chip', text: '豁免修剪' }) : null,
-    h('span', { text: `强度 ${entry.strength}` }),
+    entry.pinned ? h('span', { class: 'chip on', text: '置顶' }) : null,
     h('span', { text: `${entry.age_hours}h 前` }),
     h('span', { text: fmtClock(entry.created_at) }))
 
   const row = h('div', { class: 'card mem-row' },
+    h('code', { class: 'mem-id', text: entry.id.slice(0, 6), title: `完整 id：${entry.id}` }),
     h('div', { class: 'mem-main' },
       h('div', { class: 'mem-content', text: entry.content }),
-      strengthBar(entry, data.prune_threshold),
       meta),
     h('div', { class: 'mem-actions' },
       h('button', {

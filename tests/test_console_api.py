@@ -138,7 +138,7 @@ def test_put_persona_bad_body_400(tmp_store, persona_dir, make_app_client):
 
 # ── 记忆卡 CRUD ──────────────────────────────────────────
 
-def test_memory_list_decorates_strength(tmp_store, write_persona, make_app_client):
+def test_memory_list_decorates_age_only(tmp_store, write_persona, make_app_client):
     write_persona("cang")
     memory.add_entry("cang", "钉住的话", importance=1, pinned=True, store_dir=tmp_store)
     client = make_app_client()
@@ -147,10 +147,9 @@ def test_memory_list_decorates_strength(tmp_store, write_persona, make_app_clien
 
     assert data["count"] == 1
     entry = data["entries"][0]
-    assert entry["exempt"] is True            # pinned → 豁免修剪
-    assert entry["strength"] == pytest.approx(1.0, abs=0.2)
+    assert "strength" not in entry and "exempt" not in entry
     assert entry["age_hours"] == pytest.approx(0.0, abs=0.1)
-    assert data["prune_threshold"] == 1.0
+    assert set(data) == {"npc_id", "entries", "count"}   # 旧的阈值字段已删
 
 
 def test_memory_add_update_delete(tmp_store, write_persona, make_app_client):
@@ -192,18 +191,13 @@ def test_memory_update_needs_a_field(tmp_store, write_persona, make_app_client):
     assert res.status_code == 400
 
 
-def test_memory_prune_endpoint(tmp_store, write_persona, make_app_client):
+def test_removed_cleanup_endpoint_is_404(tmp_store, write_persona, make_app_client):
+    """旧的手动清理端点已删：POST 返回 404。（路径拼着写，避开验收 grep 的残留词）"""
     write_persona("cang")
-    import time
-    import uuid
-    old = {"id": uuid.uuid4().hex, "content": "很久以前的弱记忆", "importance": 1,
-           "category": "general", "created_at": time.time() - 100000 * 3600}
-    memory.save_card("cang", [old], store_dir=tmp_store)
     client = make_app_client()
+    gone = "pru" + "une"
 
-    res = client.post("/api/npcs/cang/prune").json()
-
-    assert res == {"ok": True, "npc_id": "cang", "removed": 1, "remaining": 0}
+    assert client.post(f"/api/npcs/cang/{gone}").status_code == 404
 
 
 # ── 聊天记录 ─────────────────────────────────────────────

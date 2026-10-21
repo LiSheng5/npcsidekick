@@ -12,7 +12,7 @@
   · 结构化通道 = action 帧，在流末尾，mod **不需要**照它做任何事（仅记录/展示）
   · 语音通道 = audio 帧（仅 voice=true 时），在 done 之前，缺依赖/超时则不出帧
 
-同步文件 IO（记忆修剪 / 聊天记录读写）一律 `asyncio.to_thread` ——
+同步文件 IO（记忆卡读写 / 聊天记录读写）一律 `asyncio.to_thread` ——
 本函数是 SSE 生成器，跑在事件循环上，直接调用会把整个服务器卡住。
 唯一例外：客户端断连 / 取消时的落盘兜底（文末 `finally`）—— 那种挂起状态下不能再 await。
 """
@@ -242,42 +242,44 @@ def _schedule_summary(llm: Any, npc_id: str, store_dir: Optional[Path]) -> bool:
     return True
 
 
-# ── 记忆预取（任务 4，简化方案）────────────────────────
-# 回合开始、第一次调用 LLM 之前，把「pinned 条目 + 最近 N 条」放进【相关记忆】块，
+# ── 记忆预取（任务 4）────────────────────────────────────
+# 回合开始、第一次调用 LLM 之前，把记忆条目按优先级塞进【相关记忆】块，
 # 不再靠 LLM 多花一轮 recall。recall 工具保留不动，仍用于深挖。
+# · 排序：pinned 在前；其余按 importance 从高到低；同级 created_at 新的在前。
+# · 逐条累计 estimate_tokens 到 context.budget_memory() 为止，放不下就停
+#   （整条进或整条不进，不半截截断）。
 # · 不做检索、不打分、不用 entity_synonyms —— 与这句话相不相关不判断，
 #   相关性深挖交给 recall 工具（memory.retrieve 语义不动）。
 # · 排除 category == "action" 的条目（动作结果另有任务 5 的近况层负责）。
 # · 没有可放的条目 → 整块省略（「（没有想起相关的事）」不进上下文）。
-# · 块内排序：pinned 在前、其余按 created_at 从新到旧 —— 预算截断从尾部砍，
-#   等于 pinned 最后才被砍（"截断时 pinned 优先"）。
-# 预取失败只告警，回合照常（不带记忆块）。
-
-# 「最近 N 条」的 N（**需确认**默认 5）：现读可热切。
-DEFAULT_PREFETCH_RECENT = 5
-_ENV_PREFETCH_RECENT = "NPC_PREFETCH_RECENT"
-
-
-def prefetch_recent() -> int:
-    """记忆预取的「最近 N 条」（现读，可热切）：NPC_PREFETCH_RECENT，默认 5。"""
-    return max(0, int(env_num(_ENV_PREFETCH_RECENT, DEFAULT_PREFETCH_RECENT, cast=int)))
-
+# · 预取只读卡，不改任何字段；失败只告警，回合照常（不带记忆块）。
 
 def _prefetch_memory_text(npc_id: str,
                           store_dir: Optional[Path] = None) -> Tuple[str, int, int]:
-    """pinned 条目 + 最近 N 条（都排除 action 类）→ (块正文, 进块条数, 被滤条数)。
+    """按「置顶 → 重要度 → 新旧」塞进记忆预算 → (块正文, 进块条数, 被滤条数)。
 
-    无可放条目/出错 → ("", 0, …)（出错时被滤数无意义，记 0）。同步 IO（读记忆卡）——
-    调用方包 `asyncio.to_thread`。本函数不抛。
-    被滤条数 = 读到但没进块的条数（action 类 + 排不进最近 N 的）。pinned 不占 N 的名额。
+    只读卡、不改任何字段。排除 action 类。无可放条目/出错 → ("", 0, …)
+    （出错时被滤数无意义，记 0）。同步 IO（读记忆卡）——调用方包
+    `asyncio.to_thread`。本函数不抛。
+    被滤条数 = 读到的总数 − 进块数（含 action 类和预算外的），语义同
+    trace 里 memory_prefetch.filtered。
     """
     try:
         card = memory.load_card(npc_id, store_dir=store_dir)
         entries = [e for e in card if e.get("category") != "action"]
-        entries.sort(key=lambda e: float(e.get("created_at", 0.0)), reverse=True)
-        pinned = [e for e in entries if e.get("pinned")]
-        recent = [e for e in entries if not e.get("pinned")][:prefetch_recent()]
-        kept = pinned + recent        # pinned 在前，预算截断先砍尾部（新→旧）
+        entries.sort(key=lambda e: (not bool(e.get("pinned")),
+                                    -int(e.get("importance", memory.DEFAULT_IMPORTANCE)),
+                                    -float(e.get("created_at", 0.0))))
+        budget = context.budget_memory()
+        used = 0
+        kept: List[Dict[str, Any]] = []
+        for e in entries:
+            line = memory.format_for_context([e])
+            need = chatlog.estimate_tokens(("\n" if kept else "") + line)
+            if used + need > budget:
+                break                      # 放不下就停：整条进或整条不进
+            kept.append(e)
+            used += need
         hits = len(kept)
         filtered = len(card) - hits
     except Exception as exc:
@@ -430,7 +432,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     trace_tokens: Dict[str, int] = {"system": 0, "history": 0, "state": 0,
                                     "memory": 0, "user": 0}
     trace_mem_hits = 0                      # 记忆预取进块条数（含 pinned）
-    trace_mem_filtered = 0                  # 记忆预取被相关性阈值滤掉的条数
+    trace_mem_filtered = 0                  # 记忆预取没进块条数（action 类 + 预算外的）
     trace_first_delta_at: Optional[float] = None
     trace_emitted = False                   # turn_trace 只出一条（finally 兜底防重发）
     turn_reasoning = ""                     # 最终答复那一轮的思考内容（落盘，下一回合回传）
@@ -463,9 +465,7 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 replay_reasoning = bool(getattr(llm, "replays_reasoning_content", False))
                 # 同步阻塞调用一律挪到线程池：本函数是 SSE 生成器，跑在事件循环上，
                 # 直接调用会把整个服务器卡住。
-                await asyncio.to_thread(memory.prune, npc_id,
-                                        store_dir=store_dir)   # 确定性遗忘（半衰期修剪，不走 LLM）
-                # 记忆预取（任务 4，简化方案）：pinned + 最近 N 条，失败只告警
+                # 记忆预取（任务 4）：置顶 → 重要度 → 新旧，到记忆预算为止，失败只告警
                 memory_text, trace_mem_hits, trace_mem_filtered = await asyncio.to_thread(
                     _prefetch_memory_text, npc_id, store_dir)
                 # 近况层（任务 5）：最近动作结果 + 进行中 / 待确认。pending.alive() 是纯内存
