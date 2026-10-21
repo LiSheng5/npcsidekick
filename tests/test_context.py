@@ -278,3 +278,18 @@ def test_assemble_recent_truncation_priority():
     cut = [c for c in got.truncated if c["layer"] == "recent"]
     assert len(cut) == 1
     assert 0 < cut[0]["after_tokens"] < cut[0]["before_tokens"]
+
+
+# ── 对话层硬上限（NPC_BUDGET_HISTORY，默认 窗口 × 0.7）────────
+
+def test_budget_history_hard_cap_default_follows_context_window(monkeypatch):
+    """未显式设置 → 硬上限 = 上下文窗口 × 0.7（现算）；显式设置了以它为准。"""
+    monkeypatch.delenv("NPC_BUDGET_HISTORY", raising=False)
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "100000")
+    assert context.budget_history() == 70000
+
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")       # 现读可热切，不用重启
+    assert context.budget_history() == 700
+
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "123")
+    assert context.budget_history() == 123

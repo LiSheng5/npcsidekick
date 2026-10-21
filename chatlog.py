@@ -1,8 +1,10 @@
 """持久聊天记录 + 滚动摘要。
 
   · 每 NPC 一份 store/{id}_chat.jsonl，逐轮追加（用户/助手各一行）—— 重启不丢
-  · 上下文超阈值（默认 20K token，可配）→ 把最旧的轮次让 LLM 压成一段摘要，
-    存 store/{id}_summary.json，下次拼上下文时放在最前面
+  · 整个提示（系统 + 状态 + 记忆 + 历史 + 玩家这句）用到模型上下文窗口的
+    NPC_SUMMARY_RATIO（默认 40%）时 → 回合结束后台把旧轮次压成一段摘要，
+    存 store/{id}_summary.json，下次拼上下文时放在最前面，只保留最近
+    NPC_SUMMARY_KEEP_RECENT 轮逐字；不再按固定 token 预算截断历史
   · 摘要只保脉络：重要事实由 remember 落进记忆卡（摘要不替代记忆）
   · LLM 不可用时摘要失败 → 原聊天记录一行不动（降级不丢数据）
 """
@@ -15,19 +17,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core.config_flags import env_text
+from core.config import context_window, summary_keep_recent, summary_ratio
 from core.logging_config import log
 from core.paths import resolve_store
 
-# 阈值与保留窗口（按估算的绝对 token 数，默认 20K，可配；现读环境变量可热切）
-DEFAULT_TOKEN_THRESHOLD = 20000
-DEFAULT_KEEP_RECENT_TURNS = 8
-_ENV_THRESHOLD = "NPC_SUMMARY_TOKEN_THRESHOLD"
-_ENV_KEEP_RECENT = "NPC_SUMMARY_KEEP_RECENT"
-
 _SUMMARY_PROMPT = (
-    "把下面这段 NPC 与玩家的对话压成一段简短摘要（中文，200 字以内）："
+    "把下面这段 NPC 与玩家的对话压成一段简短摘要（中文，600 字以内）："
     "只保留脉络和已发生的事实，不要编造，不要评价。"
+    "优先保留玩家的要求、承诺、关系变化和未完成的事。"
     "如果已经有前情摘要，把它和新增对话合成一段完整摘要。"
 )
 
@@ -35,24 +32,12 @@ _SUMMARY_PROMPT = (
 _CJK_RANGES = ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF), (0x3000, 0x303F))
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = env_text(name)
-    if raw is None or not str(raw).strip():
-        return default
-    try:
-        return max(0, int(float(str(raw).strip())))
-    except ValueError:
-        return default
+def summary_limit() -> int:
+    """压缩触发阈值（token）= 上下文窗口 × NPC_SUMMARY_RATIO，现读可热切。
 
-
-def token_threshold() -> int:
-    """摘要触发阈值（token），现读环境变量。"""
-    return _env_int(_ENV_THRESHOLD, DEFAULT_TOKEN_THRESHOLD)
-
-
-def keep_recent_turns() -> int:
-    """摘要后仍逐字保留的最近轮数，现读环境变量。"""
-    return _env_int(_ENV_KEEP_RECENT, DEFAULT_KEEP_RECENT_TURNS)
+    本回合提示的本地 token 估算达到这个数，回合结束就后台压缩旧轮次。
+    """
+    return int(context_window() * summary_ratio())
 
 
 # ── 路径 ─────────────────────────────────────────────────
@@ -192,20 +177,21 @@ def _save_summary(npc_id: str, summary: str, covered: int,
     os.replace(tmp, path)
 
 
-# ── 滚动摘要（超阈值就把最旧的轮次压成一段）────────────────
+# ── 滚动摘要（提示用到窗口 × 比例就把旧轮次压成一段）──────────
 
-def _fold_plan(npc_id: str, keep_recent: Optional[int] = None,
+def _fold_plan(npc_id: str, prompt_tokens: Optional[int] = None,
+               keep_recent: Optional[int] = None,
                store_dir: Optional[Path] = None):
     """摘要计划 → `(turns, state, covered, cutoff)`；不该摘要 / 没得压 → None。纯读。
 
-    触发条件 = 总 token 超阈值，且保留窗口之外还有没被摘要覆盖的旧轮次。
+    触发条件 = 传入的本回合提示 token 数 ≥ 窗口 × NPC_SUMMARY_RATIO，且保留窗口
+    之外还有没被摘要覆盖的旧轮次。`prompt_tokens=None`（旧调用方 / 手动触发）→
+    不看阈值，只要有可压的旧轮次就压（强制压缩）。
     `maybe_summarize` 与 `needs_summary` 共用这份判断，两处口径永远一致。
     """
-    threshold = token_threshold()
-    keep = keep_recent_turns() if keep_recent is None else max(0, keep_recent)
+    keep = summary_keep_recent() if keep_recent is None else max(0, keep_recent)
     turns = load_turns(npc_id, store_dir=store_dir)
-    total = sum(estimate_tokens(m["content"]) for m in turns)
-    if total <= threshold:
+    if prompt_tokens is not None and prompt_tokens < summary_limit():
         return None
     state = load_summary(npc_id, store_dir=store_dir)
     covered = min(state["covered"], len(turns))
@@ -215,23 +201,27 @@ def _fold_plan(npc_id: str, keep_recent: Optional[int] = None,
     return turns, state, covered, cutoff
 
 
-def needs_summary(npc_id: str, keep_recent: Optional[int] = None,
+def needs_summary(npc_id: str, prompt_tokens: Optional[int] = None,
+                  keep_recent: Optional[int] = None,
                   store_dir: Optional[Path] = None) -> bool:
-    """现在该不该摘要（超阈值且有可压的旧轮次）？纯读、不惊动 LLM。
+    """现在该不该摘要（提示 token ≥ 窗口 × 比例，且有可压的旧轮次）？纯读、不惊动 LLM。
 
-    回合结束用它决定要不要后台触发摘要（turn.py，任务 6）。
+    回合结束用它决定要不要后台触发摘要（turn.py，任务 6）；`prompt_tokens` =
+    本回合提示的本地 token 估算，拿不到传 None = 不看阈值（强制压缩口径）。
     """
-    return _fold_plan(npc_id, keep_recent, store_dir) is not None
+    return _fold_plan(npc_id, prompt_tokens, keep_recent, store_dir) is not None
 
 
-def maybe_summarize(npc_id: str, llm, keep_recent: Optional[int] = None,
+def maybe_summarize(npc_id: str, llm, prompt_tokens: Optional[int] = None,
+                    keep_recent: Optional[int] = None,
                     store_dir: Optional[Path] = None) -> Optional[str]:
-    """超阈值时把最旧的轮次压成摘要；未超阈值/无内容可压/失败 → None。
+    """提示 token ≥ 窗口 × 比例时把最旧的轮次压成摘要；`prompt_tokens=None` = 强制压缩
+    （不看阈值，只要有可压的旧轮次就压）。未到阈值/无内容可压/失败 → None。
 
     成功返回新摘要文本并落盘（covered 推进）；失败不写任何东西，
     聊天记录一行不动。
     """
-    plan = _fold_plan(npc_id, keep_recent, store_dir)
+    plan = _fold_plan(npc_id, prompt_tokens, keep_recent, store_dir)
     if plan is None:
         return None
     turns, state, covered, cutoff = plan
@@ -278,26 +268,32 @@ def build_history(npc_id: str, llm, token_budget: Optional[int] = None,
                   store_dir: Optional[Path] = None,
                   summarize: bool = True,
                   reasoning_replay: bool = False) -> List[Dict[str, Any]]:
-    """拼上下文用的历史：可选的摘要消息 + 最近若干轮（受 token 预算约束）。
+    """拼上下文用的历史：可选的摘要消息 + 未被摘要覆盖的**全部**聊天记录。
 
-    `summarize=True`（默认）= 旧行为：拼历史前同步摘要一次；
-    turn.py 传 `False`（任务 6）—— 摘要移出回合关键路径，改在回合结束后台触发，
-    回合内只读现成的摘要状态。
+    历史本身不按固定预算截断（盲区已消除）；`token_budget` 是硬上限
+    （默认 `context.budget_history()` = 窗口 × 0.7），只防摘要失败（LLM 不可用）
+    时历史撑爆上下文，正常不会触发。
+
+    `summarize=True`（默认）= 旧行为：拼历史前同步**强制**摘要一次（不看阈值）；
+    turn.py 传 `False`（任务 6）—— 摘要移出回合关键路径，改在回合结束后台按
+    本回合提示 token 触发，回合内只读现成的摘要状态。
 
     `reasoning_replay=True` 时把落盘的思考内容作为 `reasoning_content` 带回
     （DeepSeek 带 tools 的硬要求；见 ProviderProtocol.replays_reasoning_content）。
     """
     if summarize:
-        maybe_summarize(npc_id, llm, store_dir=store_dir)
+        maybe_summarize(npc_id, llm, store_dir=store_dir)   # 强制压缩（不看阈值）
     state = load_summary(npc_id, store_dir=store_dir)
     turns = load_turns(npc_id, store_dir=store_dir)
     covered = min(state["covered"], len(turns))
-    budget = token_threshold() if token_budget is None else token_budget
+    if token_budget is None:
+        import context                     # 函数内导入：context.py 顶层 import chatlog
+        token_budget = context.budget_history()
 
     history: List[Dict[str, Any]] = []
     if state["summary"]:
         history.append({"role": "assistant",
                         "content": f"（此前对话摘要，供你参考）{state['summary']}"})
     history.extend(_history_message(m, reasoning_replay)
-                   for m in select_recent(turns[covered:], budget))
+                   for m in select_recent(turns[covered:], token_budget))
     return history

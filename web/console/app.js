@@ -890,7 +890,7 @@ function editRow(box, npcId, entry, data) {
 // ── 页面：聊天记录 ────────────────────────────────────────
 
 async function renderChat(view) {
-  view.replaceChildren(pageHead('聊天记录', 'store/{id}_chat.jsonl —— 逐轮追加；超阈值后最旧的轮次会被压成摘要',
+  view.replaceChildren(pageHead('聊天记录', 'store/{id}_chat.jsonl —— 逐轮追加；提示用到上下文窗口 40% 时旧轮次被压成摘要（保留最近 3 轮）',
     h('button', { class: 'btn', text: '刷新', onclick: () => route() })))
   const box = h('div', { class: 'mem-list' }, stateBlock('', '加载中…'))
   view.append(h('div', { class: 'filter-row' },
@@ -904,13 +904,13 @@ async function loadChat(box, npcId, offset) {
     const d = await api(`/api/npcs/${npcId}/chat?limit=200&offset=${offset}`)
     const pct = Math.min(100, (d.estimated_tokens / d.summary_threshold) * 100)
     const head = h('div', { class: 'card', style: 'padding:16px 18px' },
-      h('div', { class: 'sec-title', text: `摘要状态　${d.estimated_tokens} / ${d.summary_threshold} token（超阈值触发滚动摘要）` }),
+      h('div', { class: 'sec-title', text: `摘要状态　${d.estimated_tokens} / ${d.summary_threshold} token（提示超限触发滚动摘要）` }),
       h('div', { class: 'bar' }, h('i', { style: `width:${pct}%` })),
       h('div', { class: 'kv' }, h('span', { class: 'k', text: '已折进摘要' }),
         h('span', { class: 'v', text: `${d.summary.covered} 条消息` })),
       d.summary.summary
         ? h('div', { class: 'dbg-box', text: d.summary.summary })
-        : h('div', { class: 'hint', text: '还没有摘要（未超阈值）' }))
+        : h('div', { class: 'hint', text: '还没有摘要（未到压缩阈值）' }))
 
     const turns = d.turns.map((m) => h('div', { class: 'turn' },
       h('div', { class: m.role === 'user' ? 'bubble me' : 'bubble npc', text: m.content }),

@@ -212,7 +212,8 @@ def action_tool_text(name: str, outcome: Dict[str, Any]) -> str:
 
 # ── 后台摘要（任务 6：摘要移出关键路径）────────────────────
 # 回合结束、`append_turn` 之后后台触发 `maybe_summarize` —— 摘要 LLM 不再挡玩家
-# 看到第一个字；摘要期间的新回合照常读旧摘要状态，由对话层预算保证上下文有界。
+# 看到第一个字；摘要期间的新回合照常读旧摘要状态，由历史硬上限（窗口 × 0.7）
+# 兜底保证上下文有界。
 # · 任务引用放 `_SUMMARY_TASKS`，跑完移除 —— 不留引用会被垃圾回收半路取消
 # · 同一 NPC 同时只允许一个摘要在跑（`_SUMMARIZING` 记正在摘要的 npc_id，跑完移除）
 # · 异常只告警，不上抛（`maybe_summarize` 内部已吞 LLM 错误，这里兜别的）
@@ -447,6 +448,9 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
             "no_dialogue": not emitted,
             "tools": trace_tools,
             "tokens": {**trace_tokens, "total": sum(trace_tokens.values())},
+            # 压缩触发对照：本回合提示 token（本地估算）vs 阈值（窗口 × 比例）
+            "summary_trigger": {"prompt_tokens": sum(trace_tokens.values()),
+                                "limit": chatlog.summary_limit()},
             "memory_prefetch": {"hits": trace_mem_hits, "filtered": trace_mem_filtered},
             "first_token_ms": (None if trace_first_delta_at is None
                                else round((trace_first_delta_at - t_start) * 1000, 1)),
@@ -644,9 +648,16 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                                     error=scrub(str(exc))[:120])
 
         # 摘要移出关键路径（任务 6）：append_turn 之后才后台触发，不挡首字。
-        # 该不该摘要用 needs_summary（纯读）判断；同 NPC 已有摘要在跑就跳过。
+        # 该不该摘要用 needs_summary（纯读）判断：本回合提示 token（trace 的
+        # tokens.total，本地估算口径）≥ 窗口 × NPC_SUMMARY_RATIO 才压；
+        # 拿不到估算（出错没走到装配）/ 降级回合 → 不触发，下回合再说；
+        # 同 NPC 已有摘要在跑就跳过。
         # trace 的 summarized = 本回合启动了后台摘要（不是"摘要已经跑完"）。
-        needed = await asyncio.to_thread(chatlog.needs_summary, npc_id, store_dir=store_dir)
+        trace_tokens_total = sum(trace_tokens.values())
+        needed = (not trace_llm_fallback and trace_tokens_total > 0
+                  and await asyncio.to_thread(
+                      chatlog.needs_summary, npc_id, trace_tokens_total,
+                      store_dir=store_dir))
         trace_summarized = needed and _schedule_summary(llm, npc_id, store_dir)
 
         for record in executed:                # 已执行动作的记录（mod 不需要照它做任何事）

@@ -18,8 +18,8 @@ def read_traces(path) -> list[dict]:
 
 
 TRACE_KEYS = {"npc_id", "rounds", "llm_fallback", "summarized", "no_dialogue",
-              "tools", "tokens", "memory_prefetch", "first_token_ms", "total_ms",
-              "message_len", "reply_len"}
+              "tools", "tokens", "summary_trigger", "memory_prefetch",
+              "first_token_ms", "total_ms", "message_len", "reply_len"}
 
 
 def test_turn_trace_two_tool_calls_records_rounds_and_tools(tmp_store, write_persona,
@@ -154,8 +154,10 @@ def test_turn_trace_summarized_flag(tmp_store, write_persona, make_app_client,
     """
     trace_file = tmp_path / "trace.jsonl"
     monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")
+    monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.01")        # 阈值 = 10：提示必越线
     monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "1")
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "100000")
     write_persona("cang")
     for i in range(5):
         chatlog.append_turn("cang", "问" * 20 + str(i), "答" * 20 + str(i),
@@ -170,3 +172,53 @@ def test_turn_trace_summarized_flag(tmp_store, write_persona, make_app_client,
     assert len(traces) == 1
     assert traces[0]["summarized"] is True
     assert traces[0]["llm_fallback"] is False
+
+
+def test_turn_trace_summary_trigger_field(tmp_store, write_persona, make_app_client,
+                                          make_provider, monkeypatch, tmp_path):
+    """trace 含 summary_trigger：prompt_tokens = 本回合 tokens.total，limit = 窗口 × 比例。"""
+    trace_file = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")
+    monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.4")         # limit = 400
+    write_persona("cang")
+    provider = make_provider(turns=[{"text": "嗯。"}])
+    client = make_app_client(provider=provider)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"})
+
+    assert kinds(res)[-1] == "done"
+    traces = read_traces(trace_file)
+    assert len(traces) == 1
+    trigger = traces[0]["summary_trigger"]
+    assert trigger["limit"] == 400
+    assert trigger["prompt_tokens"] == traces[0]["tokens"]["total"]
+    assert traces[0]["summarized"] is False               # 只 1 轮，没有可压的旧轮次
+
+
+def test_turn_trace_fallback_does_not_trigger_summary(tmp_store, write_persona,
+                                                      make_app_client, monkeypatch,
+                                                      tmp_path):
+    """降级回合不触发摘要：即使提示 token 越线、旧轮次够压，也等下回合再说。"""
+    trace_file = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")
+    monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.01")        # limit = 10：提示必越线
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "100000")
+    write_persona("cang")
+    for i in range(6):
+        chatlog.append_turn("cang", "问" * 20 + str(i), "答" * 20 + str(i),
+                            store_dir=tmp_store)
+    client = make_app_client(provider=BoomProvider())
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"})
+
+    assert kinds(res)[-1] == "done"
+    traces = read_traces(trace_file)
+    assert len(traces) == 1
+    trace = traces[0]
+    assert trace["llm_fallback"] is True
+    assert trace["summarized"] is False
+    assert trace["summary_trigger"]["limit"] == 10
+    assert trace["summary_trigger"]["prompt_tokens"] >= 10  # 有估算也不触发（降级回合）
+    assert not chatlog.summary_path("cang", store_dir=tmp_store).exists()

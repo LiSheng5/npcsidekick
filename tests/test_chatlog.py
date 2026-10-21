@@ -62,7 +62,7 @@ def test_select_recent_respects_budget():
     assert chatlog.select_recent([], 10) == []
 
 
-# ── 滚动摘要（超阈值压旧轮次）────────────────────────────
+# ── 滚动摘要（提示用到窗口 40% 就压缩，保留最近 3 轮）────────
 
 def _fill(store, npc_id: str, rounds: int, size: int = 10):
     for i in range(rounds):
@@ -70,42 +70,61 @@ def _fill(store, npc_id: str, rounds: int, size: int = 10):
                             store_dir=store)
 
 
-def test_no_summary_below_threshold(tmp_store, make_provider, monkeypatch):
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "10000")
-    _fill(tmp_store, "cang", 3)
+def _ratio_env(monkeypatch, window: str = "1000", ratio: str = "0.4"):
+    """窗口 × 比例 = 压缩阈值（1000 × 0.4 → 400）；硬上限放开，避免干扰断言。"""
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", window)
+    monkeypatch.setenv("NPC_SUMMARY_RATIO", ratio)
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "1000000")
+
+
+def test_no_summary_below_ratio(tmp_store, make_provider, monkeypatch):
+    """prompt_tokens 低于窗口 × 比例（400）→ 不摘要、不惊动 LLM。"""
+    _ratio_env(monkeypatch)                               # 阈值 = 1000 × 0.4 = 400
+    _fill(tmp_store, "cang", 5)
     provider = make_provider()
 
-    assert chatlog.maybe_summarize("cang", provider, store_dir=tmp_store) is None
+    assert chatlog.summary_limit() == 400
+    assert chatlog.needs_summary("cang", 399, store_dir=tmp_store) is False
+    assert chatlog.maybe_summarize("cang", provider, prompt_tokens=399,
+                                   store_dir=tmp_store) is None
     assert not chatlog.summary_path("cang", store_dir=tmp_store).exists()
-    assert provider.chat_calls == []                      # 没超阈值不惊动 LLM
+    assert provider.chat_calls == []                      # 没到阈值不惊动 LLM
 
 
-def test_summary_triggered_above_threshold(tmp_store, make_provider, monkeypatch):
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
-    monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "1")
-    _fill(tmp_store, "cang", 5, size=20)                              # 10 条消息，远超 50 token
+def test_summary_folds_to_keep_recent_rounds(tmp_store, make_provider, monkeypatch):
+    """prompt_tokens ≥ 阈值且旧轮次多于 3 轮 → 压缩；build_history = 摘要 + 恰好最近 3 轮。"""
+    _ratio_env(monkeypatch)                               # 阈值 = 400，默认保留最近 3 轮
+    _fill(tmp_store, "cang", 6, size=20)                              # 12 条消息
     provider = make_provider(turns=[{"text": "前情：玩家问过吃饭的事。"}])
 
-    summary = chatlog.maybe_summarize("cang", provider, store_dir=tmp_store)
+    assert chatlog.needs_summary("cang", 400, store_dir=tmp_store) is True
+    summary = chatlog.maybe_summarize("cang", provider, prompt_tokens=500,
+                                      store_dir=tmp_store)
 
     assert summary == "前情：玩家问过吃饭的事。"
     state = chatlog.load_summary("cang", store_dir=tmp_store)
     assert state["summary"] == summary
-    assert state["covered"] == 8                           # 10 条 - 保留 1 轮(2 条)
+    assert state["covered"] == 6                           # 12 条 - 保留 3 轮(6 条)
     assert state["updated_at"] > 0
-    # 只压最旧的 8 条，最新一轮仍在聊天记录里
-    assert chatlog.load_turns("cang", store_dir=tmp_store)[-2]["content"].startswith("问")
+    # 摘要 + 恰好最近 3 轮（6 条），一条不多一条不少
+    history = chatlog.build_history("cang", provider, store_dir=tmp_store,
+                                    summarize=False)
+    assert len(history) == 7
+    assert "前情：玩家问过吃饭的事。" in history[0]["content"]
+    assert [m["role"] for m in history[1:]] == ["user", "assistant"] * 3
 
 
 def test_summary_rolls_forward(tmp_store, make_provider, monkeypatch):
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
+    """摘要之后又涨到阈值 → 再次触发；新摘要把前情摘要合并进来。"""
+    _ratio_env(monkeypatch)
     monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "1")
     _fill(tmp_store, "cang", 5, size=20)
     provider = make_provider(turns=[{"text": "第一版摘要"}, {"text": "第二版摘要"}])
 
-    chatlog.maybe_summarize("cang", provider, store_dir=tmp_store)
-    _fill(tmp_store, "cang", 3, size=20)                              # 再来 3 轮
-    second = chatlog.maybe_summarize("cang", provider, store_dir=tmp_store)
+    chatlog.maybe_summarize("cang", provider, prompt_tokens=500, store_dir=tmp_store)
+    _fill(tmp_store, "cang", 3, size=20)                              # 再来 3 轮，又越过阈值
+    second = chatlog.maybe_summarize("cang", provider, prompt_tokens=500,
+                                     store_dir=tmp_store)
 
     assert second == "第二版摘要"
     assert chatlog.load_summary("cang", store_dir=tmp_store)["covered"] == 14
@@ -117,27 +136,31 @@ def test_summary_rolls_forward(tmp_store, make_provider, monkeypatch):
 def test_summary_keeps_chatlog_when_llm_fails(tmp_store, make_provider, monkeypatch):
     from conftest import BoomProvider
 
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
+    _ratio_env(monkeypatch)
     _fill(tmp_store, "cang", 5, size=20)
     before = len(chatlog.load_turns("cang", store_dir=tmp_store))
 
-    assert chatlog.maybe_summarize("cang", BoomProvider(), store_dir=tmp_store) is None
+    assert chatlog.maybe_summarize("cang", BoomProvider(), prompt_tokens=500,
+                                   store_dir=tmp_store) is None
     assert len(chatlog.load_turns("cang", store_dir=tmp_store)) == before
     assert not chatlog.summary_path("cang", store_dir=tmp_store).exists()
 
 
 def test_summary_skipped_when_nothing_to_fold(tmp_store, make_provider, monkeypatch):
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
-    monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "10")     # 保留窗口比历史还长
+    """只有 3 轮（= 保留窗口）→ 没有可压的旧轮次，即使提示远超阈值也不触发。"""
+    _ratio_env(monkeypatch)                               # 默认保留最近 3 轮
     _fill(tmp_store, "cang", 3, size=20)
     provider = make_provider()
 
-    assert chatlog.maybe_summarize("cang", provider, store_dir=tmp_store) is None
+    assert chatlog.needs_summary("cang", 10**6, store_dir=tmp_store) is False
+    assert chatlog.maybe_summarize("cang", provider, prompt_tokens=10**6,
+                                   store_dir=tmp_store) is None
     assert provider.chat_calls == []
 
 
 def test_build_history_includes_summary_and_recent(tmp_store, make_provider, monkeypatch):
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
+    """summarize=True = 强制压缩（不看阈值）：摘要 + 最近保留的轮次。"""
+    _ratio_env(monkeypatch)
     monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "1")
     _fill(tmp_store, "cang", 5, size=20)
     provider = make_provider(turns=[{"text": "摘要内容"}])
@@ -152,7 +175,7 @@ def test_build_history_includes_summary_and_recent(tmp_store, make_provider, mon
 
 
 def test_build_history_without_summary(tmp_store, make_provider, monkeypatch):
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "10000")
+    _ratio_env(monkeypatch)
     _fill(tmp_store, "cang", 2)
 
     history = chatlog.build_history("cang", make_provider(), token_budget=1000,
@@ -160,6 +183,42 @@ def test_build_history_without_summary(tmp_store, make_provider, monkeypatch):
 
     assert len(history) == 4
     assert all(m["role"] in ("user", "assistant") for m in history)
+
+
+def test_build_history_returns_all_turns_without_budget_blind_spot(tmp_store,
+                                                                   make_provider,
+                                                                   monkeypatch):
+    """盲区回归：聊天记录约 5000 token、未摘要时，build_history 返回**全部**轮次 ——
+    不会因为旧的 4000 固定预算把更早的轮次截掉（既不进上下文也没被摘要 = 盲区）。"""
+    for name in ("NPC_BUDGET_HISTORY", "NPC_CONTEXT_WINDOW", "NPC_SUMMARY_RATIO"):
+        monkeypatch.delenv(name, raising=False)             # 窗口用默认 1M
+    _fill(tmp_store, "cang", 100, size=25)                             # ≈ 5300 token
+
+    history = chatlog.build_history("cang", make_provider(), store_dir=tmp_store,
+                                    summarize=False)
+
+    assert len(history) == 200                             # 100 轮全在
+    total = sum(chatlog.estimate_tokens(m["content"]) for m in history)
+    assert total > 4000                                    # 确实超过旧的 4000 预算
+    assert not chatlog.summary_path("cang", store_dir=tmp_store).exists()
+
+
+def test_build_history_hard_cap_when_summary_unavailable(tmp_store, make_provider,
+                                                         monkeypatch):
+    """硬上限：NPC_BUDGET_HISTORY 很小、摘要 LLM 抛异常时，历史仍被硬上限截断、不报错。"""
+    from conftest import BoomProvider
+
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "50")
+    _fill(tmp_store, "cang", 10, size=20)                             # 20 条 × 21 token
+    before = len(chatlog.load_turns("cang", store_dir=tmp_store))
+
+    history = chatlog.build_history("cang", BoomProvider(), store_dir=tmp_store,
+                                    summarize=True)
+
+    assert 0 < len(history) < before                        # 被硬上限截断，没有全量回传
+    assert sum(chatlog.estimate_tokens(m["content"]) for m in history) <= 50 + 21
+    assert len(chatlog.load_turns("cang", store_dir=tmp_store)) == before
+    assert not chatlog.summary_path("cang", store_dir=tmp_store).exists()
 
 
 def test_load_summary_empty_and_broken(tmp_store):

@@ -439,7 +439,7 @@ def build_router(persona_dir: Path,
             "limit": limit,
             "turns": messages[start:end],
             "estimated_tokens": sum(chatlog.estimate_tokens(m["content"]) for m in messages),
-            "summary_threshold": chatlog.token_threshold(),
+            "summary_threshold": chatlog.summary_limit(),
             "summary": chatlog.load_summary(npc_id, store_dir=store_dir),
         }
 

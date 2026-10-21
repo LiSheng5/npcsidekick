@@ -1086,10 +1086,12 @@ def test_summary_llm_does_not_block_event_loop(tmp_store, paths, write_persona, 
     from core.client import LLMClient, LLMResponse
     from core.types import StreamChunk
 
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "1")
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")
+    monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.01")        # 阈值 = 10：提示必越线
     monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "0")
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "100000")
     write_persona("cang")
-    chatlog.append_turn("cang", "你好世界", "嗯", store_dir=tmp_store)   # 制造超阈值的旧轮次 → 必触发摘要
+    chatlog.append_turn("cang", "你好世界", "嗯", store_dir=tmp_store)   # 制造可压的旧轮次 + 提示越线 → 必触发摘要
 
     class SlowSummaryProvider:
         """stream 立刻回台词；chat（摘要走这条）故意慢，模拟真实 LLM 延迟。"""

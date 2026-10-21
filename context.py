@@ -23,13 +23,14 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
 import chatlog
+from core import config
 from core.config_flags import env_text
 from core.personas import build_system_prompt
 
-# 各层 token 预算（估算口径）。**需确认**默认值：state 800、memory 600、history 4000。
+# 各层 token 预算（估算口径）。**需确认**默认值：state 800、memory 600；
+# history 不设固定默认 —— 硬上限 = 上下文窗口 × 0.7（见 budget_history）。
 DEFAULT_BUDGET_STATE = 800
 DEFAULT_BUDGET_MEMORY = 600
-DEFAULT_BUDGET_HISTORY = 4000
 
 _ENV_BUDGET_STATE = "NPC_BUDGET_STATE"
 _ENV_BUDGET_MEMORY = "NPC_BUDGET_MEMORY"
@@ -74,11 +75,14 @@ def budget_memory() -> int:
 
 
 def budget_history() -> int:
-    """对话层预算（token），现读环境变量，经 build_history(token_budget=...) 生效。
+    """对话层硬上限（token），现读环境变量，经 build_history(token_budget=...) 生效。
 
-    注意：history 预算调小后，摘要阈值（NPC_SUMMARY_TOKEN_THRESHOLD）也建议相应调小。
+    未显式设置 `NPC_BUDGET_HISTORY` 时 = 上下文窗口 × 0.7（现算）。
+    正常不会触发：历史 = 摘要 + 未被摘要覆盖的全部聊天记录，提示用到窗口的
+    NPC_SUMMARY_RATIO（默认 40%）就压缩、只留最近几轮；这个硬上限只防摘要
+    失败（LLM 不可用）时历史无限涨、把上下文撑爆。
     """
-    return _env_int(_ENV_BUDGET_HISTORY, DEFAULT_BUDGET_HISTORY)
+    return _env_int(_ENV_BUDGET_HISTORY, int(config.context_window() * 0.7))
 
 
 @dataclass

@@ -7,7 +7,17 @@
 """
 from __future__ import annotations
 
+from core.config_flags import env_num
 from core.settings import AgentSettings
+
+# 上下文压缩（窗口 × 比例触发）默认值；环境变量每次现读可热切
+_DEFAULT_CONTEXT_WINDOW = 1_000_000
+_DEFAULT_SUMMARY_RATIO = 0.4
+_DEFAULT_SUMMARY_KEEP_RECENT = 3
+
+_ENV_CONTEXT_WINDOW = "NPC_CONTEXT_WINDOW"
+_ENV_SUMMARY_RATIO = "NPC_SUMMARY_RATIO"
+_ENV_SUMMARY_KEEP_RECENT = "NPC_SUMMARY_KEEP_RECENT"
 
 
 def model_name() -> str:
@@ -33,3 +43,21 @@ def temperature() -> float:
 def max_tokens() -> int:
     """单次回复的 token 上限。"""
     return AgentSettings().max_tokens
+
+
+def context_window() -> int:
+    """当前模型的上下文窗口（token）。NPC_CONTEXT_WINDOW —— 换模型要同步改，
+    否则「提示用到窗口的 40% 就压缩」会按错的窗口算比例。"""
+    return max(1, int(env_num(_ENV_CONTEXT_WINDOW, _DEFAULT_CONTEXT_WINDOW, cast=int)))
+
+
+def summary_ratio() -> float:
+    """提示用到上下文窗口的这个比例就触发压缩。NPC_SUMMARY_RATIO，钳在 [0, 1]。"""
+    ratio = float(env_num(_ENV_SUMMARY_RATIO, _DEFAULT_SUMMARY_RATIO))
+    return min(1.0, max(0.0, ratio))
+
+
+def summary_keep_recent() -> int:
+    """压缩后仍逐字保留的最近轮数。NPC_SUMMARY_KEEP_RECENT，默认 3。"""
+    return max(0, int(env_num(_ENV_SUMMARY_KEEP_RECENT, _DEFAULT_SUMMARY_KEEP_RECENT,
+                              cast=int)))

@@ -216,7 +216,7 @@ def test_chat_endpoint_paging_and_summary(tmp_store, write_persona, make_app_cli
     assert data["summary"]["summary"] == "此前聊过吃饭的事"
     assert data["summary"]["covered"] == 4
     assert data["estimated_tokens"] > 0
-    assert data["summary_threshold"] == chatlog.token_threshold()
+    assert data["summary_threshold"] == chatlog.summary_limit()
 
     older = client.get("/api/npcs/cang/chat?limit=2&offset=2").json()
     assert [m["content"] for m in older["turns"]] == ["问3", "答3"]

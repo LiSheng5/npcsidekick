@@ -92,18 +92,17 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `NPC_MOD_HEARTBEAT_TIMEOUT` | mod 心跳超时（秒），超时视为离线 | 60 |
 | `NPC_EXECUTE_TIMEOUT` | 动作执行同步等待上限（秒），超时记「不确定」 | 30 |
 | `NPC_PENDING_TTL` | 待定动作存活上限（秒） | 120 |
-| `NPC_SUMMARY_TOKEN_THRESHOLD` | 聊天记录滚动摘要触发阈值（token，本地估算） | 20000 |
-| `NPC_SUMMARY_KEEP_RECENT` | 摘要后仍逐字保留的最近轮数 | 8 |
+| `NPC_CONTEXT_WINDOW` | 当前模型的上下文窗口（token）。**换模型要同步改**，压缩阈值按它算 | 1000000 |
+| `NPC_SUMMARY_RATIO` | 提示用到窗口的这个比例就触发滚动压缩 | 0.4 |
+| `NPC_SUMMARY_KEEP_RECENT` | 压缩后仍逐字保留的最近轮数 | 3 |
 | `NPC_MEM_RECALL_MIN_REL` | recall 相关度门槛（低于门槛的条目不返回） | 0.2 |
 | `NPC_RECENT_RESULTS` / `NPC_RECENT_MINUTES` | 近况层「最近动作结果」条数 / 时间窗（分钟） | 5 / 30 |
-| `NPC_BUDGET_STATE` / `NPC_BUDGET_MEMORY` / `NPC_BUDGET_HISTORY` | 上下文各层 token 预算 | 800 / 600 / 4000 |
+| `NPC_BUDGET_STATE` / `NPC_BUDGET_MEMORY` / `NPC_BUDGET_HISTORY` | 上下文各层 token 预算；`NPC_BUDGET_HISTORY` = 历史硬上限，未设时为窗口 × 0.7（只防摘要失败时撑爆上下文） | 800 / 600 / 窗口 × 0.7 |
 | `NPC_TRACE_FILE` | 回合 trace 落盘（JSONL，只记长度不记原文） | 不落盘 |
 
 布尔词表：`1` / `true` / `yes` / `on` 为开（大小写、首尾空白不敏感），其余一律关。数值项未设置/空/非法 → 回落默认值。除 `api_key.txt` 权限检测外，全部**每次现读环境变量**，改完不用重启（可热切）。
 
 > 思考模式：请求带 `tools` 时，DeepSeek 官方要求把历史 assistant 的 `reasoning_content` 原样回传（缺了直接 400）。所以回合内的工具轮与历史消息都会带上思考内容，并计入 `NPC_BUDGET_HISTORY` 预算；非 DeepSeek 端点不回传这个字段。
-
-> `NPC_BUDGET_HISTORY` 调小后，摘要阈值 `NPC_SUMMARY_TOKEN_THRESHOLD` 也建议相应调小，否则历史会被预算截断而摘要迟迟不触发。
 
 ## 游戏面 API（mod 契约）
 
@@ -162,7 +161,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 `context.py` 按层装配（纯函数，可单测）：
 
 1. **system 固定层**：人设 + 规矩（`build_system_prompt`），整场不变，利于前缀缓存
-2. **历史**：已有摘要（一条 assistant 消息）+ 最近聊天记录，受 `NPC_BUDGET_HISTORY` 约束
+2. **历史**：已有摘要（一条 assistant 消息）+ 未被摘要覆盖的全部聊天记录；提示用到 `NPC_CONTEXT_WINDOW` 的 40%（`NPC_SUMMARY_RATIO`）时压缩旧轮次、只留最近 3 轮（`NPC_SUMMARY_KEEP_RECENT`）
 3. **最后一条 user 消息**：资料块 + `玩家说：{原话}`，资料块顺序为
    - 【当前情况】：游戏观测（受 `NPC_BUDGET_STATE` 约束）
    - 【相关记忆】：回合开始的确定性预取（独享 `NPC_BUDGET_MEMORY`）
@@ -170,7 +169,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 
 没有内容的块整块省略；超预算按文本截断并留 `…（已截断）` 标记，同时给每层记一条 `context_section_truncated` 日志，绝不静默丢弃。【最近发生】的砍序是「最近结果 → 进行中 → 待确认」（组内从较旧的砍起），待确认最后才砍——没收到回应的最容易被重复下令。
 
-聊天记录超过 `NPC_SUMMARY_TOKEN_THRESHOLD` 后，旧轮次由 LLM 压成滚动摘要（后台、不挡首字）；摘要只保脉络，重要事实走记忆卡。
+整个提示（系统 + 状态 + 记忆 + 历史 + 玩家这句）用到 `NPC_CONTEXT_WINDOW` 的 40%（`NPC_SUMMARY_RATIO`）时，回合结束后台把旧轮次压成滚动摘要（不挡首字），只留最近 3 轮逐字；摘要只保脉络，重要事实走记忆卡。
 
 ## 记忆：预取与检索
 
@@ -192,6 +191,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `no_dialogue` | 是否一句台词都没产出 |
 | `tools` | 每次工具调用 `{name, kind, ok, status, ms}` |
 | `tokens` | `{system, history, state, memory, user, total}`（本地估算口径） |
+| `summary_trigger` | `{prompt_tokens, limit}`：本回合提示 token 估算 vs 压缩阈值（窗口 × 比例），方便对照真实对话判断阈值是否合适 |
 | `memory_prefetch` | `{hits, filtered}`：进块条数 / 被滤条数 |
 | `first_token_ms` / `total_ms` | 首帧耗时 / 整回合耗时 |
 | `message_len` / `reply_len` | 玩家输入与台词长度（**不记原文**） |

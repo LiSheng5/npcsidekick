@@ -106,18 +106,28 @@ async def _wait_for(predicate, timeout: float = 5.0) -> bool:
 
 
 def _over_threshold_chatlog(npc_id: str, store_dir, rounds: int = 5) -> None:
-    """先造一段远超阈值的聊天记录（配合 NPC_SUMMARY_TOKEN_THRESHOLD=50）。"""
+    """先造一段够压的旧聊天记录（配合 `_ratio_env` 的低压缩阈值）。"""
     for i in range(rounds):
         chatlog.append_turn(npc_id, "问" * 20 + str(i), "答" * 20 + str(i),
                             store_dir=store_dir)
+
+
+def _ratio_env(monkeypatch) -> None:
+    """窗口 1000 × 比例 0.01 → 压缩阈值 10：正常回合的提示都会越线。
+
+    硬上限放开、保留 1 轮，只让「提示越线 → 触发后台摘要」这一条路径生效。
+    """
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")
+    monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.01")
+    monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "1")
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "100000")
 
 
 # ── 首字不等摘要，摘要最终被保存 ──────────────────────────
 
 def test_first_delta_before_summary_completes_and_summary_saved(tmp_store, monkeypatch):
     """假 LLM 的 chat() 故意慢：第一个 delta 在摘要完成之前就到了；摘要最终被保存。"""
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
-    monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "1")
+    _ratio_env(monkeypatch)
     _over_threshold_chatlog("shu", tmp_store)
     provider = SummaryProvider(summary_text="前情：聊过问的事。", delay=0.3)
 
@@ -140,8 +150,7 @@ def test_first_delta_before_summary_completes_and_summary_saved(tmp_store, monke
 def test_build_history_without_summarize_does_not_call_llm(tmp_store, make_provider,
                                                            monkeypatch):
     """turn.py 走的 summarize=False：拼历史不惊动摘要 LLM（默认 True 保持旧行为）。"""
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
-    monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "1")
+    _ratio_env(monkeypatch)
     _over_threshold_chatlog("shu", tmp_store)
     provider = make_provider()
 
@@ -156,8 +165,7 @@ def test_build_history_without_summarize_does_not_call_llm(tmp_store, make_provi
 
 def test_no_concurrent_summaries_for_same_npc(tmp_store, monkeypatch):
     """连续两个回合都触发摘要条件：同一 NPC 不会并发跑两个摘要。"""
-    monkeypatch.setenv("NPC_SUMMARY_TOKEN_THRESHOLD", "50")
-    monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "1")
+    _ratio_env(monkeypatch)
     _over_threshold_chatlog("shu", tmp_store)
     provider = SummaryProvider(summary_text="前情摘要", block=True)
 
