@@ -1,4 +1,4 @@
-# NPCSidekick v4 运行时依赖（第三方库，各自带许可证：多为 MIT / Apache / BSD，按依赖使用即合规）
+# RunawayNPC v4 运行时依赖（第三方库，各自带许可证：多为 MIT / Apache / BSD，按依赖使用即合规）
 fastapi
 uvicorn
 openai

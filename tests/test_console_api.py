@@ -28,7 +28,7 @@ def test_console_assets_served(tmp_store, persona_dir, make_app_client):
     for path in ("/console/", "/console/index.html", "/console/app.js", "/console/styles.css"):
         res = client.get(path)
         assert res.status_code == 200, path
-    assert "NPCSidekick" in client.get("/console/index.html").text
+    assert "失控NPC" in client.get("/console/index.html").text
 
 
 # ── 角色卡读写 ─────────────────────────────────────────────

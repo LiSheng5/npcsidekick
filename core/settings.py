@@ -51,7 +51,7 @@ def api_key_source() -> str:
 @dataclass
 class AgentSettings:
     """
-    NPCSidekick 配置 — 纯读环境变量，可注入、可覆盖。
+    RunawayNPC 配置 — 纯读环境变量，可注入、可覆盖。
 
     「三件套」全部由用户自配，v4 不预设厂商：模型名 / key / 端点任缺一项 → 没有大脑
     （`/api/talk` 走角色卡 rules 兜底回复，不调用动作）。

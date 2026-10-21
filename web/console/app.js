@@ -1,4 +1,4 @@
-/* NPCSidekick v4 Console —— 零构建原生 JS。
+/* 失控NPC v4 Console —— 零构建原生 JS。
    视觉风格照搬 1_NPCSidekick/web/console（styles.css 原样复用）；
    面板按 v4 真实数据重设计（无 world/scheduler 这些旧概念；关系网只由
    personas/*.json 的 relations 字段驱动，没有数据就显示空态）。 */

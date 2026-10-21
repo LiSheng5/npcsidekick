@@ -204,7 +204,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
     缺省走真实 HTTP（`turn._http_execute`）请求 mod 的 execute_url。
     paths 可注入（运行时数据目录：store / personas / avatars）；None 时用工程默认。
     """
-    app = FastAPI(title="NPCSidekick v4", version="4.0")
+    app = FastAPI(title="失控NPC v4", version="4.0")
     paths = paths or default_paths()
     store_dir = paths.store_dir
     persona_dir = paths.persona_dir
@@ -451,7 +451,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
     else:                                             # 静态资源缺失也不影响游戏面
         @app.get("/", include_in_schema=False)
         async def root_no_console():
-            return {"service": "NPCSidekick v4", "console": "未安装（缺 web/console）",
+            return {"service": "失控NPC v4", "console": "未安装（缺 web/console）",
                     "api": ["/api/talk", "/api/capabilities", "/api/action_result",
                             "/api/state", "/api/npcs"]}
 
