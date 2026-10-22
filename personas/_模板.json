@@ -24,7 +24,7 @@
   "voice": "【可选】TTS 音色名（装过 edge-tts 才有声），留空 = 用默认音色。例如 zh-CN-XiaoxiaoNeural",
   "relations": [
     {
-      "who": "【可选】对方的 npc_id，例如 cang",
+      "who": "【可选】对方的 npc_id，例如 bella；也可以写「玩家」这类合成节点",
       "how": "关系描述，例如：老邻居",
       "weight": 0.5
     }
