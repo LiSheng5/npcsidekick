@@ -66,6 +66,9 @@ def configure_logging(
             "test"   — 捕获到列表, 适合测试
       log_file: 可选的日志文件路径
     """
+    # 显式配置优先：置位后 _LazyLogger 不会再用默认值覆盖掉这里的设置
+    _LazyLogger._configured = True
+
     # ── 标准库日志桥接 ─────────────────────────────────
     logging.basicConfig(
         format="%(message)s",

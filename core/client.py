@@ -16,6 +16,7 @@ LLMClient 本身不直接调用 API — 它委托给 ProviderProtocol 实现。
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
 
@@ -30,8 +31,9 @@ if TYPE_CHECKING:
 # ── 网关抖动重试（2026-08-25, 思想借自 ExponentialBackoff/DSH retryPolicy）──
 # 开关: NPC_LLM_RETRY=1 才启用（代码默认关 — 家规）。每次调用现读环境变量，可热切。
 # 节奏: 默认最多补试 2 次，等待 2s/6s（最坏多花 8s，仍在 talk 60s 预算内）。
-#       NPC_LLM_RETRY_DELAYS="3,9" 可自定义。
-# 只救瞬时病（超时/连接断/限流429/5xx），参数错(4xx)立刻原样抛出——盲试是浪费预算。
+#       NPC_LLM_RETRY_DELAYS="3,9" 可自定义（无条数上限，自定义长列表会突破上面的预算）。
+# 覆盖: chat 全程；stream 只救**首包之前**的瞬时病（已吐出内容就不再重试，
+#       避免台词重复）—— 由 _is_retryable 按异常名/status 宽判别（超时/断连/429/5xx 等）。
 
 
 def _retry_delays() -> List[float]:
@@ -197,15 +199,38 @@ class LLMClient:
           max_tokens: 覆盖默认 max_tokens
           reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")
         """
-        async for chunk in self._provider.stream(
+        kwargs = dict(
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
-        ):
-            yield chunk
+        )
+        delays = _retry_delays() if llm_retry_enabled() else []
+        attempt = 0
+        while True:
+            emitted = False
+            try:
+                async for chunk in self._provider.stream(**kwargs):
+                    emitted = True
+                    yield chunk
+                return
+            except Exception as exc:
+                # 首包之前才补试；已吐过内容就原样抛（重试会把台词再说一遍）
+                if emitted or attempt >= len(delays) or not _is_retryable(exc):
+                    raise
+                wait = delays[attempt]
+                attempt += 1
+                log.warning("llm_retry_scheduled", attempt=attempt,
+                            delay_s=wait, error=str(exc)[:120])
+                await asyncio.sleep(wait)
+
+    def close(self) -> None:
+        """释放底层 HTTP 连接（换脑时调用，别等 GC）。"""
+        close = getattr(self._provider, "close", None)
+        if callable(close):
+            close()
 
     @property
     def provider(self) -> "ProviderProtocol":

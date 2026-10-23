@@ -315,8 +315,17 @@ def reset_llm_settings(holder: Optional[Dict[str, Any]] = None,
 
 
 def rebuild_llm(holder: Dict[str, Any]) -> None:
-    """按生效设置重建大脑；没配齐 → None（/api/talk 走角色卡 rules 兜底）。"""
+    """按生效设置重建大脑；没配齐 → None（/api/talk 走角色卡 rules 兜底）。
+
+    旧大脑的 HTTP 连接池顺手关掉（别等 GC），失败不影响换脑。
+    """
+    old = holder.get("client")
     holder["client"] = build_default_client()
+    if old is not None and old is not holder["client"]:
+        try:
+            old.close()
+        except Exception as exc:
+            log.warning("llm_client_close_failed", error=scrub(str(exc))[:120])
 
 
 def build_default_client(store_dir: Optional[Path] = None) -> Optional[LLMClient]:

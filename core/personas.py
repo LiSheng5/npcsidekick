@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+from core.paths import require_npc_id
+
 
 class PersonaError(Exception):
     """角色卡读不了：缺文件 / JSON 坏 / 不是 JSON 对象。
@@ -27,8 +29,8 @@ class PersonaError(Exception):
 
 
 def persona_path(persona_dir: Path, npc_id: str) -> Path:
-    """一张角色卡的路径（不做存在性检查）。"""
-    return persona_dir / f"{npc_id}.json"
+    """一张角色卡的路径（不做存在性检查）；npc_id 非法 → ValueError。"""
+    return persona_dir / f"{require_npc_id(npc_id)}.json"
 
 
 def persona_files(persona_dir: Path) -> List[Path]:

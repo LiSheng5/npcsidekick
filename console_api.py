@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from core.logging_config import log
-from core.paths import resolve_store
+from core.paths import resolve_store, valid_npc_id
 from core.personas import PersonaError, persona_files, persona_path, read_persona
 
 import chatlog
@@ -40,8 +40,6 @@ _EDITABLE_FIELDS = ("content", "importance", "category", "pinned")
 _AVATAR_EXT = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "webp": ".webp", "gif": ".gif"}
 _AVATAR_MAX_BYTES = 2 * 1024 * 1024
 _AVATAR_DATA_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)$")
-# NPC id 会被拼进文件名，必须挡掉路径穿越（中文 id 也要放行）
-_ID_RE = re.compile(r"^[\w.-]{1,64}$", re.UNICODE)
 
 
 # 删卡时这句提示前后端同源（前端 confirm 与按钮旁说明照抄它，改就一起改）
@@ -97,7 +95,13 @@ def build_router(persona_dir: Path,
     # ── 头像文件（avatars/{id}.<ext>，由 server 静态挂在 /avatars）──
 
     def _valid_id(npc_id: str) -> bool:
-        return bool(_ID_RE.match(npc_id)) and npc_id not in (".", "..")
+        return valid_npc_id(npc_id)
+
+    def _require_id(npc_id: str) -> str:
+        """npc_id 会被拼进文件名：非法（含 `../` 穿越企图）→ 400。"""
+        if not valid_npc_id(npc_id):
+            raise HTTPException(status_code=400, detail=f"非法的 NPC id: {npc_id}")
+        return npc_id
 
     def _avatar_glob(npc_id: str):
         if avatar_dir is None or not _valid_id(npc_id) or not avatar_dir.is_dir():
@@ -176,11 +180,13 @@ def build_router(persona_dir: Path,
 
     @router.get("/personas/{npc_id}")
     def get_persona(npc_id: str):
+        _require_id(npc_id)
         return {"npc_id": npc_id, "persona": _read_persona(npc_id)}
 
     @router.put("/personas/{npc_id}")
     async def put_persona(npc_id: str, request: Request):
         """整份覆盖写（不存在即新建）。id 字段缺失会自动补成路径里的 id。"""
+        _require_id(npc_id)
         persona = await _body(request)
         given = persona.get("id")
         if given is not None and str(given) != npc_id:
@@ -210,8 +216,9 @@ def build_router(persona_dir: Path,
         **记忆卡与聊天记录不动**（数据在 store/ 里，重建同名角色卡就能接着用 —— 删卡不该连带删记忆）；
         响应与日志都会写明保留了什么（`_DELETE_KEPT_NOTE`，前端 confirm 用同一句话）。
         """
-        if not _valid_id(npc_id) or npc_id.startswith("_"):
+        if npc_id.startswith("_"):
             raise HTTPException(status_code=400, detail=f"非法的 NPC id: {npc_id}")
+        _require_id(npc_id)
         path = persona_path(persona_dir, npc_id)
         if not path.exists():
             raise HTTPException(status_code=404, detail=f"没有这张角色卡: {npc_id}")
@@ -368,6 +375,7 @@ def build_router(persona_dir: Path,
 
     @router.get("/npcs/{npc_id}/memory")
     def list_memory(npc_id: str):
+        _require_id(npc_id)
         entries = memory.load_card(npc_id, store_dir=store_dir)
         return {
             "npc_id": npc_id,
@@ -377,6 +385,7 @@ def build_router(persona_dir: Path,
 
     @router.post("/npcs/{npc_id}/memory")
     async def add_memory(npc_id: str, request: Request):
+        _require_id(npc_id)
         body = await _body(request)
         content = body.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -396,6 +405,7 @@ def build_router(persona_dir: Path,
 
     @router.put("/npcs/{npc_id}/memory/{entry_id}")
     async def update_memory(npc_id: str, entry_id: str, request: Request):
+        _require_id(npc_id)
         body = await _body(request)
         fields = {k: v for k, v in body.items() if k in _EDITABLE_FIELDS}
         if not fields:
@@ -414,6 +424,7 @@ def build_router(persona_dir: Path,
 
     @router.delete("/npcs/{npc_id}/memory/{entry_id}")
     async def delete_memory(npc_id: str, entry_id: str):
+        _require_id(npc_id)
         async with lock_for(npc_id):
             ok = await asyncio.to_thread(memory.delete_entry, npc_id, entry_id,
                                          store_dir=store_dir)
@@ -426,6 +437,7 @@ def build_router(persona_dir: Path,
     @router.get("/npcs/{npc_id}/chat")
     def get_chat(npc_id: str, limit: int = 200, offset: int = 0):
         """从最新往前取窗口：offset = 已看过的最新条数，limit = 本页条数。"""
+        _require_id(npc_id)
         limit = max(1, min(int(limit), _CHAT_PAGE_MAX))
         offset = max(0, int(offset))
         messages = chatlog.load_turns(npc_id, store_dir=store_dir)

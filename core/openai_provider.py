@@ -9,6 +9,7 @@ OpenAIProvider — OpenAI / DeepSeek / 任何 OpenAI 兼容 API 的 Provider 实
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -41,6 +42,10 @@ _OPENAI_EFFORT = {
     "high": "high", "xhigh": "high", "max": "high",
 }
 _OFF_VALUES = frozenset({"off", "disabled", "none"})
+
+# 请求超时（秒）：SDK 默认 600s，挂死的网关会一直占住回合（与 talk 60s 预算对齐）。
+# 流式按"块间隔"计时，不是整段生成的总时长。
+_REQUEST_TIMEOUT_S = 60.0
 
 
 def _reasoning_text(payload: Any) -> str:
@@ -118,9 +123,26 @@ class OpenAIProvider(ProviderProtocol):
         self._api_key = api_key
 
         # 同步客户端
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self._client = OpenAI(api_key=api_key, base_url=base_url,
+                              timeout=_REQUEST_TIMEOUT_S)
         # 异步客户端 (惰性创建)
         self._async_client: Optional[AsyncOpenAI] = None
+
+    def close(self) -> None:
+        """释放 HTTP 连接池（换脑时调用，别等 GC）。
+
+        同步实现：当前线程没有事件循环就自己关干净；有就交给循环收尾。
+        """
+        self._client.close()
+        async_client, self._async_client = self._async_client, None
+        if async_client is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(async_client.close())
+        else:
+            loop.create_task(async_client.close())
 
     # ── ProviderProtocol 实现 ────────────────────────────
 
@@ -325,6 +347,7 @@ class OpenAIProvider(ProviderProtocol):
             self._async_client = AsyncOpenAI(
                 api_key=self._api_key,
                 base_url=self._base_url,
+                timeout=_REQUEST_TIMEOUT_S,
             )
 
         kwargs = dict(

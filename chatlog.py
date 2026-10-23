@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from core.config import context_window, summary_keep_recent, summary_ratio
 from core.logging_config import log
-from core.paths import resolve_store
+from core.paths import require_npc_id, resolve_store
 
 _SUMMARY_PROMPT = (
     "把下面这段 NPC 与玩家的对话压成一段简短摘要（中文，600 字以内）："
@@ -43,11 +43,13 @@ def summary_limit() -> int:
 # ── 路径 ─────────────────────────────────────────────────
 
 def chat_path(npc_id: str, store_dir: Optional[Path] = None) -> Path:
-    return resolve_store(store_dir) / f"{npc_id}_chat.jsonl"
+    """聊天记录路径；npc_id 非法（路径穿越企图）→ ValueError。"""
+    return resolve_store(store_dir) / f"{require_npc_id(npc_id)}_chat.jsonl"
 
 
 def summary_path(npc_id: str, store_dir: Optional[Path] = None) -> Path:
-    return resolve_store(store_dir) / f"{npc_id}_summary.json"
+    """摘要状态路径；npc_id 非法（路径穿越企图）→ ValueError。"""
+    return resolve_store(store_dir) / f"{require_npc_id(npc_id)}_summary.json"
 
 
 # ── token 估算（纯本地确定性，只用于量级判断，不求精确）─────
@@ -151,16 +153,21 @@ def load_summary(npc_id: str, store_dir: Optional[Path] = None) -> Dict[str, Any
         return empty
     try:
         raw = json.loads(path.read_text("utf-8"))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         log.warning("summary_bad_json", npc_id=npc_id)
         return empty
     if not isinstance(raw, dict):
         return empty
     covered = raw.get("covered", 0)
+    updated = raw.get("updated_at", 0.0)
+    try:
+        updated_at = float(updated) if updated is not None else 0.0
+    except (TypeError, ValueError):
+        updated_at = 0.0
     return {
         "summary": raw.get("summary", "") if isinstance(raw.get("summary"), str) else "",
         "covered": covered if isinstance(covered, int) and covered >= 0 else 0,
-        "updated_at": float(raw.get("updated_at", 0.0) or 0.0),
+        "updated_at": updated_at,
     }
 
 

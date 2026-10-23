@@ -232,3 +232,9 @@ def test_load_summary_empty_and_broken(tmp_store):
         json.dumps({"summary": 123, "covered": -1}), encoding="utf-8")
     assert chatlog.load_summary("cang", store_dir=tmp_store) == {
         "summary": "", "covered": 0, "updated_at": 0.0}
+
+    chatlog.summary_path("cang", store_dir=tmp_store).write_text(
+        json.dumps({"summary": "x", "covered": 1, "updated_at": "昨天"}),
+        encoding="utf-8")
+    assert chatlog.load_summary("cang", store_dir=tmp_store) == {
+        "summary": "x", "covered": 1, "updated_at": 0.0}

@@ -172,6 +172,19 @@ def test_talk_unknown_npc_400(tmp_store, write_persona, make_app_client):
     assert "nobody" in res.json()["detail"]
 
 
+def test_talk_rejects_traversal_npc_id(tmp_store, write_persona, make_app_client):
+    """npc_id 会拼进文件名：穿越企图一律 400，不许读写 store/ 之外的文件。"""
+    write_persona("cang")
+    client = make_app_client()
+
+    assert client.post("/api/talk",
+                       json={"npc_id": "../store/llm_config", "message": "在吗"}
+                       ).status_code == 400
+    assert client.post("/api/action_result",
+                       json={"npc_id": "cang/../x", "action": "cook", "ok": True}
+                       ).status_code == 400
+
+
 def test_talk_broken_persona_400(tmp_store, persona_dir, make_app_client):
     (persona_dir / "cang.json").write_text("{坏", encoding="utf-8")
     client = make_app_client()

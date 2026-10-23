@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core.config_flags import env_num
 from core.logging_config import log
-from core.paths import resolve_store
+from core.paths import require_npc_id, resolve_store
 
 # ── 记忆卡事件文案单一来源（写卡文案只在此处定义）──────────
 EV_DONE = "完成: "
@@ -156,8 +156,11 @@ def _relevance_score(content: str, query: str,
 # ── 路径与读写 ───────────────────────────────────────────
 
 def card_path(npc_id: str, store_dir: Optional[Path] = None) -> Path:
-    """记忆卡路径：store/{id}_memory.json。store_dir=None → 工程默认 store/。"""
-    return resolve_store(store_dir) / f"{npc_id}_memory.json"
+    """记忆卡路径：store/{id}_memory.json。store_dir=None → 工程默认 store/。
+
+    npc_id 非法（路径穿越企图）→ ValueError。
+    """
+    return resolve_store(store_dir) / f"{require_npc_id(npc_id)}_memory.json"
 
 
 def _normalize_entry(raw: Any, index: int) -> Dict[str, Any]:

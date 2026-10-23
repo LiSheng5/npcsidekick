@@ -9,9 +9,31 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+# NPC id 会被拼进文件名（store/{id}_memory.json、personas/{id}.json…），
+# 必须挡掉路径穿越（中文 id 也要放行）
+NPC_ID_RE = re.compile(r"^[\w.-]{1,64}$", re.UNICODE)
+
+
+def valid_npc_id(npc_id: str) -> bool:
+    """npc_id 是否可安全用作文件名（服务端与控制台共用的唯一口径）。"""
+    return (isinstance(npc_id, str) and bool(NPC_ID_RE.match(npc_id))
+            and npc_id not in (".", ".."))
+
+
+def require_npc_id(npc_id: str) -> str:
+    """合法 → 原样返回；非法（含 `../` 等穿越企图）→ ValueError。
+
+    所有把 npc_id 拼进路径的函数（memory / chatlog / personas）都在这道闸后面，
+    HTTP 入口另把 ValueError 转成 400。
+    """
+    if not valid_npc_id(npc_id):
+        raise ValueError(f"非法的 NPC id: {npc_id!r}")
+    return npc_id
 
 
 @dataclass(frozen=True)

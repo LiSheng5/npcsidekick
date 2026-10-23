@@ -110,6 +110,20 @@ def test_delete_persona_rejects_template_and_traversal(tmp_store, persona_dir, w
     assert (persona_dir / "cang.json").exists()
 
 
+def test_console_rejects_traversal_npc_id(tmp_store, write_persona, make_app_client):
+    """角色卡/记忆/聊天各入口的 npc_id 同一口径：穿越企图一律 400。"""
+    write_persona("cang")
+    client = make_app_client()
+    evil = "..%5C..%5Cevil"
+
+    assert client.get(f"/api/personas/{evil}").status_code == 400
+    assert client.put(f"/api/personas/{evil}", json={"name": "x"}).status_code == 400
+    assert client.get(f"/api/npcs/{evil}/memory").status_code == 400
+    assert client.post(f"/api/npcs/{evil}/memory",
+                       json={"content": "x"}).status_code == 400
+    assert client.get(f"/api/npcs/{evil}/chat").status_code == 400
+
+
 def test_put_persona_creates_and_updates(tmp_store, persona_dir, make_app_client):
     client = make_app_client()
 

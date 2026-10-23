@@ -44,7 +44,7 @@ from core.llm_runtime import (
     scrub,
 )
 from core.logging_config import log
-from core.paths import Paths, default_paths
+from core.paths import Paths, default_paths, valid_npc_id
 from core.personas import PersonaError, persona_ids, persona_path, read_persona
 from pending import PendingActions
 
@@ -82,7 +82,10 @@ def execute_timeout() -> float:
 
 def load_persona(persona_dir: Path, npc_id: str) -> Dict[str, Any]:
     """读 personas/{id}.json；缺失/非法 → HTTPException(400)。"""
-    path = persona_path(persona_dir, npc_id)
+    try:
+        path = persona_path(persona_dir, npc_id)
+    except ValueError as exc:                # npc_id 路径穿越企图
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         persona = read_persona(path)
     except PersonaError as exc:
@@ -178,6 +181,13 @@ def _require_text(body: Dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise HTTPException(status_code=400, detail=f"字段 {key} 必填且必须是非空字符串")
     return value.strip()
+
+
+def _require_npc_id(npc_id: str) -> str:
+    """npc_id 会被拼进文件名：非法（含 `../` 穿越企图）→ 400。"""
+    if not valid_npc_id(npc_id):
+        raise HTTPException(status_code=400, detail=f"非法的 NPC id: {npc_id}")
+    return npc_id
 
 
 def _note_from_params(action: str, params: Any) -> str:
@@ -284,7 +294,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
     @app.post("/api/talk")
     async def talk(request: Request):
         body = await _json_body(request)
-        npc_id = _require_text(body, "npc_id")
+        npc_id = _require_npc_id(_require_text(body, "npc_id"))
         message = _require_text(body, "message")
         observation = body.get("observation")
         mod = body.get("mod")
@@ -327,7 +337,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
            **无论命中与否都写卡** —— 旧 mod 的回报不能丢
         """
         body = await _json_body(request)
-        npc_id = _require_text(body, "npc_id")
+        npc_id = _require_npc_id(_require_text(body, "npc_id"))
         action = _require_text(body, "action")
         ok = body.get("ok")
         if not isinstance(ok, bool):
@@ -416,8 +426,12 @@ def create_app(llm_client: Optional[LLMClient] = None,
     async def npcs():
         result = []
         for npc_id in persona_ids(persona_dir):
-            entries = memory.load_card(npc_id, store_dir=store_dir)
-            msgs = chatlog.load_turns(npc_id, store_dir=store_dir)
+            try:
+                entries = memory.load_card(npc_id, store_dir=store_dir)
+                msgs = chatlog.load_turns(npc_id, store_dir=store_dir)
+            except Exception as exc:         # 坏卡/异常文件名只影响它自己
+                result.append({"npc_id": npc_id, "error": str(exc)})
+                continue
             result.append({
                 "npc_id": npc_id,
                 "memory_entries": len(entries),

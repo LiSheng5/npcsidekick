@@ -630,11 +630,17 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                         trace_first_delta_at = time.perf_counter()
                     yield _sse({"type": "delta", "text": fallback})
             else:
-                # 正常走完：异步落盘（同步 IO 挪线程池，不卡事件循环）
-                await asyncio.to_thread(chatlog.append_turn, npc_id, message,
-                                        "".join(full_parts), store_dir=store_dir,
-                                        reasoning=turn_reasoning)
-                recorded = True
+                # 正常走完：异步落盘（同步 IO 挪线程池，不卡事件循环）。
+                # 落盘失败不当场断流（finally 会同步再试一次）——
+                # 否则收尾的 action / audio / done 帧全都发不出去。
+                try:
+                    await asyncio.to_thread(chatlog.append_turn, npc_id, message,
+                                            "".join(full_parts), store_dir=store_dir,
+                                            reasoning=turn_reasoning)
+                    recorded = True
+                except Exception as exc:
+                    log.warning("chatlog_append_failed", npc_id=npc_id,
+                                error=scrub(str(exc))[:120])
             finally:
                 # 兜底：异常 / 客户端断连 / 取消时也要落盘，否则这一回合的话直接丢。
                 # 此时**不能 await**（生成器在 GeneratorExit / CancelledError 挂起中再 await 会报
@@ -653,12 +659,17 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
         # 拿不到估算（出错没走到装配）/ 降级回合 → 不触发，下回合再说；
         # 同 NPC 已有摘要在跑就跳过。
         # trace 的 summarized = 本回合启动了后台摘要（不是"摘要已经跑完"）。
-        trace_tokens_total = sum(trace_tokens.values())
-        needed = (not trace_llm_fallback and trace_tokens_total > 0
-                  and await asyncio.to_thread(
-                      chatlog.needs_summary, npc_id, trace_tokens_total,
-                      store_dir=store_dir))
-        trace_summarized = needed and _schedule_summary(llm, npc_id, store_dir)
+        # 摘要判断/调度失败只告警不打断收尾 —— 下面的 action / done 帧必须发出去。
+        try:
+            trace_tokens_total = sum(trace_tokens.values())
+            needed = (not trace_llm_fallback and trace_tokens_total > 0
+                      and await asyncio.to_thread(
+                          chatlog.needs_summary, npc_id, trace_tokens_total,
+                          store_dir=store_dir))
+            trace_summarized = needed and _schedule_summary(llm, npc_id, store_dir)
+        except Exception as exc:
+            log.warning("summary_trigger_failed", npc_id=npc_id,
+                        error=scrub(str(exc))[:120])
 
         for record in executed:                # 已执行动作的记录（mod 不需要照它做任何事）
             yield _sse({"type": "action", "action": record})
