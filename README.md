@@ -219,8 +219,6 @@ python scripts/manual_checks.py disconnect            # 中途断开 SSE 后的�
 python scripts/manual_checks.py uncertain --runs 3    # mock Mod 超时 → 不确定（需要真实 key）
 ```
 
-已跑过的结果与填法见本地 `docs/manual_checks.md`（内部记录，不进公开仓库）。
-
 ## 目录结构
 
 ```
