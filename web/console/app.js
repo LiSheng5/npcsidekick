@@ -1,5 +1,6 @@
 /* 失控NPC v4 Console —— 零构建原生 JS。
-   视觉风格照搬 1_NPCSidekick/web/console（styles.css 原样复用）；
+   styles.css 与本文件同期维护：死样式已按 app.js 实际 class 清零，v4 专属块
+   直接写在里面（并非旧版原样复用）；
    面板按 v4 真实数据重设计（无 world/scheduler 这些旧概念；关系网只由
    personas/*.json 的 relations 字段驱动，没有数据就显示空态）。 */
 'use strict'
@@ -8,19 +9,25 @@
 
 const $ = (sel, root = document) => root.querySelector(sel)
 
+/** h() 与 svgEl() 共用的属性应用。svg=true 跳过 HTML 专属快捷键
+ *  （SVG 的 className 是只读的 SVGAnimatedString，只能走 setAttribute）。 */
+function applyAttrs(node, attrs, svg = false) {
+  if (!attrs) return
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined || v === false) continue
+    // on* 必须走 addEventListener：写成属性只会得到一个永不调用的函数表达式
+    if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v)
+    else if (!svg && k === 'class') node.className = v
+    else if (!svg && k === 'text') node.textContent = v
+    else if (!svg && k === 'value') node.value = v
+    else if (!svg && k === 'checked') node.checked = Boolean(v)
+    else node.setAttribute(k, v)
+  }
+}
+
 function h(tag, attrs, ...kids) {
   const node = document.createElement(tag)
-  if (attrs) {
-    for (const [k, v] of Object.entries(attrs)) {
-      if (v === null || v === undefined || v === false) continue
-      if (k === 'class') node.className = v
-      else if (k === 'text') node.textContent = v
-      else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v)
-      else if (k === 'value') node.value = v
-      else if (k === 'checked') node.checked = Boolean(v)
-      else node.setAttribute(k, v)
-    }
-  }
+  applyAttrs(node, attrs)
   for (const kid of kids.flat()) {
     if (kid === null || kid === undefined || kid === false) continue
     node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)))
@@ -56,6 +63,39 @@ async function api(path, { method = 'GET', body } = {}) {
     throw err
   }
   return data
+}
+
+/** POST + SSE 逐帧回调（/api/talk 专用）：帧切分/解析集中在这里，
+ *  单帧 JSON 坏了跳过该帧不中断整流；非 2xx 抛错（与 api() 同风格）。 */
+async function apiSSE(path, body, onFrame) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(`HTTP ${res.status} ${t.slice(0, 200)}`)
+  }
+  const reader = res.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    let idx
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const raw = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      for (const line of raw.split('\n')) {
+        if (!line.startsWith('data: ')) continue
+        let frame = null
+        try { frame = JSON.parse(line.slice(6)) } catch (_) { continue }
+        onFrame(frame)
+      }
+    }
+  }
 }
 
 // ── 全局状态（跨页共享）───────────────────────────────────
@@ -112,6 +152,14 @@ async function refreshGlobals() {
 
 // ── 通用组件 ──────────────────────────────────────────────
 
+/** 标准内边距的卡片容器（全站同款样板的单一定义点；窄内边距的动作记录卡自带样式）。 */
+function card(...kids) {
+  return h('div', { class: 'card', style: 'padding:16px 18px' }, ...kids)
+}
+
+/** 列表页加载失败的统一占位。 */
+const loadFail = (e) => banner(`加载失败：${e.message}`, 'error')
+
 function pageHead(title, desc, ...right) {
   return h('div', { class: 'page-head' },
     h('div', null, h('h1', { text: title }), h('p', { text: desc })),
@@ -149,8 +197,9 @@ async function renderOverview(view) {
   const box = h('div', { class: 'mem-list' }, stateBlock('', '加载中…'))
   view.append(box)
   try {
-    const [state, npcs] = await Promise.all([api('/api/state'), api('/api/npcs')])
-    store.state = state
+    const state = store.state                      // route() 已 refreshGlobals() 拉过 /api/state
+    if (!state) throw new Error('服务器状态不可用（/api/state 获取失败）')
+    const npcs = await api('/api/npcs')
     const mods = Object.entries(state.mods || {})
     const totalMem = npcs.npcs.reduce((a, n) => a + n.memory_entries, 0)
     const totalMsg = npcs.npcs.reduce((a, n) => a + n.chat_messages, 0)
@@ -163,7 +212,7 @@ async function renderOverview(view) {
         h('div', null, '记忆条数', h('b', { text: String(totalMem) })),
         h('div', null, '聊天消息', h('b', { text: String(totalMsg) })),
         h('div', null, '心跳超时', h('b', { text: `${state.heartbeat_timeout_s}s` }))),
-      h('div', { class: 'card', style: 'padding:16px 18px' },
+      card(
         h('div', { class: 'sec-title', text: '运行环境' }),
         h('div', { class: 'kv' }, h('span', { class: 'k', text: 'store' }), h('span', { class: 'v', text: state.store_dir })),
         h('div', { class: 'kv' }, h('span', { class: 'k', text: 'personas' }), h('span', { class: 'v', text: state.persona_dir })),
@@ -171,7 +220,7 @@ async function renderOverview(view) {
         h('div', { class: 'kv' }, h('span', { class: 'k', text: '已运行' }), h('span', { class: 'v', text: `${state.uptime_s}s` })),
         h('div', { class: 'kv' }, h('span', { class: 'k', text: 'mod' }),
           h('span', { class: 'v', text: mods.length ? mods.map(([m, v]) => `${m}（${v.online ? '在线' : '离线'}，${v.actions} 动作）`).join('　') : '未报到' }))),
-      h('div', { class: 'card', style: 'padding:16px 18px' },
+      card(
         h('div', { class: 'sec-title', text: '各 NPC' }),
         npcs.npcs.length
           ? npcs.npcs.map((n) => h('div', { class: 'kv' },
@@ -187,7 +236,7 @@ async function renderOverview(view) {
     }
     box.replaceChildren(...cards)
   } catch (e) {
-    box.replaceChildren(banner(`加载失败：${e.message}`, 'error'))
+    box.replaceChildren(loadFail(e))
   }
 }
 
@@ -198,14 +247,7 @@ const NODE_R = 36
 
 function svgEl(tag, attrs, ...kids) {
   const node = document.createElementNS(SVG_NS, tag)
-  if (attrs) {
-    for (const [k, v] of Object.entries(attrs)) {
-      if (v === null || v === undefined || v === false) continue
-      // on* 必须走 addEventListener：写成属性只会得到一个永不调用的函数表达式
-      if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v)
-      else node.setAttribute(k, v)
-    }
-  }
+  applyAttrs(node, attrs, { svg: true })
   for (const kid of kids) if (kid) node.append(kid)
   return node
 }
@@ -286,7 +328,7 @@ async function renderGraph(view) {
   try {
     data = await api('/api/relationships')
   } catch (e) {
-    box.replaceChildren(banner(`加载失败：${e.message}`, 'error'))
+    box.replaceChildren(loadFail(e))
     return
   }
   if (!data.nodes.length) {
@@ -297,222 +339,181 @@ async function renderGraph(view) {
   drawGraph(box, data)
 }
 
-function drawGraph(box, data) {
-  const basePos = layeredLayout(data.nodes, data.edges)
-  const base = tightViewBox(data.nodes, basePos)   // 初始视图（「复位」也回到这里）
-  let pos = {}
-  for (const id of Object.keys(basePos)) pos[id] = { ...basePos[id] }
-  let view = { ...base }
-  const byId = {}
-  data.nodes.forEach((n) => { byId[n.id] = n })
-  let selected = null
-  let focusId = null
-  let query = ''
+// ── 关系图主体：drawGraph 的三个半边 ──────────────────────
+// g = 一次关系图的可变状态袋（视图 / 节点位置 / 选中 / 聚焦 / 搜索词 / 指针拖拽），
+// 交互绑定、内容渲染、检查器三个半边只依赖它 —— drawGraph 本体只做装配。
 
-  const MIN_SCALE = 0.3
-  const MAX_SCALE = 4
-  const MAX_AVATAR_BYTES = 2 * 1024 * 1024
+const GRAPH_MIN_SCALE = 0.3
+const GRAPH_MAX_SCALE = 4
+const ZOOM_STEP = 1.15            // 每次滚轮缩放系数
+const DRAG_SLOP_PX = 4            // 小于这个位移算手抖，不算拖拽
+const EDGE_LBL_CHAR_W = 7         // 关系标签估宽（每字符 px）
+const EDGE_LBL_PAD = 12
 
-  const canvas = h('div', { class: 'graph-canvas' })
-  const inspector = h('div', { class: 'inspector' })
-  const svg = svgEl('svg', { class: 'graph-svg', preserveAspectRatio: 'xMidYMid meet' })
-  const toolbar = h('div', { class: 'toolbar' },
-    h('input', {
-      class: 'input', placeholder: '搜索角色…', style: 'width:180px',
-      oninput: (ev) => { query = ev.target.value; renderContent() },
-    }),
-    h('button', { class: 'btn', text: '复位', title: '视图与节点位置都回到初始', onclick: resetAll }),
-    h('button', { class: 'btn', text: '刷新', onclick: () => route() }),
-    h('span', { class: 'hint', text: '滚轮缩放 · 拖拽空白处平移 · 拖节点调位置 · 双击节点聚焦' }))
+/** 搜索命中：名字 / id / 身份任一处包含搜索词（q 已小写）。 */
+function graphHit(n, q) {
+  return !q || `${n.name} ${n.id} ${n.identity || ''}`.toLowerCase().includes(q)
+}
 
-  let nodeEls = new Map()
-  let edgeRefs = []
+/** 聚焦时只留焦点节点和它的 1-hop 邻居。 */
+function graphInFocus(id, focusId, edges) {
+  if (!focusId) return true
+  if (id === focusId) return true
+  return edges.some((e) => (e.source === focusId && e.target === id)
+    || (e.target === focusId && e.source === id))
+}
 
-  // ── 查询 / 聚焦：两套淡化规则合起来用 ──────────────────
+function applyGraphView(g) {
+  g.svg.setAttribute('viewBox', `${g.view.x} ${g.view.y} ${g.view.w} ${g.view.h}`)
+}
 
-  function hit(n) {
-    const q = query.trim().toLowerCase()
-    return !q || `${n.name} ${n.id} ${n.identity || ''}`.toLowerCase().includes(q)
-  }
+/** 屏幕坐标 → 图坐标 + 归一化锚点 + 当前像素缩放比。
+ *  必须还原 preserveAspectRatio=meet 留的黑边，否则缩放锚点会漂、拖动会跟手不准。 */
+function graphAnchorAt(g, clientX, clientY) {
+  const r = g.svg.getBoundingClientRect()
+  const s = Math.min(r.width / g.view.w, r.height / g.view.h) || 1
+  const nx = clamp((clientX - r.left - (r.width - g.view.w * s) / 2) / (g.view.w * s), 0, 1)
+  const ny = clamp((clientY - r.top - (r.height - g.view.h * s) / 2) / (g.view.h * s), 0, 1)
+  return { gx: g.view.x + nx * g.view.w, gy: g.view.y + ny * g.view.h, nx, ny, s }
+}
 
-  /** 聚焦时只留焦点节点和它的 1-hop 邻居。 */
-  function inFocus(id) {
-    if (!focusId) return true
-    if (id === focusId) return true
-    return data.edges.some((e) => (e.source === focusId && e.target === id)
-      || (e.target === focusId && e.source === id))
-  }
+function graphZoomAt(g, clientX, clientY, factor) {
+  const a = graphAnchorAt(g, clientX, clientY)
+  const scale = clamp((g.base.w / g.view.w) * factor, GRAPH_MIN_SCALE, GRAPH_MAX_SCALE)
+  const w = g.base.w / scale
+  const h = g.base.h / scale
+  g.view = { x: a.gx - a.nx * w, y: a.gy - a.ny * h, w, h }
+  applyGraphView(g)
+}
 
-  function nodeDim(n) { return !hit(n) || !inFocus(n.id) }
+/** 几何：边的端点随节点坐标实时算，节点一拖线就跟着动。 */
+function graphEdgeGeom(g, e) {
+  const a = g.pos[e.source]
+  const b = g.pos[e.target]
+  if (!a || !b) return null
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const len = Math.hypot(dx, dy) || 1
+  const ux = dx / len
+  const uy = dy / len
+  const x1 = a.x + ux * NODE_R
+  const y1 = a.y + uy * NODE_R
+  const x2 = b.x - ux * (NODE_R + 4)
+  const y2 = b.y - uy * (NODE_R + 4)
+  return { x1, y1, x2, y2, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 }
+}
 
-  function edgeDim(e) {
-    const q = query.trim()
-    const queryDim = Boolean(q) && !(hit(byId[e.source] || {}) && hit(byId[e.target] || {}))
-    const focusDim = Boolean(focusId) && e.source !== focusId && e.target !== focusId
-    return queryDim || focusDim
-  }
+function graphPlaceEdge(g, ref) {
+  const geom = graphEdgeGeom(g, ref.e)
+  if (!geom) return
+  ref.line.setAttribute('x1', geom.x1)
+  ref.line.setAttribute('y1', geom.y1)
+  ref.line.setAttribute('x2', geom.x2)
+  ref.line.setAttribute('y2', geom.y2)
+  ref.rect.setAttribute('x', geom.mx - ref.tw / 2)
+  ref.rect.setAttribute('y', geom.my - 10)
+  ref.text.setAttribute('x', geom.mx)
+  ref.text.setAttribute('y', geom.my + 4)
+}
 
-  // ── 视图 ─────────────────────────────────────────────
+function graphPlaceNode(g, id) {
+  const el = g.nodeEls.get(id)
+  if (el && g.pos[id]) el.setAttribute('transform', `translate(${g.pos[id].x},${g.pos[id].y})`)
+}
 
-  function applyView() {
-    svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`)
-  }
+// ── 头像：读文件 → data URI → POST → 节点改成图片 ──────────
+// 上限由 /api/state 下发（后端单源）；拿不到就跳过预检，交给服务端拒绝。
 
-  /** 屏幕坐标 → 图坐标 + 归一化锚点 + 当前像素缩放比。
-   *  必须还原 preserveAspectRatio=meet 留的黑边，否则缩放锚点会漂、拖动会跟手不准。 */
-  function anchorAt(clientX, clientY) {
-    const r = svg.getBoundingClientRect()
-    const s = Math.min(r.width / view.w, r.height / view.h) || 1
-    const nx = clamp((clientX - r.left - (r.width - view.w * s) / 2) / (view.w * s), 0, 1)
-    const ny = clamp((clientY - r.top - (r.height - view.h * s) / 2) / (view.h * s), 0, 1)
-    return { gx: view.x + nx * view.w, gy: view.y + ny * view.h, nx, ny, s }
-  }
+function pickAvatar(g, npcId) {
+  const input = h('input', {
+    type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif',
+    style: 'display:none',
+  })
+  const cleanup = () => input.remove()
+  input.addEventListener('change', () => {
+    const file = input.files && input.files[0]
+    cleanup()
+    if (!file) return
+    const cap = store.state && store.state.avatar_max_bytes
+    if (cap && file.size > cap) {
+      bannerFlash(g.canvas,
+        `图片太大（${(file.size / 1048576).toFixed(1)} MB，上限 ${(cap / 1048576).toFixed(0)} MB）`, 'error')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = async () => {
+      try {
+        const r = await api(`/api/npcs/${encodeURIComponent(npcId)}/avatar`,
+          { method: 'POST', body: { image: String(reader.result) } })
+        if (g.byId[npcId]) g.byId[npcId].avatar = r.avatar
+        renderGraphContent(g)
+        bannerFlash(g.canvas, `已设置「${(g.byId[npcId] || {}).name || npcId}」的头像`, 'ok')
+      } catch (e) { bannerFlash(g.canvas, e.message, 'error') }
+    }
+    reader.onerror = () => bannerFlash(g.canvas, '读取图片失败', 'error')
+    reader.readAsDataURL(file)
+  })
+  input.addEventListener('cancel', cleanup)      // 用户取消时 change 不触发
+  document.body.append(input)
+  input.click()
+}
 
-  function zoomAt(clientX, clientY, factor) {
-    const a = anchorAt(clientX, clientY)
-    const scale = clamp((base.w / view.w) * factor, MIN_SCALE, MAX_SCALE)
-    const w = base.w / scale
-    const h = base.h / scale
-    view = { x: a.gx - a.nx * w, y: a.gy - a.ny * h, w, h }
-    applyView()
-  }
+async function removeAvatar(g, npcId) {
+  try {
+    await api(`/api/npcs/${encodeURIComponent(npcId)}/avatar`, { method: 'DELETE' })
+    if (g.byId[npcId]) g.byId[npcId].avatar = null
+    renderGraphContent(g)
+    bannerFlash(g.canvas, '已移除头像', 'ok')
+  } catch (e) { bannerFlash(g.canvas, e.message, 'error') }
+}
 
-  function resetAll() {
-    pos = {}
-    for (const id of Object.keys(basePos)) pos[id] = { ...basePos[id] }
-    view = { ...base }
-    applyView()
-    renderContent()
-  }
-
-  // ── 几何：边的端点随节点坐标实时算，节点一拖线就跟着动 ──
-
-  function edgeGeom(e) {
-    const a = pos[e.source]
-    const b = pos[e.target]
-    if (!a || !b) return null
-    const dx = b.x - a.x
-    const dy = b.y - a.y
-    const len = Math.hypot(dx, dy) || 1
-    const ux = dx / len
-    const uy = dy / len
-    const x1 = a.x + ux * NODE_R
-    const y1 = a.y + uy * NODE_R
-    const x2 = b.x - ux * (NODE_R + 4)
-    const y2 = b.y - uy * (NODE_R + 4)
-    return { x1, y1, x2, y2, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 }
-  }
-
-  function placeEdge(ref) {
-    const g = edgeGeom(ref.e)
-    if (!g) return
-    ref.line.setAttribute('x1', g.x1)
-    ref.line.setAttribute('y1', g.y1)
-    ref.line.setAttribute('x2', g.x2)
-    ref.line.setAttribute('y2', g.y2)
-    ref.rect.setAttribute('x', g.mx - ref.tw / 2)
-    ref.rect.setAttribute('y', g.my - 10)
-    ref.text.setAttribute('x', g.mx)
-    ref.text.setAttribute('y', g.my + 4)
-  }
-
-  function placeNode(id) {
-    const g = nodeEls.get(id)
-    if (g && pos[id]) g.setAttribute('transform', `translate(${pos[id].x},${pos[id].y})`)
-  }
-
-  // ── 头像：读文件 → data URI → POST → 节点改成图片 ────────
-
-  function pickAvatar(npcId) {
-    const input = h('input', {
-      type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif',
-      style: 'display:none',
-    })
-    const cleanup = () => input.remove()
-    input.addEventListener('change', () => {
-      const file = input.files && input.files[0]
-      cleanup()
-      if (!file) return
-      if (file.size > MAX_AVATAR_BYTES) {
-        bannerFlash(canvas, `图片太大（${(file.size / 1048576).toFixed(1)} MB，上限 2 MB）`, 'error')
-        return
-      }
-      const reader = new FileReader()
-      reader.onload = async () => {
-        try {
-          const r = await api(`/api/npcs/${encodeURIComponent(npcId)}/avatar`,
-            { method: 'POST', body: { image: String(reader.result) } })
-          if (byId[npcId]) byId[npcId].avatar = r.avatar
-          renderContent()
-          bannerFlash(canvas, `已设置「${(byId[npcId] || {}).name || npcId}」的头像`, 'ok')
-        } catch (e) { bannerFlash(canvas, e.message, 'error') }
-      }
-      reader.onerror = () => bannerFlash(canvas, '读取图片失败', 'error')
-      reader.readAsDataURL(file)
-    })
-    input.addEventListener('cancel', cleanup)      // 用户取消时 change 不触发
-    document.body.append(input)
-    input.click()
-  }
-
-  async function removeAvatar(npcId) {
-    try {
-      await api(`/api/npcs/${encodeURIComponent(npcId)}/avatar`, { method: 'DELETE' })
-      if (byId[npcId]) byId[npcId].avatar = null
-      renderContent()
-      bannerFlash(canvas, '已移除头像', 'ok')
-    } catch (e) { bannerFlash(canvas, e.message, 'error') }
-  }
-
-  // ── 指针：空白处 = 平移画布；节点上 = 拖节点 ─────────────
-
-  let drag = null
-  let suppressClick = false
+/** 指针：空白处 = 平移画布；节点上 = 拖节点；双击空白 = 取消聚焦。 */
+function bindGraphInteractions(g) {
+  const svg = g.svg
 
   svg.addEventListener('wheel', (ev) => {
     ev.preventDefault()
-    zoomAt(ev.clientX, ev.clientY, ev.deltaY < 0 ? 1.15 : 1 / 1.15)
+    graphZoomAt(g, ev.clientX, ev.clientY, ev.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP)
   }, { passive: false })
 
   svg.addEventListener('pointerdown', (ev) => {
     if (ev.button !== 0) return
-    suppressClick = false
+    g.suppressClick = false
     const nodeG = ev.target.closest && ev.target.closest('g.node')
-    if (nodeG) {
-      const id = nodeG.dataset.id
-      drag = { kind: 'node', id, x: ev.clientX, y: ev.clientY, origin: { ...pos[id] }, moved: false }
-    } else {
-      drag = { kind: 'pan', x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y, moved: false }
-    }
+    g.drag = nodeG
+      ? { kind: 'node', id: nodeG.dataset.id, x: ev.clientX, y: ev.clientY,
+          origin: { ...g.pos[nodeG.dataset.id] }, moved: false }
+      : { kind: 'pan', x: ev.clientX, y: ev.clientY, vx: g.view.x, vy: g.view.y, moved: false }
     svg.setPointerCapture(ev.pointerId)
   })
 
   svg.addEventListener('pointermove', (ev) => {
+    const drag = g.drag
     if (!drag) return
     const dx = ev.clientX - drag.x
     const dy = ev.clientY - drag.y
-    if (!drag.moved && Math.hypot(dx, dy) < 4) return        // 手抖不算拖拽
+    if (!drag.moved && Math.hypot(dx, dy) < DRAG_SLOP_PX) return        // 手抖不算拖拽
     drag.moved = true
-    const s = anchorAt(ev.clientX, ev.clientY).s
+    const s = graphAnchorAt(g, ev.clientX, ev.clientY).s
     if (drag.kind === 'pan') {
       svg.classList.add('panning')
-      view.x = drag.vx - dx / s
-      view.y = drag.vy - dy / s
-      applyView()
+      g.view.x = drag.vx - dx / s
+      g.view.y = drag.vy - dy / s
+      applyGraphView(g)
       return
     }
-    if (!pos[drag.id]) return
-    pos[drag.id] = { x: drag.origin.x + dx / s, y: drag.origin.y + dy / s }
-    placeNode(drag.id)
-    for (const ref of edgeRefs) {
-      if (ref.e.source === drag.id || ref.e.target === drag.id) placeEdge(ref)
+    if (!g.pos[drag.id]) return
+    g.pos[drag.id] = { x: drag.origin.x + dx / s, y: drag.origin.y + dy / s }
+    graphPlaceNode(g, drag.id)
+    for (const ref of g.edgeRefs) {
+      if (ref.e.source === drag.id || ref.e.target === drag.id) graphPlaceEdge(g, ref)
     }
   })
 
-  function endDrag(ev) {
-    if (!drag) return
-    suppressClick = drag.moved
-    drag = null
+  const endDrag = (ev) => {
+    if (!g.drag) return
+    g.suppressClick = g.drag.moved
+    g.drag = null
     svg.classList.remove('panning')
     if (ev && svg.hasPointerCapture(ev.pointerId)) svg.releasePointerCapture(ev.pointerId)
   }
@@ -522,187 +523,231 @@ function drawGraph(box, data) {
   // 双击节点 = 聚焦（只留它和它的邻居）；双击空白 = 取消聚焦
   svg.addEventListener('dblclick', (ev) => {
     if (ev.target.closest && ev.target.closest('g.node')) return
-    if (!focusId) return
-    focusId = null
-    renderContent()
+    if (!g.focusId) return
+    g.focusId = null
+    renderGraphContent(g)
   })
+}
 
-  // ── 渲染 ─────────────────────────────────────────────
+/** 只重建图内容，**不动 view** —— 选中节点/搜索/聚焦时不该把缩放平移重置掉。 */
+function renderGraphContent(g) {
+  const { data } = g
+  g.nodeEls = new Map()
+  g.edgeRefs = []
+  const q = g.query.trim().toLowerCase()
+  const qRaw = g.query.trim()
 
-  /** 只重建图内容，**不动 view** —— 选中节点/搜索/聚焦时不该把缩放平移重置掉。 */
-  function renderContent() {
-    nodeEls = new Map()
-    edgeRefs = []
+  const defs = svgEl('defs')
+  defs.append(
+    svgEl('marker', {
+      id: 'rel-arrow', viewBox: '0 0 10 10', refX: '9', refY: '5',
+      markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse',
+    }, svgEl('path', { d: 'M 0 0 L 10 5 L 0 10 z' })),
+    svgEl('clipPath', { id: 'avatar-clip' }, svgEl('circle', { r: NODE_R })),
+  )
+  const parts = [defs]
 
-    const defs = svgEl('defs')
-    defs.append(
-      svgEl('marker', {
-        id: 'rel-arrow', viewBox: '0 0 10 10', refX: '9', refY: '5',
-        markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse',
-      }, svgEl('path', { d: 'M 0 0 L 10 5 L 0 10 z' })),
-      svgEl('clipPath', { id: 'avatar-clip' }, svgEl('circle', { r: NODE_R })),
-    )
-    const parts = [defs]
-
-    // 先画边（压在节点下面）
-    for (const e of data.edges) {
-      const geom = edgeGeom(e)
-      if (!geom) continue
-      const g = svgEl('g', { class: `edge${edgeDim(e) ? ' dimmed' : ''}` })
-      const line = svgEl('line', { 'marker-end': 'url(#rel-arrow)' })
-      const label = e.weight === null || e.weight === undefined
-        ? e.type : `${e.type} ${e.weight}`
-      const tw = label.length * 7 + 12
-      const rect = svgEl('rect', { class: 'lbl-bg', width: tw, height: 20, rx: 6 })
-      const text = svgEl('text', { class: 'lbl' })
-      text.textContent = label
-      g.append(line, rect, text)
-      const ref = { e, line, rect, text, tw }
-      placeEdge(ref)
-      edgeRefs.push(ref)
-      parts.push(g)
-    }
-
-    // 再画节点
-    for (const n of data.nodes) {
-      const g = svgEl('g', {
-        class: `node${n.synthetic ? ' synthetic' : ''}${nodeDim(n) ? ' dimmed' : ''}`
-          + `${n.id === selected ? ' on' : ''}${n.id === focusId ? ' focus' : ''}`,
-        'data-id': n.id,
-        onclick: () => {
-          if (suppressClick) { suppressClick = false; return }   // 刚才是拖拽，不是点击
-          selected = n.id === selected ? null : n.id
-          renderContent()
-        },
-        ondblclick: () => {
-          selected = n.id
-          focusId = focusId === n.id ? null : n.id
-          renderContent()
-        },
-      })
-      const tip = svgEl('title')
-      tip.textContent = `${n.name}（${n.id}）${n.identity ? ' · ' + n.identity : ''}`
-      g.append(tip, svgEl('circle', { r: NODE_R }))
-
-      if (n.avatar) {
-        g.append(svgEl('image', {
-          class: 'face', href: n.avatar,
-          x: -NODE_R, y: -NODE_R, width: NODE_R * 2, height: NODE_R * 2,
-          preserveAspectRatio: 'xMidYMid slice', 'clip-path': 'url(#avatar-clip)',
-        }))
-      } else {
-        // 没头像 → 圆里一个「+」+ 一行小字，点开文件选择
-        const plus = svgEl('text', { class: 'plus', y: -5 })
-        plus.textContent = '+'
-        const hint = svgEl('text', { class: 'add-hint', y: 15 })
-        hint.textContent = '点击添加图片'
-        g.append(svgEl('g', {
-          class: 'add-avatar',
-          onclick: (ev) => {
-            ev.stopPropagation()
-            if (suppressClick) { suppressClick = false; return }
-            pickAvatar(n.id)
-          },
-        }, plus, hint))
-      }
-
-      const nm = svgEl('text', { class: 'nm', y: NODE_R + 17 })
-      nm.textContent = n.name || n.id
-      g.append(nm)
-      nodeEls.set(n.id, g)
-      placeNode(n.id)          // 必须写入初始位置，否则节点全叠在原点
-      parts.push(g)
-    }
-
-    svg.replaceChildren(...parts)
-    renderInspector()
+  // 先画边（压在节点下面）
+  for (const e of data.edges) {
+    if (!graphEdgeGeom(g, e)) continue
+    const queryDim = Boolean(qRaw) && !(graphHit(g.byId[e.source] || {}, q) && graphHit(g.byId[e.target] || {}, q))
+    const focusDim = Boolean(g.focusId) && e.source !== g.focusId && e.target !== g.focusId
+    const grp = svgEl('g', { class: `edge${queryDim || focusDim ? ' dimmed' : ''}` })
+    const line = svgEl('line', { 'marker-end': 'url(#rel-arrow)' })
+    const label = e.weight === null || e.weight === undefined
+      ? e.type : `${e.type} ${e.weight}`
+    const tw = label.length * EDGE_LBL_CHAR_W + EDGE_LBL_PAD
+    const rect = svgEl('rect', { class: 'lbl-bg', width: tw, height: 20, rx: 6 })
+    const text = svgEl('text', { class: 'lbl' })
+    text.textContent = label
+    grp.append(line, rect, text)
+    const ref = { e, line, rect, text, tw }
+    graphPlaceEdge(g, ref)
+    g.edgeRefs.push(ref)
+    parts.push(grp)
   }
 
-  function renderInspector() {
-    const nameOf = (id) => (byId[id] || {}).name || id
-    if (!selected) {
-      const kids = [
-        h('h2', { text: '关系网' }),
-        h('p', { class: 'sub', text: `${data.nodes.length} 个节点　${data.edges.length} 条关系` }),
-        h('div', { class: 'sec' },
-          h('div', { class: 'sec-title', text: '数据来源' }),
-          h('p', { class: 'sub', text: data.source === 'persona'
-            ? '角色卡里的 relations 字段（制作者手填）'
-            : '还没有任何关系数据' })),
-        h('div', { class: 'sec' },
-          h('div', { class: 'sec-title', text: '操作' }),
-          h('p', { class: 'sub', text: '滚轮缩放 · 拖拽空白处平移 · 拖节点调位置 · 双击节点聚焦看它的邻居' })),
-      ]
-      if (focusId) {
-        kids.push(h('div', { class: 'sec' },
-          h('div', { class: 'sec-title', text: '聚焦中' }),
-          h('div', { class: 'fld-row' },
-            h('span', { class: 'chip on', text: `只显示「${nameOf(focusId)}」的邻居` }),
-            h('button', {
-              class: 'btn tiny', text: '取消聚焦',
-              onclick: () => { focusId = null; renderContent() },
-            }))))
-      }
-      if (data.source === 'none') {
-        kids.push(h('div', { class: 'sec' },
-          h('div', { class: 'sec-title', text: '怎么加' }),
-          h('div', { class: 'quiet-note' },
-            h('div', { text: '在 personas/{id}.json 里加可选字段：' }),
-            h('div', { class: 'dbg-box', text: '"relations": [\n  { "who": "ali", "how": "师徒", "weight": 0.8 }\n]' }))))
-      }
-      inspector.replaceChildren(...kids.filter(Boolean))
-      return
+  // 再画节点
+  for (const n of data.nodes) {
+    const dim = !graphHit(n, q) || !graphInFocus(n.id, g.focusId, data.edges)
+    const grp = svgEl('g', {
+      class: `node${n.synthetic ? ' synthetic' : ''}${dim ? ' dimmed' : ''}`
+        + `${n.id === g.selected ? ' on' : ''}${n.id === g.focusId ? ' focus' : ''}`,
+      'data-id': n.id,
+      onclick: () => {
+        if (g.suppressClick) { g.suppressClick = false; return }   // 刚才是拖拽，不是点击
+        g.selected = n.id === g.selected ? null : n.id
+        renderGraphContent(g)
+      },
+      ondblclick: () => {
+        g.selected = n.id
+        g.focusId = g.focusId === n.id ? null : n.id
+        renderGraphContent(g)
+      },
+    })
+    const tip = svgEl('title')
+    tip.textContent = `${n.name}（${n.id}）${n.identity ? ' · ' + n.identity : ''}`
+    grp.append(tip, svgEl('circle', { r: NODE_R }))
+
+    if (n.avatar) {
+      grp.append(svgEl('image', {
+        class: 'face', href: n.avatar,
+        x: -NODE_R, y: -NODE_R, width: NODE_R * 2, height: NODE_R * 2,
+        preserveAspectRatio: 'xMidYMid slice', 'clip-path': 'url(#avatar-clip)',
+      }))
+    } else {
+      // 没头像 → 圆里一个「+」+ 一行小字，点开文件选择
+      const plus = svgEl('text', { class: 'plus', y: -5 })
+      plus.textContent = '+'
+      const hint = svgEl('text', { class: 'add-hint', y: 15 })
+      hint.textContent = '点击添加图片'
+      grp.append(svgEl('g', {
+        class: 'add-avatar',
+        onclick: (ev) => {
+          ev.stopPropagation()
+          if (g.suppressClick) { g.suppressClick = false; return }
+          pickAvatar(g, n.id)
+        },
+      }, plus, hint))
     }
 
-    const node = byId[selected]
-    const out = data.edges.filter((e) => e.source === selected)
-    const inc = data.edges.filter((e) => e.target === selected)
-    // 注意：replaceChildren 会把 null 变成字面量 "null" 文本节点，必须先滤掉
+    const nm = svgEl('text', { class: 'nm', y: NODE_R + 17 })
+    nm.textContent = n.name || n.id
+    grp.append(nm)
+    g.nodeEls.set(n.id, grp)
+    graphPlaceNode(g, n.id)          // 必须写入初始位置，否则节点全叠在原点
+    parts.push(grp)
+  }
+
+  g.svg.replaceChildren(...parts)
+  g.inspector.replaceChildren(...graphInspectorKids(g).filter(Boolean))
+}
+
+/** 右侧检查器的内容：全图概况 / 选中节点详情两套视图。 */
+function graphInspectorKids(g) {
+  const { data, byId } = g
+  const nameOf = (id) => (byId[id] || {}).name || id
+  if (!g.selected) {
     const kids = [
-      h('h2', { text: node.name || node.id }),
-      h('p', { class: 'sub', text: node.synthetic ? `${node.id}（合成节点：不在角色卡里）` : node.id }),
-      node.identity
-        ? h('div', { class: 'sec' },
-            h('div', { class: 'sec-title', text: '身份' }), h('p', { class: 'sub', text: node.identity }))
-        : null,
+      h('h2', { text: '关系网' }),
+      h('p', { class: 'sub', text: `${data.nodes.length} 个节点　${data.edges.length} 条关系` }),
       h('div', { class: 'sec' },
-        h('div', { class: 'sec-title', text: `发出的关系 ${out.length}` }),
-        ...(out.length ? out.map((e) => h('div', { class: 'rel-row' },
-          h('span', { class: 'arrow', text: '→' }),
-          h('span', { class: 'chip', text: e.type }),
-          h('span', { text: nameOf(e.target) })))
-          : [h('div', { class: 'hint', text: '无' })])),
+        h('div', { class: 'sec-title', text: '数据来源' }),
+        h('p', { class: 'sub', text: data.source === 'persona'
+          ? '角色卡里的 relations 字段（制作者手填）'
+          : '还没有任何关系数据' })),
       h('div', { class: 'sec' },
-        h('div', { class: 'sec-title', text: `收到的关系 ${inc.length}` }),
-        ...(inc.length ? inc.map((e) => h('div', { class: 'rel-row' },
-          h('span', { text: nameOf(e.source) }),
-          h('span', { class: 'chip', text: e.type }),
-          h('span', { class: 'arrow', text: '→' })))
-          : [h('div', { class: 'hint', text: '无' })])),
-      h('div', { class: 'inspector-actions' },
-        h('button', {
-          class: 'btn tiny', text: node.avatar ? '换头像' : '添加头像',
-          onclick: () => pickAvatar(node.id),
-        }),
-        node.avatar
-          ? h('button', { class: 'btn tiny danger', text: '移除头像', onclick: () => removeAvatar(node.id) })
-          : null,
-        h('button', {
-          class: 'btn tiny', text: '只看它的邻居',
-          onclick: () => { focusId = node.id; renderContent() },
-        }),
-        h('button', {
-          class: 'btn tiny', text: '去「角色卡」页编辑',
-          onclick: () => { location.hash = '#/personas' },
-        })),
+        h('div', { class: 'sec-title', text: '操作' }),
+        h('p', { class: 'sub', text: '滚轮缩放 · 拖拽空白处平移 · 拖节点调位置 · 双击节点聚焦看它的邻居' })),
     ]
-    inspector.replaceChildren(...kids.filter(Boolean))
+    if (g.focusId) {
+      kids.push(h('div', { class: 'sec' },
+        h('div', { class: 'sec-title', text: '聚焦中' }),
+        h('div', { class: 'fld-row' },
+          h('span', { class: 'chip on', text: `只显示「${nameOf(g.focusId)}」的邻居` }),
+          h('button', {
+            class: 'btn tiny', text: '取消聚焦',
+            onclick: () => { g.focusId = null; renderGraphContent(g) },
+          }))))
+    }
+    if (data.source === 'none') {
+      kids.push(h('div', { class: 'sec' },
+        h('div', { class: 'sec-title', text: '怎么加' }),
+        h('div', { class: 'quiet-note' },
+          h('div', { text: '在 personas/{id}.json 里加可选字段：' }),
+          h('div', { class: 'dbg-box', text: '"relations": [\n  { "who": "ali", "how": "师徒", "weight": 0.8 }\n]' }))))
+    }
+    return kids
   }
 
-  canvas.replaceChildren(toolbar, svg)
-  renderContent()
-  applyView()
-  box.replaceChildren(h('div', { class: 'graph-wrap' }, canvas, inspector))
+  const node = byId[g.selected]
+  const out = data.edges.filter((e) => e.source === g.selected)
+  const inc = data.edges.filter((e) => e.target === g.selected)
+  // 注意：replaceChildren 会把 null 变成字面量 "null" 文本节点 —— 调用方已统一滤掉
+  return [
+    h('h2', { text: node.name || node.id }),
+    h('p', { class: 'sub', text: node.synthetic ? `${node.id}（合成节点：不在角色卡里）` : node.id }),
+    node.identity
+      ? h('div', { class: 'sec' },
+          h('div', { class: 'sec-title', text: '身份' }), h('p', { class: 'sub', text: node.identity }))
+      : null,
+    h('div', { class: 'sec' },
+      h('div', { class: 'sec-title', text: `发出的关系 ${out.length}` }),
+      ...(out.length ? out.map((e) => h('div', { class: 'rel-row' },
+        h('span', { class: 'arrow', text: '→' }),
+        h('span', { class: 'chip', text: e.type }),
+        h('span', { text: nameOf(e.target) })))
+        : [h('div', { class: 'hint', text: '无' })])),
+    h('div', { class: 'sec' },
+      h('div', { class: 'sec-title', text: `收到的关系 ${inc.length}` }),
+      ...(inc.length ? inc.map((e) => h('div', { class: 'rel-row' },
+        h('span', { text: nameOf(e.source) }),
+        h('span', { class: 'chip', text: e.type }),
+        h('span', { class: 'arrow', text: '→' })))
+        : [h('div', { class: 'hint', text: '无' })])),
+    h('div', { class: 'inspector-actions' },
+      h('button', {
+        class: 'btn tiny', text: node.avatar ? '换头像' : '添加头像',
+        onclick: () => pickAvatar(g, node.id),
+      }),
+      node.avatar
+        ? h('button', { class: 'btn tiny danger', text: '移除头像', onclick: () => removeAvatar(g, node.id) })
+        : null,
+      h('button', {
+        class: 'btn tiny', text: '只看它的邻居',
+        onclick: () => { g.focusId = node.id; renderGraphContent(g) },
+      }),
+      h('button', {
+        class: 'btn tiny', text: '去「角色卡」页编辑',
+        onclick: () => { location.hash = '#/personas' },
+      })),
+  ]
+}
+
+function drawGraph(box, data) {
+  const basePos = layeredLayout(data.nodes, data.edges)
+  const byId = {}
+  data.nodes.forEach((n) => { byId[n.id] = n })
+  const g = {
+    data, byId, basePos,
+    base: tightViewBox(data.nodes, basePos),   // 初始视图（「复位」也回到这里）
+    pos: {},
+    view: null,
+    selected: null,
+    focusId: null,
+    query: '',
+    nodeEls: new Map(),
+    edgeRefs: [],
+    suppressClick: false,
+    drag: null,
+    svg: svgEl('svg', { class: 'graph-svg', preserveAspectRatio: 'xMidYMid meet' }),
+    inspector: h('div', { class: 'inspector' }),
+    canvas: h('div', { class: 'graph-canvas' }),
+  }
+  for (const id of Object.keys(basePos)) g.pos[id] = { ...basePos[id] }
+  g.view = { ...g.base }
+
+  const resetAll = () => {
+    g.pos = {}
+    for (const id of Object.keys(g.basePos)) g.pos[id] = { ...g.basePos[id] }
+    g.view = { ...g.base }
+    applyGraphView(g)
+    renderGraphContent(g)
+  }
+  const toolbar = h('div', { class: 'toolbar' },
+    h('input', {
+      class: 'input', placeholder: '搜索角色…', style: 'width:180px',
+      oninput: (ev) => { g.query = ev.target.value; renderGraphContent(g) },
+    }),
+    h('button', { class: 'btn', text: '复位', title: '视图与节点位置都回到初始', onclick: resetAll }),
+    h('button', { class: 'btn', text: '刷新', onclick: () => route() }),
+    h('span', { class: 'hint', text: '滚轮缩放 · 拖拽空白处平移 · 拖节点调位置 · 双击节点聚焦' }))
+
+  bindGraphInteractions(g)
+  g.canvas.replaceChildren(toolbar, g.svg)
+  renderGraphContent(g)
+  applyGraphView(g)
+  box.replaceChildren(h('div', { class: 'graph-wrap' }, g.canvas, g.inspector))
 }
 
 // ── 页面：Mod / 能力清单 ──────────────────────────────────
@@ -747,7 +792,7 @@ async function renderMods(view) {
     const mods = Object.entries(data.mods || {})
     box.replaceChildren(
       compose,
-      ...(mods.length ? mods.map(([name, m]) => h('div', { class: 'card', style: 'padding:16px 18px' },
+      ...(mods.length ? mods.map(([name, m]) => card(
         h('div', { class: 'sec-title' },
           h('span', { class: 'dot', style: m.online ? 'background:var(--green)' : 'background:var(--text-faint)' }),
           ` ${name}　${m.online ? '在线' : '离线（心跳超时 → 不调任何动作）'}　最后心跳 ${fmtAgo(m.last_seen_s_ago)}`),
@@ -758,23 +803,25 @@ async function renderMods(view) {
         ...(m.actions || []).map((a) => h('div', { class: 'kv' },
           h('span', { class: 'k', text: a.name }),
           h('span', { class: 'v', text: `${a.desc || ''}${a.params && Object.keys(a.params).length ? `　参数：${Object.entries(a.params).map(([k, v]) => `${k}=${v}`).join('，')}` : ''}` })))))
-        : [h('div', { class: 'card', style: 'padding:16px 18px' },
+        : [card(
             h('div', { class: 'hint', text: `还没有 mod 报到（心跳超时 ${data.heartbeat_timeout_s}s）。上面表单可以模拟一次报到。` }))]))
   } catch (e) {
-    box.replaceChildren(banner(`加载失败：${e.message}`, 'error'))
+    box.replaceChildren(loadFail(e))
   }
 }
+
+const FLASH_MS = 4000        // 一次性提示的停留时长
 
 function bannerFlash(host, text, kind) {
   const b = banner(text, kind)
   host.prepend(b)
-  setTimeout(() => b.remove(), 4000)
+  setTimeout(() => b.remove(), FLASH_MS)
 }
 
 // ── 页面：记忆卡 ──────────────────────────────────────────
 
 async function renderMemory(view) {
-  view.replaceChildren(pageHead('记忆卡', 'store/{id}_memory.json —— 三个写入口之外，这里就是「人工手改」的界面',
+  view.replaceChildren(pageHead('记忆卡', 'store/{id}_memory.json —— 「人工手改」的界面（条目级增删改在这）',
     h('button', { class: 'btn', text: '刷新', onclick: () => route() })))
   const box = h('div', { class: 'mem-list' }, stateBlock('', '加载中…'))
   const picker = h('div', { class: 'filter-row' },
@@ -816,16 +863,16 @@ async function loadMemory(box, npcId) {
           },
         })))
 
-    const rows = data.entries.map((e) => memoryRow(box, npcId, e, data))
+    const rows = data.entries.map((e) => memoryRow(box, npcId, e))
     box.replaceChildren(compose,
       h('p', { class: 'hint', text: `${data.count} 条` }),
       ...(rows.length ? rows : [h('div', { class: 'state' }, h('p', { text: '这张记忆卡还是空的' }))]))
   } catch (e) {
-    box.replaceChildren(banner(`加载失败：${e.message}`, 'error'))
+    box.replaceChildren(loadFail(e))
   }
 }
 
-function memoryRow(box, npcId, entry, data) {
+function memoryRow(box, npcId, entry) {
   const meta = h('div', { class: 'mem-meta' },
     h('span', { class: impClass(entry.importance), text: `imp ${entry.importance}` }),
     h('span', { class: 'chip', text: entry.category }),
@@ -841,7 +888,7 @@ function memoryRow(box, npcId, entry, data) {
     h('div', { class: 'mem-actions' },
       h('button', {
         class: 'btn tiny', text: '编辑',
-        onclick: () => row.replaceWith(editRow(box, npcId, entry, data)),
+        onclick: () => row.replaceWith(editRow(box, npcId, entry)),
       }),
       h('button', {
         class: 'btn tiny danger', text: '删除',
@@ -856,7 +903,7 @@ function memoryRow(box, npcId, entry, data) {
   return row
 }
 
-function editRow(box, npcId, entry, data) {
+function editRow(box, npcId, entry) {
   const content = h('textarea', { class: 'input', rows: '3', value: entry.content })
   const imp = h('input', { class: 'input x-narrow', type: 'number', min: '0', max: '9', value: String(entry.importance) })
   const cat = h('input', { class: 'input narrow', value: entry.category })
@@ -889,8 +936,16 @@ function editRow(box, npcId, entry, data) {
 
 // ── 页面：聊天记录 ────────────────────────────────────────
 
+// 聊天记录每页条数（请求 limit 与「加载更早」的步进共用，别再各写一个 200）
+const CHAT_PAGE_SIZE = 200
+
 async function renderChat(view) {
-  view.replaceChildren(pageHead('聊天记录', 'store/{id}_chat.jsonl —— 逐轮追加；提示用到上下文窗口 40% 时旧轮次被压成摘要（保留最近 3 轮）',
+  // 压缩阈值由 NPC_SUMMARY_RATIO / NPC_SUMMARY_KEEP_RECENT 决定（/api/state 下发），页面不写死
+  const s = store.state || {}
+  const threshold = (s.summary_ratio != null && s.summary_keep_recent != null)
+    ? `提示用到上下文窗口 ${Math.round(s.summary_ratio * 100)}% 时旧轮次被压成摘要（保留最近 ${s.summary_keep_recent} 轮）`
+    : '提示超压缩阈值时旧轮次被压成摘要（阈值见 /api/state）'
+  view.replaceChildren(pageHead('聊天记录', `store/{id}_chat.jsonl —— 逐轮追加；${threshold}`,
     h('button', { class: 'btn', text: '刷新', onclick: () => route() })))
   const box = h('div', { class: 'mem-list' }, stateBlock('', '加载中…'))
   view.append(h('div', { class: 'filter-row' },
@@ -901,9 +956,9 @@ async function renderChat(view) {
 async function loadChat(box, npcId, offset) {
   if (!npcId) { box.replaceChildren(banner('先建一张角色卡', 'error')); return }
   try {
-    const d = await api(`/api/npcs/${npcId}/chat?limit=200&offset=${offset}`)
+    const d = await api(`/api/npcs/${npcId}/chat?limit=${CHAT_PAGE_SIZE}&offset=${offset}`)
     const pct = Math.min(100, (d.estimated_tokens / d.summary_threshold) * 100)
-    const head = h('div', { class: 'card', style: 'padding:16px 18px' },
+    const head = card(
       h('div', { class: 'sec-title', text: `摘要状态　${d.estimated_tokens} / ${d.summary_threshold} token（提示超限触发滚动摘要）` }),
       h('div', { class: 'bar' }, h('i', { style: `width:${pct}%` })),
       h('div', { class: 'kv' }, h('span', { class: 'k', text: '已折进摘要' }),
@@ -920,10 +975,10 @@ async function loadChat(box, npcId, offset) {
       h('p', { class: 'hint', text: `共 ${d.total} 条消息，本页显示第 ${Math.max(0, d.total - offset - turns.length) + 1}–${d.total - offset} 条` }),
       ...(turns.length ? turns : [h('div', { class: 'state' }, h('p', { text: '还没有聊天记录' }))]),
       offset + d.limit < d.total
-        ? h('button', { class: 'btn load-more', text: '加载更早', onclick: () => loadChat(box, npcId, offset + 200) })
+        ? h('button', { class: 'btn load-more', text: '加载更早', onclick: () => loadChat(box, npcId, offset + d.limit) })
         : h('div', { class: 'act-end', text: '没有更早的了' }))
   } catch (e) {
-    box.replaceChildren(banner(`加载失败：${e.message}`, 'error'))
+    box.replaceChildren(loadFail(e))
   }
 }
 
@@ -1002,36 +1057,15 @@ async function renderPlay(view) {
     const actions = []
     let audio = null
     try {
-      const res = await fetch('/api/talk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ npc_id: npcId, message, observation, voice: voiceOn.checked, mod: store.state?.mods && Object.keys(store.state.mods)[0] }),
-      })
-      if (!res.ok) {
-        const t = await res.text()
-        throw new Error(`HTTP ${res.status} ${t.slice(0, 200)}`)
-      }
-      const reader = res.body.getReader()
-      const dec = new TextDecoder()
-      let buf = ''
-      for (; ;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += dec.decode(value, { stream: true })
-        let idx
-        while ((idx = buf.indexOf('\n\n')) >= 0) {
-          const raw = buf.slice(0, idx)
-          buf = buf.slice(idx + 2)
-          for (const line of raw.split('\n')) {
-            if (!line.startsWith('data: ')) continue
-            const frame = JSON.parse(line.slice(6))
-            frameLog.push(frame.type)
-            if (frame.type === 'delta') { text += frame.text; npc.textContent = text; turns.scrollTop = turns.scrollHeight }
-            else if (frame.type === 'action') actions.push(frame.action)
-            else if (frame.type === 'audio') audio = frame.audio
-          }
-        }
-      }
+      await apiSSE('/api/talk',
+        { npc_id: npcId, message, observation, voice: voiceOn.checked,
+          mod: store.state?.mods && Object.keys(store.state.mods)[0] },
+        (frame) => {
+          frameLog.push(frame.type)
+          if (frame.type === 'delta') { text += frame.text; npc.textContent = text; turns.scrollTop = turns.scrollHeight }
+          else if (frame.type === 'action') actions.push(frame.action)
+          else if (frame.type === 'audio') audio = frame.audio
+        })
       meta.textContent = `${((performance.now() - t0) / 1000).toFixed(1)}s`
       if (!text) npc.textContent = '（这一轮没有台词）'
     } catch (e) {
@@ -1061,33 +1095,41 @@ async function renderPlay(view) {
     }
 
     for (const act of actions) {
-      const note = h('input', { class: 'input', placeholder: 'note（可选，会进记忆卡）' })
-      const report = h('div', { class: 'card', style: 'padding:12px 14px;margin-top:10px' },
-        h('div', { class: 'sec-title', text: `本回合已执行的动作记录：${act.name}` }),
-        h('div', { class: 'dbg-box', text: JSON.stringify(act.params || {}, null, 2) }),
-        h('div', { class: 'hint', text: '记忆卡已由大脑当场写入；下面两个按钮是协议 §4 的「长动作异步回报」通道（可选，只有 mod 回了 status:"running" 时才需要）' }),
-        h('div', { class: 'fld-row', style: 'margin-top:8px' }, note,
-          h('button', {
-            class: 'btn tiny', text: '回报成功',
-            onclick: () => reportResult(npcId, act.name, true, note.value, report),
-          }),
-          h('button', {
-            class: 'btn tiny danger', text: '回报失败',
-            onclick: () => reportResult(npcId, act.name, false, note.value, report),
-          })))
-      turn.append(report)
+      turn.append(actionReportCard(npcId, act))
       turns.scrollTop = turns.scrollHeight
     }
   }
+}
 
-  async function reportResult(npcId, actionName, ok, note, host) {
-    try {
-      const r = await api('/api/action_result', {
-        method: 'POST', body: { npc_id: npcId, action: actionName, ok, note },
-      })
-      host.replaceWith(banner(`已写进记忆卡：${r.entry.content}`, ok ? 'ok' : 'error'))
-    } catch (e) { bannerFlash(host, e.message, 'error') }
-  }
+/** 试对话页：一条已执行动作的记录卡 + 协议 §4 的「长动作异步回报」按钮（可选通道）。 */
+function actionReportCard(npcId, act) {
+  const note = h('input', { class: 'input', placeholder: 'note（可选，会进记忆卡）' })
+  const report = h('div', { class: 'card', style: 'padding:12px 14px;margin-top:10px' },
+    h('div', { class: 'sec-title', text: `本回合已执行的动作记录：${act.name}` }),
+    h('div', { class: 'dbg-box', text: JSON.stringify(act.params || {}, null, 2) }),
+    h('div', { class: 'hint', text: '记忆卡已由大脑当场写入；下面两个按钮是协议 §4 的「长动作异步回报」通道（可选，只有 mod 回了 status:"running" 时才需要）' }),
+    h('div', { class: 'fld-row', style: 'margin-top:8px' }, note,
+      h('button', {
+        class: 'btn tiny', text: '回报成功',
+        onclick: () => reportResult(npcId, act.name, true, note.value, report),
+      }),
+      h('button', {
+        class: 'btn tiny danger', text: '回报失败',
+        onclick: () => reportResult(npcId, act.name, false, note.value, report),
+      })))
+  return report
+}
+
+/** 长动作回报（协议 §4）。matched=false 时 entry 为 null（没登记/已过期，不重复写卡）—— 不能直接读 .content。 */
+async function reportResult(npcId, actionName, ok, note, host) {
+  try {
+    const r = await api('/api/action_result', {
+      method: 'POST', body: { npc_id: npcId, action: actionName, ok, note },
+    })
+    host.replaceWith(banner(
+      r.entry ? `已写进记忆卡：${r.entry.content}` : '该动作已销账',
+      ok ? 'ok' : 'error'))
+  } catch (e) { bannerFlash(host, e.message, 'error') }
 }
 
 // ── 页面：角色卡 ──────────────────────────────────────────
@@ -1127,6 +1169,11 @@ function fieldHelp() {
         h('td', { text: desc }))))))
 }
 
+/** 删卡「保留什么」的说明文案 —— 单源在后端（DELETE 响应的 kept.note 与 /api/state 的
+ *  delete_kept_note 都会下发），前端只展示，别再抄一份。 */
+const keptNote = () => (store.state && store.state.delete_kept_note)
+  || '（数据在 store/ 保留，删卡不连带删记忆）'
+
 async function renderPersonas(view) {
   view.replaceChildren(pageHead('角色卡', 'personas/{id}.json —— 一张卡一个 NPC；改完保存即生效（空白模板：personas/_模板.json）',
     h('button', { class: 'btn', text: '刷新', onclick: () => route() })))
@@ -1159,17 +1206,17 @@ async function renderPersonas(view) {
         onclick: async () => {
           const id = delSel.value
           if (!id) return
-          // 二次确认必须说清"保留什么" —— 删卡不该连带删记忆
+          // 二次确认必须说清"保留什么"（文案来自后端下发）—— 删卡不该连带删记忆
           const ok = confirm(
-            `删掉角色卡「${id}」？\n\n${DELETE_KEPT_NOTE}\n\n`
+            `删掉角色卡「${id}」？\n\n${keptNote()}\n\n`
             + `只会删掉 personas/${id}.json，此操作不可撤销。`)
           if (!ok) return
           try {
             const res = await api(`/api/personas/${encodeURIComponent(id)}`, { method: 'DELETE' })
             const kept = res.kept || {}
             store.flash = {
-              text: `已删除角色卡 ${id} —— 保留了 ${kept.memory_entries ?? '?'} 条记忆、`
-                    + `${kept.chat_messages ?? '?'} 条聊天（重建同名卡接着用）`,
+              text: `已删除角色卡 ${id} —— ${kept.note || keptNote()}（保留了 `
+                    + `${kept.memory_entries ?? '?'} 条记忆、${kept.chat_messages ?? '?'} 条聊天）`,
               kind: 'ok',
             }
             if (store.npcId === id) store.npcId = null
@@ -1180,7 +1227,7 @@ async function renderPersonas(view) {
           route()
         },
       }),
-      h('span', { class: 'hint', text: DELETE_KEPT_NOTE })),
+      h('span', { class: 'hint', text: keptNote() })),
     box)
   await openPersona(box, store.npcId)
 }
@@ -1190,7 +1237,15 @@ async function openPersona(box, npcId, tpl) {
   let persona = tpl
   if (!persona) {
     try { persona = (await api(`/api/personas/${npcId}`)).persona }
-    catch (e) { persona = { ...NEW_PERSONA_TPL, id: npcId } }
+    catch (e) {
+      // 只有 404（真没这张卡）才当「新建」进编辑器；其余失败（网络/500/坏响应）
+      // 一律不进编辑器 —— 否则点保存会把真卡覆盖成空模板
+      if (e.status !== 404) {
+        box.replaceChildren(banner(`角色卡加载失败：${e.message}（已禁用保存，避免覆盖真卡）`, 'error'))
+        return
+      }
+      persona = { ...NEW_PERSONA_TPL, id: npcId }
+    }
   }
   const area = h('textarea', { class: 'input json-area', rows: '22', value: JSON.stringify(persona, null, 2) })
   box.replaceChildren(h('div', { class: 'editor-json' },
@@ -1217,12 +1272,15 @@ async function openPersona(box, npcId, tpl) {
 
 // ── 页面：模型（谁来当大脑）───────────────────────────────
 
+// 档位与后端 _EFFORT_VALUES 同口径（minimal/xhigh 按端点方言归一，映射见 README）
 const EFFORT_OPTIONS = [
   ['', '自动（不指定，服务端默认）'],
   ['off', '关闭（显式关掉思考）'],
+  ['minimal', '开启 · minimal（最低）'],
   ['low', '开启 · 低'],
   ['medium', '开启 · 中'],
   ['high', '开启 · 高'],
+  ['xhigh', '开启 · xhigh（超高）'],
   ['max', '开启 · 最高'],
 ]
 
@@ -1235,9 +1293,6 @@ const VENDOR_EXAMPLES = [
   ['本地 Ollama', 'http://localhost:11434/v1'],
   ['OpenRouter（含 Claude / Gemini）', 'https://openrouter.ai/api/v1'],
 ]
-
-// 与后端 console_api._DELETE_KEPT_NOTE 同文案 —— 改一处要改两处，别让两边说法漂移
-const DELETE_KEPT_NOTE = '记忆卡与聊天记录保留（数据在 store/，重建同名卡接着用）—— 删卡不该连带删记忆'
 
 const ORIGIN_TEXT = {
   env: '环境变量',
@@ -1282,72 +1337,43 @@ async function renderModel(view) {
 
   const reload = async () => { await refreshGlobals(); route() }
 
-  const apply = async () => {
-    try {
-      const next = await api('/api/llm', {
-        method: 'PUT',
-        body: {
-          model: model.value, base_url: base.value,
-          reasoning_effort: effort.value, thinking_unsupported: noThink.checked,
-          ...(apiKey.value ? { api_key: apiKey.value } : {}),   // 留空 = 不动已保存的
-        },
-      })
-      store.flash = next.ready
-        ? { text: `已切到 ${next.model}（${next.base_url}）—— 下一个请求就用新的`, kind: 'ok' }
-        : { text: `已保存，但仍缺 ${(next.missing || []).join('、')} —— /api/talk 走角色卡 rules 回复`, kind: 'error' }
-    } catch (e) {
-      store.flash = { text: `保存失败：${e.message}`, kind: 'error' }
-    }
+  // 三个操作共用一副骨架：执行 → 按结果写 flash → 刷新全局并重渲染（文案各异，形状相同）
+  const runOp = async (op, failLabel = '保存失败') => {
+    try { store.flash = await op() }
+    catch (e) { store.flash = { text: `${failLabel}：${e.message}`, kind: 'error' } }
     await reload()
   }
 
-  const reset = async () => {
-    try {
-      await api('/api/llm', { method: 'DELETE' })
-      store.flash = { text: '已清掉页面设置，回到环境变量那一层', kind: 'ok' }
-    } catch (e) {
-      store.flash = { text: `清除失败：${e.message}`, kind: 'error' }
-    }
-    await reload()
-  }
+  const apply = () => runOp(async () => {
+    const next = await api('/api/llm', {
+      method: 'PUT',
+      body: {
+        model: model.value, base_url: base.value,
+        reasoning_effort: effort.value, thinking_unsupported: noThink.checked,
+        ...(apiKey.value ? { api_key: apiKey.value } : {}),   // 留空 = 不动已保存的
+      },
+    })
+    return next.ready
+      ? { text: `已切到 ${next.model}（${next.base_url}）—— 下一个请求就用新的`, kind: 'ok' }
+      : { text: `已保存，但仍缺 ${(next.missing || []).join('、')} —— /api/talk 走角色卡 rules 回复`, kind: 'error' }
+  })
+
+  const reset = () => runOp(async () => {
+    await api('/api/llm', { method: 'DELETE' })
+    return { text: '已清掉页面设置，回到环境变量那一层', kind: 'ok' }
+  }, '清除失败')
 
   // 只删 key，模型/端点/思考档位留着
-  const clearKey = async () => {
-    try {
-      await api('/api/llm', { method: 'PUT', body: { api_key: '' } })
-      store.flash = { text: '已删掉明文 key，改回环境变量 / api_key.txt 那一把', kind: 'ok' }
-    } catch (e) {
-      store.flash = { text: `清除失败：${e.message}`, kind: 'error' }
-    }
-    await reload()
-  }
+  const clearKey = () => runOp(async () => {
+    await api('/api/llm', { method: 'PUT', body: { api_key: '' } })
+    return { text: '已删掉明文 key，改回环境变量 / api_key.txt 那一把', kind: 'ok' }
+  }, '清除失败')
 
   const kids = []
   if (store.flash) { kids.push(banner(store.flash.text, store.flash.kind)); store.flash = null }
   kids.push(
-    h('div', { class: 'card', style: 'padding:16px 18px' },
-      h('div', { class: 'sec-title', text: '当前状态' }),
-      h('div', { class: 'kv' }, h('span', { class: 'k', text: '接上了吗' }),
-        h('span', { class: 'v', text: cur.ready
-          ? `是（端点为${cur.source === 'inferred' ? '按模型名推断值' : '配置值'}）`
-          : `否 —— 缺 ${(cur.missing || []).join('、')}` })),
-      h('div', { class: 'kv' }, h('span', { class: 'k', text: '值来自' }),
-        h('span', { class: 'v', text: ORIGIN_TEXT[cur.origin] || cur.origin })),
-      h('div', { class: 'kv' }, h('span', { class: 'k', text: '深度思考' }),
-        h('span', { class: 'v', text: cur.reasoning_effort || '不指定' })),
-      h('div', { class: 'kv' }, h('span', { class: 'k', text: '实际下发' }),
-        h('span', { class: 'v', text: !cur.thinking_effort
-          ? '一个思考参数都不发'
-          : (['off', 'disabled', 'none'].includes(cur.thinking_effort)
-            ? '关闭思考（thinking: disabled）' : `发 ${cur.thinking_effort}`) })),
-      h('div', { class: 'kv' }, h('span', { class: 'k', text: 'API Key' }),
-        h('span', { class: 'v', text: cur.api_key && cur.api_key.present
-          ? `${cur.api_key.masked}（来自 ${cur.api_key.source || '未知'}）`
-          : '未配置 —— 在本页上方填写，或放环境变量 NPC_API_KEY / 工程根 api_key.txt' })),
-      ...(cur.api_key && cur.api_key.perm_hint
-        ? [h('p', { class: 'hint', text: cur.api_key.perm_hint })]
-        : [])),
-    h('div', { class: 'card', style: 'padding:16px 18px' },
+    modelStatusCard(cur),
+    card(
       h('div', { class: 'sec-title', text: '改配置' }),
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '模型名：' }), model),
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '端点：' }), base),
@@ -1363,12 +1389,43 @@ async function renderModel(view) {
       h('div', { class: 'filter-row' },
         h('button', { class: 'btn primary', text: '保存并应用', onclick: apply }),
         h('button', { class: 'btn', text: '恢复环境变量默认', onclick: reset }))),
-    h('div', { class: 'card', style: 'padding:16px 18px' },
-      h('div', { class: 'sec-title', text: '常见厂商的端点（以厂商最新文档为准）' }),
-      ...VENDOR_EXAMPLES.map(([name, url]) => h('div', { class: 'kv' },
-        h('span', { class: 'k', text: name }), h('span', { class: 'v', text: url }))),
-      h('p', { class: 'hint', text: 'API Key 两种放法：① 在本页上方填写 —— 明文存 store/llm_config.json（store/ 不进仓库，但本机能读到）；② 留空 —— 用环境变量 NPC_API_KEY（旧名 DEEPSEEK_API_KEY / OPENAI_API_KEY / ZHIPU_API_KEY 也认）或工程根 api_key.txt。页面只显示掩码，接口绝不回原文。' })))
+    vendorExamplesCard())
   box.replaceChildren(...kids)
+}
+
+/** 模型页「当前状态」卡片（GET /api/llm 的展示面）。 */
+function modelStatusCard(cur) {
+  return card(
+    h('div', { class: 'sec-title', text: '当前状态' }),
+    h('div', { class: 'kv' }, h('span', { class: 'k', text: '接上了吗' }),
+      h('span', { class: 'v', text: cur.ready
+        ? `是（端点为${cur.source === 'inferred' ? '按模型名推断值' : '配置值'}）`
+        : `否 —— 缺 ${(cur.missing || []).join('、')}` })),
+    h('div', { class: 'kv' }, h('span', { class: 'k', text: '值来自' }),
+      h('span', { class: 'v', text: ORIGIN_TEXT[cur.origin] || cur.origin })),
+    h('div', { class: 'kv' }, h('span', { class: 'k', text: '深度思考' }),
+      h('span', { class: 'v', text: cur.reasoning_effort || '不指定' })),
+    h('div', { class: 'kv' }, h('span', { class: 'k', text: '实际下发' }),
+      h('span', { class: 'v', text: !cur.thinking_effort
+        ? '一个思考参数都不发'
+        : (['off', 'disabled', 'none'].includes(cur.thinking_effort)
+          ? '关闭思考（thinking: disabled）' : `发 ${cur.thinking_effort}`) })),
+    h('div', { class: 'kv' }, h('span', { class: 'k', text: 'API Key' }),
+      h('span', { class: 'v', text: cur.api_key && cur.api_key.present
+        ? `${cur.api_key.masked}（来自 ${cur.api_key.source || '未知'}）`
+        : '未配置 —— 在本页上方填写，或放环境变量 NPC_API_KEY / 工程根 api_key.txt' })),
+    ...(cur.api_key && cur.api_key.perm_hint
+      ? [h('p', { class: 'hint', text: cur.api_key.perm_hint })]
+      : []))
+}
+
+/** 模型页「常见厂商端点」卡片（静态参考资料）。 */
+function vendorExamplesCard() {
+  return card(
+    h('div', { class: 'sec-title', text: '常见厂商的端点（以厂商最新文档为准）' }),
+    ...VENDOR_EXAMPLES.map(([name, url]) => h('div', { class: 'kv' },
+      h('span', { class: 'k', text: name }), h('span', { class: 'v', text: url }))),
+    h('p', { class: 'hint', text: 'API Key 两种放法：① 在本页上方填写 —— 明文存 store/llm_config.json（store/ 不进仓库，但本机能读到）；② 留空 —— 用环境变量 NPC_API_KEY（旧名 DEEPSEEK_API_KEY / OPENAI_API_KEY / ZHIPU_API_KEY 也认）或工程根 api_key.txt。页面只显示掩码，接口绝不回原文。' }))
 }
 
 const PAGES = [
