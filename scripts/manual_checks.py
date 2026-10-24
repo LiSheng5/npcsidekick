@@ -527,7 +527,7 @@ def cmd_uncertain(args: argparse.Namespace) -> int:
 # ── 入口 ─────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="RunawayNPC v4 手测脚本")
+    parser = argparse.ArgumentParser(description="失控NPC v4 手测脚本")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p1 = sub.add_parser("llm-down", help="不配 LLM，测 /api/talk 首帧延迟")

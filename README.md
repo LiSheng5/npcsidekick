@@ -1,6 +1,6 @@
 # 失控NPC v4
 
-让NPC拥有记忆行为能对玩家的行为做出反应。
+让LLM驱动的NPC拥有记忆行为能对玩家的行为做出反应。
 给游戏 NPC 装上"大脑"的本地服务：一个 FastAPI 进程负责角色扮演、记忆与动作决策，游戏侧的 mod 只管报到、转发对话和执行动作。模型不挑厂商，OpenAI 兼容接口即接即用。
 
 ## 它做什么
@@ -23,7 +23,7 @@
 
 两条通道严格分离：台词只走 SSE `delta` 帧；流末尾的 `action` 帧只是"已执行动作"的记录（带 `ok` / `status` / `call_id`），mod 无需照它做任何事。
 
-动作执行由**大脑**发起：`turn.py` 用 `httpx` POST 到该 mod 报到时给的 `execute_url`，payload 为 `{npc_id, action, params, mod, call_id}`；mod 在线状态按心跳判断，离线/没声明动作/没给执行接口时，动作工具不会进 LLM 的工具定义。
+动作执行由**大脑**发起：`turn.py` 用 `httpx` POST 到该 mod 报到时给的 `execute_url`（仅收 `http(s)` URL），payload 为 `{npc_id, action, params, mod, call_id}`；mod 在线状态按心跳判断，离线/没声明动作/没给执行接口时，动作工具不会进 LLM 的工具定义。
 
 ## 执行结果与「不确定」契约
 
@@ -38,11 +38,13 @@
 | `deduped` | 同名同参的动作已在途，本次没下发给 mod | 否 | 不登记 |
 
 - `call_id` 由服务端生成（`uuid4().hex`），随执行请求发给 mod，也出现在 `action` 帧里；mod 回报时原样带回。不复用 LLM 的 tool_call id（那个不保证唯一）。
+- mod 的执行回应只认 `status: done / running`（`failed` 按失败收、`ok` 压成假）；别的取值是协议误用——告警后落 `failed`，**绝不静默记完成**。
 - 回报匹配（`POST /api/action_result`）：
   1. 带 `call_id` 且命中登记 → 写卡；`note` 为空时用登记的 `params` 拼一句描述
-  2. 带 `call_id` 但没命中（重复回报 / 已过期 / 未知）→ **不写卡**（同一次动作不能写两遍），仍返回 200，`matched=false`
-  3. 不带 `call_id`（旧 mod）→ 按 `(npc_id, action)` 取最早一条登记（FIFO），**无论命中与否都写卡**——旧 mod 的回报不能丢
-- 待定动作存活上限 `NPC_PENDING_TTL`（默认 120 秒）。`/api/talk` 开始与 `/api/action_result` 到达时各清理一次；TTL 到点仍没回报 → 写一条 `没做成: 一直没等到结果` 并移除登记。
+  2. 带 `call_id` 但登记已被 TTL 清掉（失败卡已写）→ 迟到的真实结果**覆盖**那张失败卡（同一动作不留两条记录），`matched=true`
+  3. 带 `call_id` 但没命中（重复回报 / 未知）→ **不写卡**（同一次动作不能写两遍），仍返回 200，`matched=false`
+  4. 不带 `call_id`（旧 mod）→ 按 `(npc_id, action)` 取最早一条登记（FIFO），**无论命中与否都写卡**——旧 mod 的回报不能丢；同一 `(npc_id, action, ok, note)` 短窗（10 秒）内的重复投递只写一次（旧 mod 重试会投递多遍），被去重的回报返回 `deduped=true`
+- 待定动作存活上限 `NPC_PENDING_TTL`（默认 120 秒）。`/api/talk` 开始与 `/api/action_result` 到达时各清理一次（回报**先销账、后清理**，TTL 边界秒级迟到的回报仍能命中）；TTL 到点仍没回报 → 写一条 `没做成: 一直没等到结果` 并移除登记。
 - 重复动作保护：同 NPC、同名、同参数的动作还在 `running` / `unknown` → 不下发，回 `deduped`（LLM 重发新 `call_id` 时幂等拦不住，只能按名 + 参识别；参数不同 = 新指令）。
 - 工具调用轮次上限 3 轮（记忆与动作共用）；用满后追加一个**不带工具**的收尾轮，避免"动作做了、台词一句没有"。
 
@@ -86,7 +88,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `AGENT_MODEL` / `NPC_MODEL` | 模型名（`NPC_MODEL` 是旧名） | — |
 | `NPC_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY` | API key（旧名为兼容保留；也可放 `api_key.txt` 或控制台） | — |
 | `NPC_BASE_URL` / `DEEPSEEK_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容端点；空 = 按模型名猜厂商 | — |
-| `NPC_REASONING_EFFORT` | 思考档位：`off`/`disabled`/`none`/`low`/`medium`/`high`/`max`；空 = 不指定。按 DeepSeek 官方格式下发：`reasoning_effort` 与 `thinking` 都在请求体**顶层**（互不嵌套） | — |
+| `NPC_REASONING_EFFORT` | 思考档位：`off`/`disabled`/`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`；空 = 不指定（各家实际下发值见下方映射表） | — |
 | `NPC_LLM_RETRY` | LLM 瞬时故障重试开关（布尔词表见下） | 关 |
 | `NPC_LLM_RETRY_DELAYS` | 每次补试前等待的秒数，逗号分隔 | `2,6` |
 | `NPC_LLM_EXTRA_BODY` | 透传进请求体的 JSON 片段（各家方言自填；非法 JSON 只告警） | 空 |
@@ -101,7 +103,24 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `NPC_BUDGET_STATE` / `NPC_BUDGET_MEMORY` / `NPC_BUDGET_HISTORY` | 上下文各层 token 预算；`NPC_BUDGET_HISTORY` = 历史硬上限，未设时为窗口 × 0.7（只防摘要失败时撑爆上下文） | 800 / 600 / 窗口 × 0.7 |
 | `NPC_TRACE_FILE` | 回合 trace 落盘（JSONL，只记长度不记原文） | 不落盘 |
 
-布尔词表：`1` / `true` / `yes` / `on` 为开（大小写、首尾空白不敏感），其余一律关。数值项未设置/空/非法 → 回落默认值。除 `api_key.txt` 权限检测外，全部**每次现读环境变量**，改完不用重启（可热切）。
+布尔词表：`1` / `true` / `yes` / `on` 为开（大小写、首尾空白不敏感），其余一律关。数值项未设置/空 → 默认值；**非法 → 回落默认值并告警一次**（同一取值只告警一次；`NPC_SUMMARY_RATIO` 超出 [0,1] 钳到边界，同样告警）。除 `api_key.txt` 权限检测外，全部**每次现读环境变量**，改完不用重启（可热切）。
+
+思考档位按端点方言**自动转换**（`NPC_REASONING_EFFORT` 与控制台「模型」页同口径）：
+
+| 设定值 | DeepSeek / 兼容网关 | OpenAI 官方 | OpenRouter | GLM（< 5.2 / ≥ 5.2） |
+|---|---|---|---|---|
+| `off` / `disabled` / `none` | `thinking: disabled` | 不发 | 不发 | `thinking: disabled` |
+| `minimal` | `low` | `minimal` | `high` | 仅开 / `low` |
+| `low` | `low` | `low` | `low` | 仅开 / `low` |
+| `medium` | `high` | `medium` | `medium` | 仅开 / `high` |
+| `high` | `high` | `high` | `high` | 仅开 / `high` |
+| `xhigh` | `high` | `high` | `high` | 仅开 / `high` |
+| `max` | `max` | `high` | `high` | 仅开 / `high` |
+
+- DeepSeek / 兼容网关（OpenAI 兼容默认）：`reasoning_effort` 与 `thinking` 都在请求体**顶层**（互不嵌套），开启时 = `thinking:{type:enabled}` + 映射后的 `reasoning_effort`。
+- OpenAI 官方只认顶层 `reasoning_effort`（没有 thinking 开关，也没有显式关闭参数）；OpenRouter 走 `reasoning:{effort}`，只支持 `low`/`medium`/`high`，高档位归一到 `high`。
+- GLM 5.2 以下只支持思考开/关（「仅开」= 只发 `thinking:{type:enabled}`）；5.2 起支持分级，按 DeepSeek 列映射。
+- 控制台勾了「该模型不认思考参数」→ 一个思考参数都不发（连关闭开关也不发）。
 
 > 思考模式：请求带 `tools` 时，DeepSeek 官方要求把历史 assistant 的 `reasoning_content` 原样回传（缺了直接 400）。所以回合内的工具轮与历史消息都会带上思考内容，并计入 `NPC_BUDGET_HISTORY` 预算；非 DeepSeek 端点不回传这个字段。
 
@@ -153,7 +172,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 
 ### 状态查询
 
-`GET /api/state` 返回模型名、LLM 三件套状态（key 只给掩码）、思考档位、TTS 是否可用、各 mod 在线状态与心跳阈值、运行时长等。`GET /api/npcs` 返回每个 NPC 的记忆条数、聊天消息数、最近活动时间。
+`GET /api/state` 返回模型名、LLM 三件套状态（key 只给掩码）、思考档位、TTS 是否可用、各 mod 在线状态与心跳阈值、摘要阈值（`summary_ratio` / `summary_keep_recent`）、运行时长等。`GET /api/npcs` 返回每个 NPC 的记忆条数、聊天消息数、最近活动时间。
 
 控制台端点（角色卡 / 记忆 / 聊天记录 / 关系网 / 模型设置）是独立的调试面，不属于 mod 契约。
 
@@ -174,7 +193,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 
 ## 记忆：预取与检索
 
-- 写入口只有三个：`remember` 工具（含 `replaces` 更新）、动作结果写卡、人工手改记忆卡（控制台也是走这条通道）。
+- 写入口有四条：`remember` 工具（含 `replaces` 更新）、动作结果写卡、控制台的条目级增删改、人工手改记忆卡 JSON 文件。
 - **回合开始预取**：条目按「置顶 → 重要度 → 新旧」的顺序塞进记忆预算（`NPC_BUDGET_MEMORY`），到预算为止，放不下就停——整条进或整条不进，不半截截断。排除 `category=action`（动作结果由近况层负责）。不做相关性打分、不判断与当前这句话是否相关；预取只读卡，不改任何字段。
 - `recall` 工具保留，用于深挖：相关度低于门槛（`NPC_MEM_RECALL_MIN_REL`，默认 0.2）的条目不返回，全不相关返回空；排序 = 相关度为主、重要度为辅（`相关度 × 1.0 + (importance / 9) × 0.3`，同分 `created_at` 新的在前），同义词族取自该 NPC 角色卡的 `entity_synonyms`（按请求显式传入，多 NPC 并发不串）。
 - **`replaces` 更新旧记忆**：【相关记忆】与 recall 结果的每行带条目 id 的 6 位短编号（方括号里那串）。同一件事换了说法时，`remember` 用 `replaces` 填短编号把旧条目原地更新（保留 id / 创建时间 / `pinned`），不重复记；`replaces` 没有恰好唯一匹配到条目就当新记忆记下，不报错。工具描述里同时约束：只记玩家明说的话和确实发生过的事，不记猜测、推断或评价。
@@ -201,7 +220,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 
 ## 角色卡
 
-一张角色卡 = 一个 NPC = `personas/{id}.json` 一个文件，加文件即加角色，改完存盘即生效，不用重启。字段（身份、性格、说话风格、语气锚点、忌讳、兜底台词、同义词族、音色、关系网）见 [personas/_角色卡说明.md](personas/_角色卡说明.md)，空白模板在 `personas/_模板.json`。文件名即游戏侧认的 `npc_id`；以 `_` 开头的文件是模板/说明，不算 NPC。
+一张角色卡 = 一个 NPC = `personas/{id}.json` 一个文件，加文件即加角色，改完存盘即生效，不用重启。字段（身份、性格、说话风格、语气锚点、忌讳、兜底台词、同义词族、音色、关系网）见 [personas/_角色卡说明.md](personas/_角色卡说明.md)，空白模板在 `personas/_模板.json`。文件名即游戏侧认的 `npc_id`；以 `_` 开头的文件是模板/说明/备份（如 `_cang_原版备份.json` 是换主角前的原版卡留档），不算 NPC、不会被加载。
 
 ## 测试
 
@@ -230,6 +249,7 @@ chatlog.py      持久聊天记录 + 滚动摘要
 tools.py        remember / recall + 动作工具定义（白名单闸门）
 pending.py      待定动作登记（长动作回报对账）
 tts.py          语音合成
+http_util.py    HTTP 层共享小工具（请求体解析，游戏面与控制台共用）
 console_api.py  控制台端点（调试面）
 core/           LLM 接入（OpenAI 兼容）、配置、角色卡编译、日志
 personas/       角色卡（每 NPC 一个 JSON）
