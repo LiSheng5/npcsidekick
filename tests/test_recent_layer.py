@@ -1,6 +1,6 @@
-"""近况层（任务 5）——【最近发生】块：最近动作结果 + 进行中 / 待确认。
+"""近况层 ——【最近发生】块：最近动作结果 + 进行中 / 待确认。
 
-背景：任务书一之后超时动作登记 pending 而不写失败卡，若近况层不注入它，
+背景：超时动作登记 pending 而不写失败卡，若近况层不注入它，
 下一回合 NPC 对这件事一无所知，很可能重复下达同一动作。
 
 三部分（措辞先用最朴素的中文）：
@@ -9,7 +9,7 @@
   2. 进行中：pending 里 mod 已受理（state=running）且未过期 —— 「…— 进行中，已 X 秒」
   3. 待确认：同步等待超时、至今没回报（state=unknown）—— 「…— 没收到回应，
      不确定是否已做成，已 X 秒」
-两类分开写；截断优先级 = 观测 > 待确认 / 进行中 > 最近结果（需确认）；
+两类分开写；保留优先级 = 观测 > 待确认 > 进行中 > 最近结果；
 过期清理（先写「没做成: 一直没等到结果」卡）在 /api/talk 开始时已完成，
 近况层只读 pending.alive()，不会把已过期条目显示成进行中。
 """
@@ -19,7 +19,7 @@ import time
 
 import memory
 import turn
-from test_server import CAPS, FakeExecutor, kinds, text_of
+from conftest import CAPS, FakeExecutor, kinds, text_of
 
 
 # ── 超时动作 → 「待确认」，且不写失败卡 ────────────────────
@@ -159,7 +159,7 @@ def test_recent_truncation_priority_and_log(tmp_store, write_persona, make_app_c
     assert "context_section_truncated" in caplog.text
 
 
-# ── 最近动作结果的 N / M 窗口（**需确认**默认 5 / 30）─────
+# ── 最近动作结果的 N / M 窗口（默认 5 / 30）─────
 
 def test_recent_results_defaults_and_env(monkeypatch):
     assert turn.recent_results_limit() == 5

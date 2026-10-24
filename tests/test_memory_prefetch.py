@@ -1,4 +1,4 @@
-"""记忆预取（任务 4）—— 回合开始、第一次调用 LLM 之前注入记忆块。
+"""记忆预取 —— 回合开始、第一次调用 LLM 之前注入记忆块。
 
 【相关记忆】块 = 条目按「置顶 → 重要度 → 新旧」排序，逐条塞进记忆预算
 （NPC_BUDGET_MEMORY，默认 600），放不下就停（整条进或整条不进，不半截截断），
@@ -11,12 +11,11 @@ trace 的 memory_prefetch 记 {hits: 进块条数, filtered: 读到但没进块�
 from __future__ import annotations
 
 import json
-import time
 
 import chatlog
 import memory
 import turn
-from test_server import kinds, text_of
+from conftest import kinds, text_of
 
 
 def test_memory_prefetch_in_first_llm_call_no_extra_round(tmp_store, write_persona,
@@ -77,7 +76,7 @@ def test_memory_prefetch_empty_card_has_no_block(tmp_store, write_persona,
 
 def test_memory_prefetch_excludes_action_category(tmp_store, write_persona,
                                                   make_app_client, make_provider):
-    """category == "action" 的条目（动作结果卡）不进【相关记忆】块 —— 近况归任务 5 管。"""
+    """category == "action" 的条目（动作结果卡）不进【相关记忆】块 —— 动作结果走【最近发生】近况块。"""
     memory.add_action_result("cang", "cook", True, "面煮好了", store_dir=tmp_store)
     memory.add_entry("cang", "玩家上次说爱吃面", importance=8, store_dir=tmp_store)
     write_persona("cang")
@@ -92,19 +91,25 @@ def test_memory_prefetch_excludes_action_category(tmp_store, write_persona,
     assert "玩家上次说爱吃面" in mem_section
     assert "面煮好了" not in mem_section                    # action 类不进记忆块
     assert "完成:" not in mem_section
-    assert "完成: 面煮好了" in user                        # 但进了【最近发生】（任务 5）
+    assert "完成: 面煮好了" in user                        # 但进了【最近发生】
 
 
 def test_memory_prefetch_order_pinned_importance_newness(tmp_store, write_persona,
                                                          make_app_client, make_provider):
     """排序：pinned 在前；其余按 importance 从高到低；同级 created_at 新的在前。"""
     old = memory.add_entry("cang", "旧的低重要", importance=1, store_dir=tmp_store)
-    time.sleep(0.01)
     new = memory.add_entry("cang", "新的低重要", importance=1, store_dir=tmp_store)
-    time.sleep(0.01)
     high = memory.add_entry("cang", "高重要", importance=8, store_dir=tmp_store)
     pin = memory.add_entry("cang", "钉住的低重要", importance=0, pinned=True,
                            store_dir=tmp_store)
+    # created_at 直接钉死（排序断言不赌 time.time() 的分辨率，也不用 sleep 拉时差）
+    card = memory.load_card("cang", store_dir=tmp_store)
+    by_id = {e["id"]: e for e in card}
+    by_id[old["id"]]["created_at"] = 100.0
+    by_id[new["id"]]["created_at"] = 200.0
+    by_id[high["id"]]["created_at"] = 300.0
+    by_id[pin["id"]]["created_at"] = 50.0
+    memory.save_card("cang", card, store_dir=tmp_store)
     write_persona("cang")
     provider = make_provider(turns=[{"text": "嗯。"}])
     client = make_app_client(provider=provider)
@@ -123,8 +128,10 @@ def test_memory_prefetch_order_pinned_importance_newness(tmp_store, write_person
 
 def test_memory_prefetch_budget_stops_whole_entry(tmp_store, write_persona,
                                                   make_app_client, make_provider,
-                                                  monkeypatch):
+                                                  monkeypatch, tmp_path):
     """超预算时整条停下、不半截：放不下的条目整条不进，块里没有「…（已截断）」。"""
+    trace_file = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
     first = memory.add_entry("cang", "重要的一条" * 4, importance=9, store_dir=tmp_store)
     memory.add_entry("cang", "次要的一条" * 8, importance=3, store_dir=tmp_store)
     first_line = memory.format_for_context([first])
@@ -141,10 +148,9 @@ def test_memory_prefetch_budget_stops_whole_entry(tmp_store, write_persona,
     assert lines == [first_line]                     # 整条进
     assert "次要的一条" not in user                  # 放不下就停：后面的整条不进
     assert "…（已截断）" not in user                 # 不半截截断
-    # filtered 计数：读到 2 条，进块 1 条
-    text, hits, filtered = turn._prefetch_memory_text("cang", store_dir=tmp_store)
-    assert (hits, filtered) == (1, 1)
-    assert text == first_line
+    # filtered 计数走公开的 trace 通道断言（读到 2 条，进块 1 条），不直调私有函数
+    trace = json.loads(trace_file.read_text("utf-8").splitlines()[0])
+    assert trace["memory_prefetch"] == {"hits": 1, "filtered": 1}
 
 
 def test_memory_prefetch_does_not_modify_card(tmp_store, write_persona, make_app_client,
@@ -201,7 +207,6 @@ def test_memory_prefetch_ignores_synonyms_and_query(tmp_store, write_persona,
     与查询无关。"""
     write_persona("cang", entity_synonyms={"木材": ["木材", "柴", "木头"]})
     memory.add_entry("cang", "灶边的石头", importance=5, store_dir=tmp_store)
-    time.sleep(0.01)
     memory.add_entry("cang", "存着过冬的木材", importance=5, store_dir=tmp_store)
     provider = make_provider(turns=[{"text": "木头在棚里。"}])
     client = make_app_client(provider=provider)
@@ -236,7 +241,7 @@ def test_memory_prefetch_pinned_always_in_front(tmp_store, write_persona,
     lines = [ln for ln in mem_section.splitlines() if ln.startswith("- ")]
     assert lines[0] == f"- [{pin['id'][:6]}] 永远记得的约定：日落关城门"   # pinned 排最前
     assert "面煮好了" not in mem_section                 # action 类不进记忆块
-    assert "面煮好了" in user                           # 但进了【最近发生】（任务 5）
+    assert "面煮好了" in user                           # 但进了【最近发生】
 
 
 def test_memory_prefetch_recorded_in_trace(tmp_store, write_persona, make_app_client,

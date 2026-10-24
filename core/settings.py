@@ -3,6 +3,8 @@ AgentSettings — 可注入的配置数据类（只保留运行路径真正用�
 
 ⚠️ 刻意**不做单例、不做缓存**：`core/config.py` 的每个访问函数都会新建一个实例，
 保证「改环境变量无需重启」的家规（见 `core/config_flags.py` 抬头）。
+唯一例外是 `_default_base_dir()` 的 `@lru_cache`：项目根目录是进程内不变量，
+缓存它不碰任何可热切的配置值。
 """
 from __future__ import annotations
 
@@ -11,6 +13,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from core.config_flags import env_text
+
+# 采样参数的固定默认值（无 env 开关）—— factory.create_provider 与
+# OpenAIProvider 的默认参数都以这两个常量为单源，别再各写一份字面量。
+DEFAULT_TEMPERATURE = 0.2
+DEFAULT_MAX_TOKENS = 8192
 
 
 @lru_cache(maxsize=1)
@@ -22,7 +29,7 @@ def _load_api_key() -> str:
     """按优先级加载 API Key: 环境变量 > api_key.txt 文件
 
     通用名 NPC_API_KEY 优先（v4 不绑厂商）；DEEPSEEK_* / OPENAI_* / ZHIPU_* 是旧名，
-    仅为兼容保留。
+    仅为兼容保留。api_key.txt 读不动（权限/坏编码）就当没有 —— 纯查询路径不能 500。
     """
     key = (env_text("NPC_API_KEY")
            or env_text("DEEPSEEK_API_KEY")
@@ -32,7 +39,10 @@ def _load_api_key() -> str:
         return key
     key_file = _default_base_dir() / "api_key.txt"
     if key_file.exists():
-        saved = key_file.read_text("utf-8").strip()
+        try:
+            saved = key_file.read_text("utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            return ""
         if saved:
             return saved
     return ""
@@ -51,13 +61,16 @@ def api_key_source() -> str:
 @dataclass
 class AgentSettings:
     """
-    RunawayNPC 配置 — 纯读环境变量，可注入、可覆盖。
+    失控NPC 配置 — 环境变量现读，可注入、可覆盖。
 
     「三件套」全部由用户自配，v4 不预设厂商：模型名 / key / 端点任缺一项 → 没有大脑
     （`/api/talk` 走角色卡 rules 兜底回复，不调用动作）。
+
+    注意：temperature / max_tokens 是**固定默认值**，没有 NPC_TEMPERATURE 这类 env
+    开关（要改就注入本类），别在环境变量里找它们。
     """
 
-    # ── LLM（三件套 + 采样参数）─────────────────────────
+    # ── LLM（三件套 + 采样固定默认值）───────────────────
     model_name: str = field(default_factory=lambda:
         env_text("AGENT_MODEL") or env_text("NPC_MODEL") or "")
     api_key: str = field(default_factory=_load_api_key)
@@ -66,5 +79,5 @@ class AgentSettings:
         or env_text("DEEPSEEK_BASE_URL")
         or env_text("OPENAI_BASE_URL")
         or "")
-    temperature: float = 0.2
-    max_tokens: int = 8192
+    temperature: float = DEFAULT_TEMPERATURE   # 固定默认值（无 env 开关）
+    max_tokens: int = DEFAULT_MAX_TOKENS       # 固定默认值（无 env 开关）

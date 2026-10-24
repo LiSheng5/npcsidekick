@@ -10,7 +10,9 @@
 
 执行模型（2026-09-28 起）：**动作 = LLM 直接调用的工具**。
   记忆工具由本进程执行；动作工具由本服务**同步调用** mod 的 `execute_url`（协议 §3），
-  结果作为工具消息回上下文继续推理，并**当场写进记忆卡** —— mod 不用回报。
+  结果作为工具消息回上下文继续推理，并**当场写进记忆卡** —— 同步拿到结果就不用回报；
+  长动作 / 结果不确定（running / 超时 unknown）除外，按 call_id 走 `/api/action_result`
+  回报对账（详见 README「执行结果与『不确定』契约」）。
 
 两条通道严格分离（台词只走 delta 帧，流末尾的 action 帧只是"已执行动作"的记录）：
   · 台词通道 = SSE 的 delta 帧，只有角色说的话
@@ -25,14 +27,18 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.client import LLMClient
+from core.config import summary_keep_recent, summary_ratio
 from core.config_flags import env_num
 from core.llm_runtime import (
     apply_llm_settings,
@@ -41,11 +47,12 @@ from core.llm_runtime import (
     llm_config_status,
     reasoning_effort,
     reset_llm_settings,
-    scrub,
+    short_err,
 )
 from core.logging_config import log
 from core.paths import Paths, default_paths, valid_npc_id
 from core.personas import PersonaError, persona_ids, persona_path, read_persona
+from http_util import json_body
 from pending import PendingActions
 
 import chatlog
@@ -163,18 +170,17 @@ class Registry:
             for m, e in self._mods.items()
         }
 
+    def dump(self) -> Dict[str, Dict[str, Any]]:
+        """全部登记条目的只读视图（含完整动作清单）。
+
+        控制台的能力清单页用这个（要展示每条动作的 desc/params）；
+        /api/state 用 state()（只报数量，更紧凑）。此前控制台直接摸 `_mods`
+        私有字段，与 state() 口径还对不齐 —— 现在统一走公开方法。
+        """
+        return {m: dict(e) for m, e in self._mods.items()}
+
 
 # ── 请求校验（字段缺失/非法 → 400，响亮失败）────────────────
-
-async def _json_body(request: Request) -> Dict[str, Any]:
-    try:
-        data = await request.json()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="请求体不是合法 JSON") from exc
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
-    return data
-
 
 def _require_text(body: Dict[str, Any], key: str) -> str:
     value = body.get(key)
@@ -201,73 +207,98 @@ def _note_from_params(action: str, params: Any) -> str:
 # 待定动作 TTL 到点还没回报时的失败文案（"没做成: " 前缀由 memory.add_action_result 加）
 PENDING_EXPIRED_NOTE = "一直没等到结果"
 
+# 旧 mod 回报不带 call_id，HTTP 重试会把同一份回报投递多遍 —— 同 key 短窗内只写一次卡
+LEGACY_REPORT_DEDUP_S = 10.0
+
+# "迟到回报可覆盖的过期失败卡"登记上限（call_id → 失败卡；超出丢最老的）
+_EXPIRED_CARDS_MAX = 256
+
 
 # ── 应用 ─────────────────────────────────────────────────
 
-def create_app(llm_client: Optional[LLMClient] = None,
-               heartbeat_timeout_override: Optional[float] = None,
-               executor: Optional[Any] = None,
-               paths: Optional[Paths] = None) -> FastAPI:
-    """组装应用。llm_client 可注入（测试用假 Provider）；None 时按环境自动创建。
+@dataclass
+class _GameCtx:
+    """create_app 的装配产物 —— 游戏面端点工厂共用的那袋状态与收账工具。
 
-    executor 可注入（测试用假执行器）：`async (url, payload, timeout) -> dict`；
-    缺省走真实 HTTP（`turn._http_execute`）请求 mod 的 execute_url。
-    paths 可注入（运行时数据目录：store / personas / avatars）；None 时用工程默认。
+    端点本体按资源分组在 `_routes_*` 工厂里；create_app 只做装配。
     """
-    app = FastAPI(title="失控NPC v4", version="4.0")
-    paths = paths or default_paths()
-    store_dir = paths.store_dir
-    persona_dir = paths.persona_dir
-    avatar_dir = paths.avatar_dir
-    registry = Registry(timeout=heartbeat_timeout_override)
-    locks: Dict[str, asyncio.Lock] = {}
-    # 待定动作登记（`running` / 超时未知 → 等 §4 回报）；TTL 到点顺手清理
-    pending_actions = PendingActions()
-    started_at = time.time()
-    # 大脑可被页面热换：端点一律读 holder["client"]，而不是闭包里那一份
-    llm_holder: Dict[str, Any] = {"client": llm_client}
 
-    perm_hint = key_perm_hint(store_dir=store_dir)  # 只检测 api_key.txt 权限，不改文件
-    if perm_hint:
-        log.warning("api_key_file_permission", hint=perm_hint)
+    registry: Registry
+    persona_dir: Path
+    store_dir: Path
+    llm_holder: Dict[str, Any]                 # 大脑可被页面热换，端点一律读 holder["client"]
+    pending_actions: PendingActions
+    executor: Optional[Any]
+    started_at: float
+    summary_scheduler: turn.SummaryScheduler = field(default_factory=turn.SummaryScheduler)
+    # 迟到回报要能纠正"TTL 到点已写下的失败卡"：call_id → {npc_id, action, entry_id}，取一次即弃
+    expired_cards: "OrderedDict[str, Dict[str, Any]]" = field(default_factory=OrderedDict)
+    # 旧 mod 回报（无 call_id）的短窗去重账：(npc_id, action, ok, note) → 最近一次回报时间
+    legacy_reports: Dict[tuple, float] = field(default_factory=dict)
+    locks: Dict[str, asyncio.Lock] = field(default_factory=dict)
 
-    if llm_client is None:
-        try:
-            llm_client = build_default_client(store_dir=store_dir)
-        except Exception as exc:                 # 无 key / 初始化失败 → 规则回复兜底
-            log.warning("llm_unavailable", error=scrub(str(exc))[:160])
-            llm_client = None
-    llm_holder["client"] = llm_client             # 自动创建的大脑也要进 holder（页面可热换）
+    def lock_for(self, npc_id: str) -> asyncio.Lock:
+        return self.locks.setdefault(npc_id, asyncio.Lock())
 
-    def lock_for(npc_id: str) -> asyncio.Lock:
-        return locks.setdefault(npc_id, asyncio.Lock())
-
-    async def expire_pending_actions() -> None:
+    async def expire_pending_actions(self) -> None:
         """TTL 到点还没等到回报的动作 → 写一条失败记忆（顺手清理，不开后台任务）。
 
         `/api/talk` 开始与 `/api/action_result` 到达时各调一次；写卡在 `lock_for(npc_id)` 内
-        （与正在跑的回合串行），失败不连累请求本身。
+        （与正在跑的回合串行），失败不连累请求本身。写下的失败卡登记进 `expired_cards` ——
+        回报迟到几秒才到的话可以来覆盖这张卡（同一动作不留两条记录）。
         """
-        for info in pending_actions.expire():
+        for info in self.pending_actions.expire():
             log.warning("pending_action_expired", call_id=info["call_id"],
                         npc_id=info["npc_id"], action=info["action"])
+            entry_id = None
             try:
-                async with lock_for(info["npc_id"]):
-                    await asyncio.to_thread(
+                async with self.lock_for(info["npc_id"]):
+                    entry = await asyncio.to_thread(
                         memory.add_action_result, info["npc_id"], info["action"], False,
-                        PENDING_EXPIRED_NOTE, store_dir=store_dir)
-            except Exception as exc:        # 写卡失败只是少一条记忆，别把请求打挂
+                        PENDING_EXPIRED_NOTE, store_dir=self.store_dir)
+                entry_id = entry.get("id") if isinstance(entry, dict) else None
+            except Exception as exc:    # 写卡失败只是少一条记忆，别把请求打挂
                 log.warning("pending_expire_memory_failed", npc_id=info["npc_id"],
-                            action=info["action"], error=scrub(str(exc))[:120])
+                            action=info["action"],
+                            error=short_err(exc, store_dir=self.store_dir))
+            self.expired_cards[info["call_id"]] = {"npc_id": info["npc_id"],
+                                                   "action": info["action"],
+                                                   "params": info.get("params"),
+                                                   "entry_id": entry_id}
+            while len(self.expired_cards) > _EXPIRED_CARDS_MAX:
+                self.expired_cards.popitem(last=False)
 
-    # ── 能力清单（mod 报到 + 心跳）──────────────────────
+    def replace_expired_card(self, stale: Dict[str, Any], ok: bool, note: str) -> Dict[str, Any]:
+        """迟到的真实回报覆盖 TTL 到点写下的失败卡：删旧卡按真实结果重写（同步，交线程池）。
+
+        entry_id 为空 = 当时失败卡就没写成 —— 直接按真实结果补一条即可。
+        """
+        if stale.get("entry_id"):
+            try:
+                memory.delete_entry(stale["npc_id"], stale["entry_id"], store_dir=self.store_dir)
+            except Exception as exc:
+                log.warning("expired_card_delete_failed", npc_id=stale["npc_id"],
+                            error=short_err(exc, store_dir=self.store_dir))
+        return memory.add_action_result(stale["npc_id"], stale["action"], ok, note,
+                                        store_dir=self.store_dir)
+
+
+def _routes_contract(app: FastAPI, ctx: _GameCtx) -> None:
+    """mod 契约端点：报到（capabilities）/ 对话（talk）/ 动作结果回报（action_result）。"""
+
     @app.post("/api/capabilities")
     async def capabilities(request: Request):
-        body = await _json_body(request)
+        body = await json_body(request)
         mod = _require_text(body, "mod")
         execute_url = body.get("execute_url")
         if execute_url is not None and not isinstance(execute_url, str):
             raise HTTPException(status_code=400, detail="字段 execute_url 必须是字符串")
+        if isinstance(execute_url, str) and execute_url.strip():
+            # 要 POST 的地址必须是 http(s) —— file:// 之类别的 scheme 一律不收（SSRF 面收紧）
+            parsed = urlparse(execute_url.strip())
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise HTTPException(status_code=400,
+                                    detail="字段 execute_url 必须是 http(s) URL")
         actions = body.get("actions")
         if not isinstance(actions, list) or not actions:
             raise HTTPException(status_code=400, detail="字段 actions 必填且必须是非空数组")
@@ -285,58 +316,62 @@ def create_app(llm_client: Optional[LLMClient] = None,
             if params is not None and not isinstance(params, dict):
                 raise HTTPException(status_code=400, detail=f"actions[{i}].params 必须是对象")
             clean.append({"name": name.strip(), "desc": desc.strip(), "params": params or {}})
-        registry.declare(mod, clean, execute_url=execute_url)
+        ctx.registry.declare(mod, clean, execute_url=execute_url)
         log.info("capabilities_declared", mod=mod, actions=len(clean),
                  execute_url=bool(str(execute_url or "").strip()))
         return {"ok": True, "mod": mod, "actions": [a["name"] for a in clean]}
 
-    # ── 对话（SSE 流式：delta / action / audio / done）──
     @app.post("/api/talk")
     async def talk(request: Request):
-        body = await _json_body(request)
+        body = await json_body(request)
         npc_id = _require_npc_id(_require_text(body, "npc_id"))
         message = _require_text(body, "message")
         observation = body.get("observation")
         mod = body.get("mod")
         if isinstance(mod, str) and mod.strip():
-            registry.touch(mod.strip())
+            ctx.registry.touch(mod.strip())
             mod = mod.strip()
         else:
             mod = None
 
-        persona = load_persona(persona_dir, npc_id)
+        persona = load_persona(ctx.persona_dir, npc_id)
         # 动作要"能执行"才进 LLM 的工具定义：mod 在线 + 声明过动作 + 给了执行接口（协议 §1）
-        execute_url = registry.execute_url(mod)
-        capabilities = registry.actions(mod) if execute_url else []
-        llm = llm_holder["client"]          # 页面换过脑就拿到新的
-        timeout = registry.timeout()
+        execute_url = ctx.registry.execute_url(mod)
+        capabilities = ctx.registry.actions(mod) if execute_url else []
+        llm = ctx.llm_holder["client"]     # 页面换过脑就拿到新的
+        timeout = ctx.registry.timeout()
         wants_voice = bool(body.get("voice"))        # 按需输出通道：默认纯文本
-        await expire_pending_actions()      # 每轮对话开始顺手清理过期待定动作（§4）
+        await ctx.expire_pending_actions()  # 每轮对话开始顺手清理过期待定动作（§4）
 
         return StreamingResponse(
             turn.stream_turn(llm=llm, npc_id=npc_id, message=message, persona=persona,
                              observation=observation, capabilities=capabilities,
-                             execute_url=execute_url, mod=mod, executor=executor,
-                             lock=lock_for(npc_id), pending_actions=pending_actions,
+                             execute_url=execute_url, mod=mod, executor=ctx.executor,
+                             lock=ctx.lock_for(npc_id), pending_actions=ctx.pending_actions,
                              wants_voice=wants_voice,
-                             store_dir=store_dir, execute_timeout=execute_timeout),
+                             store_dir=ctx.store_dir, execute_timeout=execute_timeout,
+                             summary_scheduler=ctx.summary_scheduler),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                      "X-Mod-Heartbeat-Timeout": str(timeout)},
         )
 
-    # ── 动作结果回报（可选通道：长动作异步回报 → 写记忆卡，协议 §4）──
     @app.post("/api/action_result")
     async def action_result(request: Request):
         """长动作回报。匹配规则（协议 §4）：
 
-        1. 带 `call_id` 且命中登记 → 写卡；`note` 为空时用登记的 `params` 拼一句描述
-        2. 带 `call_id` 但没命中（重复回报 / 已过期 / 未知）→ **不写卡**（同一次动作不能写两遍），
+        1. 带 `call_id` 且命中登记 → 写卡；`note` 为空时用登记的 `params` 拼一句描述。
+           **先销账、后清理过期** —— 反过来会让 TTL 边界秒级迟到的回报被 expire 先扫掉
+        2. 带 `call_id` 但登记已被 TTL 清掉（失败卡已写）→ 迟到的真实结果**覆盖**那张失败卡
+           （同一动作不留两条记录），`matched=true`
+        3. 带 `call_id` 但没命中（重复回报 / 未知）→ **不写卡**（同一次动作不能写两遍），
            仍返回 200，`matched=false`
-        3. 不带 `call_id`（旧 mod）→ 先按 `(npc_id, action)` 取最早的登记（FIFO），
-           **无论命中与否都写卡** —— 旧 mod 的回报不能丢
+        4. 不带 `call_id`（旧 mod）→ 先按 `(npc_id, action)` 取最早的登记（FIFO），
+           **无论命中与否都写卡** —— 旧 mod 的回报不能丢；但同一 `(npc_id, action, ok, note)`
+           短窗（`LEGACY_REPORT_DEDUP_S`）内的重复投递只写一次（旧 mod 重试会投递多遍），
+           这种被去重的回报返回 `deduped=true`
         """
-        body = await _json_body(request)
+        body = await json_body(request)
         npc_id = _require_npc_id(_require_text(body, "npc_id"))
         action = _require_text(body, "action")
         ok = body.get("ok")
@@ -357,38 +392,65 @@ def create_app(llm_client: Optional[LLMClient] = None,
         if isinstance(mod, str) and mod.strip():
             # 捎带 mod 也算一次心跳（协议 §1）：长动作执行完回报时，mod 不该被判离线。
             # 只刷新已报到过的 mod；不带 mod 就不猜是哪一个。
-            registry.touch(mod.strip())
+            ctx.registry.touch(mod.strip())
 
-        await expire_pending_actions()      # 每个回报到达顺手清理过期待定动作（§4）
-
+        stale: Optional[Dict[str, Any]] = None
         if call_id:
-            info = pending_actions.resolve(call_id)
+            # 先销账再清理过期（顺序见 docstring 1/2）
+            info = ctx.pending_actions.resolve(call_id)
             if info is None:
+                stale = ctx.expired_cards.pop(call_id, None)
+                if stale is not None and (stale["npc_id"], stale["action"]) != (npc_id, action):
+                    log.warning("action_result_stale_mismatch", npc_id=npc_id,
+                                action=action, call_id=call_id)
+                    stale = None
+            if info is None and stale is None:
                 log.warning("action_result_unmatched", npc_id=npc_id, action=action,
                             call_id=call_id)
                 return {"ok": True, "npc_id": npc_id, "entry": None, "matched": False}
             matched = True
         else:
-            info = pending_actions.resolve_legacy(npc_id, action)
+            key = (npc_id, action, ok, note.strip())
+            seen_at = ctx.legacy_reports.get(key)
+            now = time.time()
+            if seen_at is not None and now - seen_at <= LEGACY_REPORT_DEDUP_S:
+                log.warning("action_result_legacy_deduped", npc_id=npc_id,
+                            action=action, ok=ok)
+                return {"ok": True, "npc_id": npc_id, "entry": None,
+                        "matched": False, "deduped": True}
+            ctx.legacy_reports[key] = now
+            for old_key, ts in list(ctx.legacy_reports.items()):
+                if now - ts > LEGACY_REPORT_DEDUP_S:
+                    del ctx.legacy_reports[old_key]
+            info = ctx.pending_actions.resolve_legacy(npc_id, action)
             matched = info is not None
-        if info is not None and not note.strip():
-            note = _note_from_params(action, info.get("params"))   # 回报没写 note → 用登记信息补
 
-        async with lock_for(npc_id):
-            entry = await asyncio.to_thread(memory.add_action_result, npc_id, action,
-                                            ok, note, store_dir=store_dir)
+        await ctx.expire_pending_actions()  # 每个回报到达顺手清理过期待定动作（§4）
+        record = info or stale
+        if record is not None and not note.strip():
+            note = _note_from_params(action, record.get("params"))   # 回报没写 note → 用登记信息补
+
+        async with ctx.lock_for(npc_id):
+            if stale is not None:
+                entry = await asyncio.to_thread(ctx.replace_expired_card, stale, ok, note)
+            else:
+                entry = await asyncio.to_thread(memory.add_action_result, npc_id, action,
+                                                ok, note, store_dir=ctx.store_dir)
         log.info("action_result_recorded", npc_id=npc_id, action=action, ok=ok,
                  matched=matched, call_id=call_id or None)
         return {"ok": True, "npc_id": npc_id, "entry": entry, "matched": matched}
 
-    # ── 语音合成（独立输出通道，不属于 mod 契约）─────────
+
+def _routes_status(app: FastAPI, ctx: _GameCtx) -> None:
+    """非契约端点：语音合成（tts）、状态查询（state / npcs，调试用）。"""
+
     @app.post("/api/tts")
     async def tts_endpoint(request: Request):
         """给任意文本配音（含本地对话表 / 头顶气泡）。未装 edge-tts → 503。
 
         voice 缺省时按 npc_id 的角色卡取音色，再缺省用全局默认。
         """
-        body = await _json_body(request)
+        body = await json_body(request)
         text = _require_text(body, "text")
         if not tts.available():
             raise HTTPException(status_code=503, detail="edge-tts 未安装")
@@ -398,7 +460,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
             persona = None
             if isinstance(npc_id, str) and npc_id.strip():
                 try:
-                    persona = await asyncio.to_thread(load_persona, persona_dir,
+                    persona = await asyncio.to_thread(load_persona, ctx.persona_dir,
                                                       npc_id.strip())
                 except HTTPException:
                     persona = None
@@ -406,29 +468,34 @@ def create_app(llm_client: Optional[LLMClient] = None,
         audio = await tts.synthesize_safe(text, voice)
         return {"audio": tts.to_base64(audio) if audio else "", "voice": voice}
 
-    # ── 状态查询（/api/state、/api/npcs，调试用）─────────
     @app.get("/api/state")
     async def state():
         return {
-            "model": getattr(llm_holder["client"], "model", None),
-            "llm": llm_config_status(store_dir=store_dir),   # 三件套状态：缺什么写什么
-            "reasoning_effort": reasoning_effort(store_dir=store_dir),
+            "model": getattr(ctx.llm_holder["client"], "model", None),
+            "llm": llm_config_status(store_dir=ctx.store_dir),   # 三件套状态：缺什么写什么
+            "reasoning_effort": reasoning_effort(store_dir=ctx.store_dir),
             "tts": tts.available(),
-            "store_dir": str(store_dir),
-            "persona_dir": str(persona_dir),
-            "npcs": len(persona_ids(persona_dir)),
-            "mods": registry.state(),
-            "heartbeat_timeout_s": registry.timeout(),
-            "uptime_s": round(time.time() - started_at, 1),
+            "store_dir": str(ctx.store_dir),
+            "persona_dir": str(ctx.persona_dir),
+            "npcs": len(persona_ids(ctx.persona_dir)),
+            "mods": ctx.registry.state(),
+            "heartbeat_timeout_s": ctx.registry.timeout(),
+            # 双端共享值经这里下发（heartbeat_timeout_s 的先例）：前端不再各抄一份
+            "avatar_max_bytes": console_api.AVATAR_MAX_BYTES,
+            "delete_kept_note": console_api.DELETE_KEPT_NOTE,
+            # 摘要阈值两项随 env 可热切，前端聊天页文案按它现算
+            "summary_ratio": summary_ratio(),
+            "summary_keep_recent": summary_keep_recent(),
+            "uptime_s": round(time.time() - ctx.started_at, 1),
         }
 
     @app.get("/api/npcs")
     async def npcs():
         result = []
-        for npc_id in persona_ids(persona_dir):
+        for npc_id in persona_ids(ctx.persona_dir):
             try:
-                entries = memory.load_card(npc_id, store_dir=store_dir)
-                msgs = chatlog.load_turns(npc_id, store_dir=store_dir)
+                entries = memory.load_card(npc_id, store_dir=ctx.store_dir)
+                msgs = chatlog.load_turns(npc_id, store_dir=ctx.store_dir)
             except Exception as exc:         # 坏卡/异常文件名只影响它自己
                 result.append({"npc_id": npc_id, "error": str(exc)})
                 continue
@@ -440,19 +507,57 @@ def create_app(llm_client: Optional[LLMClient] = None,
             })
         return {"npcs": result}
 
+
+def create_app(llm_client: Optional[LLMClient] = None,
+               heartbeat_timeout_override: Optional[float] = None,
+               executor: Optional[Any] = None,
+               paths: Optional[Paths] = None) -> FastAPI:
+    """组装应用。llm_client 可注入（测试用假 Provider）；None 时按环境自动创建。
+
+    executor 可注入（测试用假执行器）：`async (url, payload, timeout) -> dict`；
+    缺省走真实 HTTP（`turn._http_execute`）请求 mod 的 execute_url。
+    paths 可注入（运行时数据目录：store / personas / avatars）；None 时用工程默认。
+    """
+    app = FastAPI(title="失控NPC v4", version="4.0")
+    paths = paths or default_paths()
+    avatar_dir = paths.avatar_dir
+    registry = Registry(timeout=heartbeat_timeout_override)
+    llm_holder: Dict[str, Any] = {"client": llm_client}
+    started_at = time.time()
+
+    perm_hint = key_perm_hint(store_dir=paths.store_dir)  # 只检测 api_key.txt 权限，不改文件
+    if perm_hint:
+        log.warning("api_key_file_permission", hint=perm_hint)
+
+    if llm_client is None:
+        try:
+            llm_client = build_default_client(store_dir=paths.store_dir)
+        except Exception as exc:                 # 无 key / 初始化失败 → 规则回复兜底
+            log.warning("llm_unavailable",
+                        error=short_err(exc, store_dir=paths.store_dir, limit=160))
+            llm_client = None
+    llm_holder["client"] = llm_client             # 自动创建的大脑也要进 holder（页面可热换）
+
+    ctx = _GameCtx(registry=registry, persona_dir=paths.persona_dir,
+                   store_dir=paths.store_dir, llm_holder=llm_holder,
+                   pending_actions=PendingActions(), executor=executor,
+                   started_at=started_at)
+    _routes_contract(app, ctx)
+    _routes_status(app, ctx)
     app.state.registry = registry
     app.state.llm_holder = llm_holder
-    app.state.pending = pending_actions
+    app.state.pending = ctx.pending_actions
 
     # ── 控制台（调试面，见 console_api.py，不属于 mod 契约）──
     avatar_dir.mkdir(parents=True, exist_ok=True)
     app.include_router(console_api.build_router(
-        persona_dir, lock_for, registry, avatar_dir,
-        store_dir=store_dir,
+        ctx.persona_dir, ctx.lock_for, registry, avatar_dir,
+        store_dir=ctx.store_dir,
         llm_api={
-            "status": lambda: llm_config_status(store_dir=store_dir),
-            "apply": lambda patch: apply_llm_settings(patch, llm_holder, store_dir=store_dir),
-            "reset": lambda: reset_llm_settings(llm_holder, store_dir=store_dir),
+            "status": lambda: llm_config_status(store_dir=ctx.store_dir),
+            "apply": lambda patch: apply_llm_settings(patch, llm_holder,
+                                                      store_dir=ctx.store_dir),
+            "reset": lambda: reset_llm_settings(llm_holder, store_dir=ctx.store_dir),
         }))
     app.mount("/avatars", StaticFiles(directory=str(avatar_dir)), name="avatars")
     if CONSOLE_DIR.is_dir():

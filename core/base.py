@@ -1,27 +1,27 @@
 """
-ProviderProtocol — LLM 提供商的统一抽象。
+ProviderProtocol — LLM 提供商的统一抽象（抽象基类；名字里的 "Protocol" 是历史沿革，
+实际不是 `typing.Protocol`）。
 
-所有 Provider 实现此协议，LLMClient 通过委托调用，不关心底层是
+所有 Provider 实现此基类，LLMClient 通过委托调用，不关心底层是
 OpenAI、DeepSeek 还是任何 OpenAI 兼容 API。
 
 设计参考:
   - LiteLLM 的 provider 抽象: 统一接口, 每个 provider 一个实现
   - OpenAI SDK: chat() + stream() 两套 API
-  - 保持最小接口: 只有 chat + stream + model_name
+  - 保持小接口: chat + stream + model_name，另有可选的 replays_reasoning_content
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, Dict, List, Optional
 
-from core.client import LLMResponse
-from core.types import StreamChunk
+from core.types import LLMResponse, StreamChunk   # 数据契约在 types.py，抽象层不再反向依赖实现层
 
 
 class ProviderProtocol(ABC):
     """
-    LLM Provider 接口。
+    LLM Provider 接口（抽象基类，不是 typing.Protocol）。
 
     每个 Provider 实现两个核心方法:
       - chat():    同步非流式调用 → LLMResponse
@@ -70,8 +70,9 @@ class ProviderProtocol(ABC):
           temperature: 温度参数 (可选, 使用默认值)
           max_tokens: 最大 token 数 (可选, 使用默认值)
           response_format: {"type": "json_object"} 强制 JSON 输出
-          reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")，
-            通过 extra_body 传递给 API
+          reasoning_effort: 思考档位（None = 不指定；off/disabled/none = 显式关闭；
+            minimal/low/medium/high/xhigh/max = 开启，按端点方言归一），
+            以具名参数传给 Provider（思考参数一律请求体顶层，见 openai_provider._thinking_params）
 
         Returns:
           LLMResponse: content + tool_calls + finish_reason + usage
@@ -97,8 +98,9 @@ class ProviderProtocol(ABC):
           tool_choice: "auto" | "none" | "required"
           temperature: 温度参数
           max_tokens: 最大 token 数
-          reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")，
-            通过 extra_body 传递给 API
+          reasoning_effort: 思考档位（None = 不指定；off/disabled/none = 显式关闭；
+            minimal/low/medium/high/xhigh/max = 开启，按端点方言归一），
+            以具名参数传给 Provider（思考参数一律请求体顶层，见 openai_provider._thinking_params）
 
         Yields:
           StreamChunk: content / tool_call_delta / finish_reason

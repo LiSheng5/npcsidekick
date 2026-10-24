@@ -4,22 +4,23 @@
   · 整个提示（系统 + 状态 + 记忆 + 历史 + 玩家这句）用到模型上下文窗口的
     NPC_SUMMARY_RATIO（默认 40%）时 → 回合结束后台把旧轮次压成一段摘要，
     存 store/{id}_summary.json，下次拼上下文时放在最前面，只保留最近
-    NPC_SUMMARY_KEEP_RECENT 轮逐字；不再按固定 token 预算截断历史
+    NPC_SUMMARY_KEEP_RECENT 轮逐字；不再按固定 token 预算砍历史
+    （仅 build_history 的硬上限兜底，见那里的 docstring）
   · 摘要只保脉络：重要事实由 remember 落进记忆卡（摘要不替代记忆）
   · LLM 不可用时摘要失败 → 原聊天记录一行不动（降级不丢数据）
 """
 from __future__ import annotations
 
 import json
-import math
 import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core.config import context_window, summary_keep_recent, summary_ratio
+from core.config import budget_history, context_window, summary_keep_recent, summary_ratio
 from core.logging_config import log
 from core.paths import require_npc_id, resolve_store
+from core.tokens import estimate_tokens    # 估算单源在 core；chatlog.estimate_tokens 仍可用（re-export）
 
 _SUMMARY_PROMPT = (
     "把下面这段 NPC 与玩家的对话压成一段简短摘要（中文，600 字以内）："
@@ -27,9 +28,6 @@ _SUMMARY_PROMPT = (
     "优先保留玩家的要求、承诺、关系变化和未完成的事。"
     "如果已经有前情摘要，把它和新增对话合成一段完整摘要。"
 )
-
-# CJK 与 CJK 标点的码点区间（token 估算用）
-_CJK_RANGES = ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF), (0x3000, 0x303F))
 
 
 def summary_limit() -> int:
@@ -50,21 +48,6 @@ def chat_path(npc_id: str, store_dir: Optional[Path] = None) -> Path:
 def summary_path(npc_id: str, store_dir: Optional[Path] = None) -> Path:
     """摘要状态路径；npc_id 非法（路径穿越企图）→ ValueError。"""
     return resolve_store(store_dir) / f"{require_npc_id(npc_id)}_summary.json"
-
-
-# ── token 估算（纯本地确定性，只用于量级判断，不求精确）─────
-
-def _is_cjk(ch: str) -> bool:
-    code = ord(ch)
-    return any(lo <= code <= hi for lo, hi in _CJK_RANGES)
-
-
-def estimate_tokens(text: str) -> int:
-    """CJK 字符按 1 token、其余按 4 字符 1 token 估算。"""
-    if not text:
-        return 0
-    cjk = sum(1 for ch in text if _is_cjk(ch))
-    return cjk + math.ceil((len(text) - cjk) / 4)
 
 
 def select_recent(turns: List[Dict[str, Any]], token_budget: int) -> List[Dict[str, Any]]:
@@ -115,29 +98,34 @@ def load_turns(npc_id: str, limit: Optional[int] = None,
                store_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     """读聊天记录（扁平消息列表）。limit = 取最后 limit 行。
 
-    单行损坏（写入中途断电等）→ 跳过并告警，不让一条坏行拖垮整个 NPC。
+    单行损坏（写入中途断电、坏字节等）→ 跳过并告警，不让一条坏行拖垮整个 NPC。
     """
     path = chat_path(npc_id, store_dir)
     if not path.exists():
         return []
     msgs: List[Dict[str, Any]] = []
-    for lineno, line in enumerate(path.read_text("utf-8").splitlines(), 1):
+    for lineno, raw in enumerate(path.read_bytes().splitlines(), 1):
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeDecodeError:      # 坏字节行也按"坏行"跳过，别炸整份记录
+            log.warning("chatlog_bad_line", npc_id=npc_id, line=lineno)
+            continue
         line = line.strip()
         if not line:
             continue
         try:
-            raw = json.loads(line)
+            record = json.loads(line)
         except json.JSONDecodeError:
             log.warning("chatlog_bad_line", npc_id=npc_id, line=lineno)
             continue
-        if not isinstance(raw, dict) or not isinstance(raw.get("content"), str):
+        if not isinstance(record, dict) or not isinstance(record.get("content"), str):
             log.warning("chatlog_bad_record", npc_id=npc_id, line=lineno)
             continue
-        reasoning = raw.get("reasoning")
+        reasoning = record.get("reasoning")
         msgs.append({
-            "role": raw.get("role") if raw.get("role") in ("user", "assistant") else "user",
-            "content": raw["content"],
-            "ts": raw.get("ts", 0.0),
+            "role": record.get("role") if record.get("role") in ("user", "assistant") else "user",
+            "content": record["content"],
+            "ts": record.get("ts", 0.0),
             "reasoning": reasoning if isinstance(reasoning, str) else "",
         })
     if limit is not None and limit >= 0:
@@ -174,7 +162,7 @@ def load_summary(npc_id: str, store_dir: Optional[Path] = None) -> Dict[str, Any
 def _save_summary(npc_id: str, summary: str, covered: int,
                   store_dir: Optional[Path] = None) -> None:
     """原子写摘要（先写 `.tmp` 再 `os.replace`，照 memory.save_card 的写法）——
-    后台摘要（任务 6）会和回合读取并发，不能让读到半截文件。"""
+    后台摘要会和回合读取并发，不能让读到半截文件。"""
     path = summary_path(npc_id, store_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -185,6 +173,10 @@ def _save_summary(npc_id: str, summary: str, covered: int,
 
 
 # ── 滚动摘要（提示用到窗口 × 比例就把旧轮次压成一段）──────────
+
+# 聊天记录一轮 = 用户 + 助手各一行（jsonl 行数口径），keep_recent 轮 → 行数 ×2
+_MESSAGES_PER_TURN = 2
+
 
 def _fold_plan(npc_id: str, prompt_tokens: Optional[int] = None,
                keep_recent: Optional[int] = None,
@@ -202,7 +194,7 @@ def _fold_plan(npc_id: str, prompt_tokens: Optional[int] = None,
         return None
     state = load_summary(npc_id, store_dir=store_dir)
     covered = min(state["covered"], len(turns))
-    cutoff = len(turns) - keep * 2
+    cutoff = len(turns) - keep * _MESSAGES_PER_TURN
     if cutoff <= covered:
         return None                       # 没有可压的旧轮次
     return turns, state, covered, cutoff
@@ -213,7 +205,7 @@ def needs_summary(npc_id: str, prompt_tokens: Optional[int] = None,
                   store_dir: Optional[Path] = None) -> bool:
     """现在该不该摘要（提示 token ≥ 窗口 × 比例，且有可压的旧轮次）？纯读、不惊动 LLM。
 
-    回合结束用它决定要不要后台触发摘要（turn.py，任务 6）；`prompt_tokens` =
+    回合结束用它决定要不要后台触发摘要（turn.py）；`prompt_tokens` =
     本回合提示的本地 token 估算，拿不到传 None = 不看阈值（强制压缩口径）。
     """
     return _fold_plan(npc_id, prompt_tokens, keep_recent, store_dir) is not None
@@ -278,11 +270,11 @@ def build_history(npc_id: str, llm, token_budget: Optional[int] = None,
     """拼上下文用的历史：可选的摘要消息 + 未被摘要覆盖的**全部**聊天记录。
 
     历史本身不按固定预算截断（盲区已消除）；`token_budget` 是硬上限
-    （默认 `context.budget_history()` = 窗口 × 0.7），只防摘要失败（LLM 不可用）
+    （默认 `config.budget_history()` = 窗口 × 0.7），只防摘要失败（LLM 不可用）
     时历史撑爆上下文，正常不会触发。
 
     `summarize=True`（默认）= 旧行为：拼历史前同步**强制**摘要一次（不看阈值）；
-    turn.py 传 `False`（任务 6）—— 摘要移出回合关键路径，改在回合结束后台按
+    turn.py 传 `False` —— 摘要移出回合关键路径，改在回合结束后台按
     本回合提示 token 触发，回合内只读现成的摘要状态。
 
     `reasoning_replay=True` 时把落盘的思考内容作为 `reasoning_content` 带回
@@ -294,8 +286,7 @@ def build_history(npc_id: str, llm, token_budget: Optional[int] = None,
     turns = load_turns(npc_id, store_dir=store_dir)
     covered = min(state["covered"], len(turns))
     if token_budget is None:
-        import context                     # 函数内导入：context.py 顶层 import chatlog
-        token_budget = context.budget_history()
+        token_budget = budget_history()   # 对话层硬上限（core/config，单源）
 
     history: List[Dict[str, Any]] = []
     if state["summary"]:

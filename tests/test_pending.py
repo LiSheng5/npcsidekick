@@ -52,7 +52,7 @@ def test_resolve_legacy_takes_earliest_by_npc_and_action():
 
 
 def test_find_in_flight_matches_name_and_normalized_params():
-    """任务 7 重复动作保护：名 + 参（规范化 JSON，键序无关）都相同才算在途重复。"""
+    """重复动作保护：名 + 参（规范化 JSON，键序无关）都相同才算在途重复。"""
     table = pending.PendingActions()
     table.register("c1", "cang", "cook", {"dish": "面", "fire": "大火"}, "mygame")
 
@@ -63,6 +63,16 @@ def test_find_in_flight_matches_name_and_normalized_params():
     assert table.find_in_flight("cang", "cook") is None                  # 空参 ≠ 有参
     table.register("c2", "cang", "goto", {}, "mygame")
     assert table.find_in_flight("cang", "goto")["call_id"] == "c2"       # 空参对空参
+
+
+def test_alive_skips_expired_without_expire():
+    """alive() 自带 TTL 过滤：调用方没跑 expire() 也不会把过期条目当在途。"""
+    table = pending.PendingActions(ttl=10.0)
+    info = table.register("c1", "cang", "cook")
+
+    assert [x["call_id"] for x in table.alive(now=info["created_at"] + 9)] == ["c1"]
+    assert table.alive(now=info["created_at"] + 11) == []   # 过期即被过滤，不依赖先 expire()
+    assert len(table) == 1                                  # 条目仍在表里，等 expire() 落失败卡
 
 
 def test_expire_returns_over_ttl_and_keeps_fresh():

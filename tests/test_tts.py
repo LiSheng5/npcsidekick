@@ -6,28 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 
 import pytest
 
 import tts
-
-
-CAPS = {"mod": "mygame", "actions": [
-    {"name": "cook", "desc": "用厨房做饭", "params": {"dish": "菜名(字符串)"}}]}
-
-
-def _frames(res) -> list:
-    """把 SSE 响应体解析成帧列表。"""
-    out = []
-    for line in res.text.splitlines():
-        if line.startswith("data: "):
-            out.append(json.loads(line[6:]))
-    return out
-
-
-def _types(res) -> list:
-    return [f["type"] for f in _frames(res)]
+from conftest import CAPS, frames, kinds
 
 
 # ── 音色映射 / 编解码 ────────────────────────────────────
@@ -54,6 +37,33 @@ def test_synthesize_empty_text_returns_none():
     assert asyncio.run(tts.synthesize("   ", tts.DEFAULT_VOICE)) is None
 
 
+def test_cache_evicts_least_recently_used(monkeypatch):
+    """缓存满只淘汰最久没用的（LRU），不整表清空 —— 热台词要留着复用。"""
+    import sys
+    import types
+
+    class FakeCommunicate:
+        def __init__(self, text, voice):
+            self.text = text
+
+        async def stream(self):
+            yield {"type": "audio", "data": self.text.encode("utf-8")}
+
+    monkeypatch.setitem(sys.modules, "edge_tts", types.SimpleNamespace(Communicate=FakeCommunicate))
+    monkeypatch.setattr(tts, "_CACHE_LIMIT", 2)
+    tts._cache.clear()
+    try:
+        asyncio.run(tts.synthesize("甲", "v"))
+        asyncio.run(tts.synthesize("乙", "v"))
+        asyncio.run(tts.synthesize("甲", "v"))       # 命中"甲" → 甲变新、乙最旧
+        asyncio.run(tts.synthesize("丙", "v"))       # 淘汰乙，甲/丙留下
+
+        assert set(tts._cache) == {tts._cache_key(t, "v") for t in ("甲", "丙")}
+        assert tts._cache_key("乙", "v") not in tts._cache
+    finally:
+        tts._cache.clear()
+
+
 # ── /api/talk 的 audio 帧 ────────────────────────────────
 
 def test_talk_default_has_no_audio(tmp_store, write_persona, make_app_client,
@@ -66,7 +76,7 @@ def test_talk_default_has_no_audio(tmp_store, write_persona, make_app_client,
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好"})
 
     assert res.status_code == 200
-    types = _types(res)
+    types = kinds(res)
     assert "audio" not in types
     assert types[-1] == "done"
 
@@ -87,9 +97,9 @@ def test_talk_with_voice_appends_audio_frame(tmp_store, write_persona, make_app_
 
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好", "voice": True})
 
-    frames = _frames(res)
-    assert [f["type"] for f in frames][-2:] == ["audio", "done"]
-    audio = frames[-2]
+    out = frames(res)
+    assert [f["type"] for f in out][-2:] == ["audio", "done"]
+    audio = out[-2]
     assert base64.b64decode(audio["audio"]) == b"fake-mp3"
     assert audio["voice"] == "zh-CN-YunjianNeural"
     assert seen == {"text": "行啊。", "voice": "zh-CN-YunjianNeural"}
@@ -109,7 +119,7 @@ def test_talk_voice_synthesis_failure_falls_back_to_text(tmp_store, write_person
 
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好", "voice": True})
 
-    types = _types(res)
+    types = kinds(res)
     assert "audio" not in types and "delta" in types and types[-1] == "done"
 
 
@@ -128,7 +138,7 @@ def test_talk_voice_timeout_falls_back_to_text(tmp_store, write_persona, make_ap
 
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好", "voice": True})
 
-    assert "audio" not in _types(res)
+    assert "audio" not in kinds(res)
 
 
 def test_talk_without_tts_package_skips_audio(tmp_store, write_persona, make_app_client,
@@ -140,7 +150,7 @@ def test_talk_without_tts_package_skips_audio(tmp_store, write_persona, make_app
 
     res = client.post("/api/talk", json={"npc_id": "cang", "message": "你好", "voice": True})
 
-    assert "audio" not in _types(res)
+    assert "audio" not in kinds(res)
 
 
 # ── 独立端点 /api/tts ────────────────────────────────────
@@ -248,4 +258,4 @@ def test_game_endpoints_unaffected_by_tts(tmp_store, write_persona, make_app_cli
 
     assert client.post("/api/action_result",
                        json={"npc_id": "cang", "action": "cook", "ok": True}).status_code == 200
-    assert _types(client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"}))[-1] == "done"
+    assert kinds(client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"}))[-1] == "done"

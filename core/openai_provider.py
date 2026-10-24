@@ -17,11 +17,12 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from openai import OpenAI, AsyncOpenAI
 
-from core.client import LLMResponse
 from core.config_flags import env_text
 from core.logging_config import log
-from core.types import StreamChunk
+from core.settings import DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE
+from core.types import LLMResponse, StreamChunk
 from core.base import ProviderProtocol
+from core.vendor import dialect_of
 
 
 # NPC_LLM_EXTRA_BODY 里允许直接覆盖的 SDK 具名参数（其余字段一律进 extra_body）
@@ -106,10 +107,11 @@ class OpenAIProvider(ProviderProtocol):
         api_key: str,
         base_url: str,
         model: str,
-        temperature: float = 0.2,
-        max_tokens: int = 8192,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         reasoning_effort: str | None = None,
         extra_body: Optional[dict] = None,
+        dialect: str = "",
     ):
         if not api_key:
             raise RuntimeError("API Key 不能为空")
@@ -121,6 +123,9 @@ class OpenAIProvider(ProviderProtocol):
         self._extra_body = extra_body or None
         self._base_url = base_url
         self._api_key = api_key
+        # 思考参数方言（factory 会算好显式传入；直接构造时按 core/vendor 的
+        # 单一口径现场判，不再自己按域名另猜一套）
+        self._dialect = dialect if dialect else dialect_of(model, base_url)
 
         # 同步客户端
         self._client = OpenAI(api_key=api_key, base_url=base_url,
@@ -237,15 +242,15 @@ class OpenAIProvider(ProviderProtocol):
         return kwargs
 
     def _is_openrouter(self) -> bool:
-        """OpenRouter 聚合端点:思考请求/响应字段与 DeepSeek 直连不同。"""
-        return "openrouter" in (self._base_url or "").lower()
+        """OpenRouter 聚合端点:思考请求/响应字段与 DeepSeek 直连不同（方言见 core/vendor）。"""
+        return self._dialect == "openrouter"
 
     def _is_openai_official(self) -> bool:
         """OpenAI 官方端点:只有顶层 reasoning_effort,不认 thinking / reasoning 包装。"""
-        return "api.openai.com" in (self._base_url or "").lower()
+        return self._dialect == "openai"
 
     def _is_glm(self) -> bool:
-        return "glm" in (self._model or "").lower()
+        return self._dialect == "zhipu"
 
     def _is_deepseek(self) -> bool:
         """DeepSeek（直连或其代理/网关）—— 带 tools 时 reasoning_content 必须回传。
@@ -253,10 +258,7 @@ class OpenAIProvider(ProviderProtocol):
         OpenRouter 即使跑的是 deepseek/* 模型也走它自己的 reasoning 协议，
         别把 DeepSeek 直连的 reasoning_content 塞过去。
         """
-        if self._is_openrouter():
-            return False
-        return ("deepseek" in (self._base_url or "").lower()
-                or "deepseek" in (self._model or "").lower())
+        return self._dialect == "deepseek"
 
     @property
     def replays_reasoning_content(self) -> bool:
@@ -269,17 +271,56 @@ class OpenAIProvider(ProviderProtocol):
         return self._is_deepseek()
 
     def _glm_supports_effort(self) -> bool:
-        """GLM 系列仅在 5.2 及以上支持 reasoning_effort 分级思考。"""
+        """GLM 系列仅在 5.2 及以上支持 reasoning_effort 分级思考。
+
+        版本按 `(major, minor)` 元组比较 —— 别当小数：glm-5.10 是 5.10 > 5.2，
+        float("5.10")=5.1 会把新版误判成不支持。
+        """
         m = self._model.lower()
         if "glm" not in m:
             return True
-        mm = re.search(r"glm[-_]?(\d+(?:\.\d+)?)", m)
+        mm = re.search(r"glm[-_]?(\d+)(?:\.(\d+))?", m)
         if not mm:
             return True
-        try:
-            return float(mm.group(1)) >= 5.2
-        except ValueError:
-            return True
+        return (int(mm.group(1)), int(mm.group(2) or 0)) >= (5, 2)
+
+    def _build_kwargs(self, messages: List[Dict[str, str]],
+                      tools: Optional[List[dict]] = None,
+                      tool_choice: str = "auto",
+                      temperature: Optional[float] = None,
+                      max_tokens: Optional[int] = None,
+                      reasoning_effort: str | None = None,
+                      response_format: Optional[dict] = None,
+                      stream: bool = False) -> dict:
+        """拼 chat.completions.create 的请求参数（chat 与 stream 共用这一段）。
+
+        reasoning_effort -> 各家顶层字段（见 _thinking_params；extra_body 的上层键
+        就是 HTTP 请求体的顶层键，不会被再包一层）
+          off/disabled/none -> DeepSeek 系 {thinking:{type:disabled}}；OpenAI/OpenRouter 不发
+          deepseek/兼容网关 -> {thinking:{type:enabled}, reasoning_effort:值}
+          openai 官方       -> {reasoning_effort:值}
+          zhipu GLM(<5.2)   -> {thinking:{type:enabled}} (仅支持开/关)
+          None -> 不指定(服务端默认)
+        用户透传（NPC_LLM_EXTRA_BODY）最后合并，可覆盖上面拼好的思考参数。
+        """
+        kwargs = dict(
+            model=self._model,
+            messages=messages,
+            temperature=temperature if temperature is not None else self._temperature,
+            max_tokens=max_tokens if max_tokens is not None else self._max_tokens,
+        )
+        if stream:
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
+        if response_format:
+            kwargs["response_format"] = response_format
+        _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
+        if _re:
+            kwargs["extra_body"] = self._thinking_params(_re)
+        return self._apply_extra_body(kwargs)
 
     def chat(
         self,
@@ -292,30 +333,9 @@ class OpenAIProvider(ProviderProtocol):
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """同步非流式对话。"""
-        kwargs = dict(
-            model=self._model,
-            messages=messages,
-            temperature=temperature if temperature is not None else self._temperature,
-            max_tokens=max_tokens if max_tokens is not None else self._max_tokens,
-        )
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
-        if response_format:
-            kwargs["response_format"] = response_format
-
-        # reasoning_effort -> 各家顶层字段（见 _thinking_params；extra_body 的上层键
-        # 就是 HTTP 请求体的顶层键，不会被再包一层）
-        #   off/disabled/none -> DeepSeek 系 {thinking:{type:disabled}}；OpenAI/OpenRouter 不发
-        #   deepseek/兼容网关 -> {thinking:{type:enabled}, reasoning_effort:值}
-        #   openai 官方       -> {reasoning_effort:值}
-        #   zhipu GLM(<5.2)   -> {thinking:{type:enabled}} (仅支持开/关)
-        #   None -> 不指定(服务端默认)
-        _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
-        if _re:
-            kwargs["extra_body"] = self._thinking_params(_re)
-        # 用户透传（NPC_LLM_EXTRA_BODY）最后合并，可覆盖上面拼好的思考参数
-        kwargs = self._apply_extra_body(kwargs)
+        kwargs = self._build_kwargs(messages, tools, tool_choice, temperature,
+                                    max_tokens, reasoning_effort,
+                                    response_format=response_format)
 
         completion = self._client.chat.completions.create(**kwargs)
         choice = completion.choices[0]
@@ -350,36 +370,13 @@ class OpenAIProvider(ProviderProtocol):
                 timeout=_REQUEST_TIMEOUT_S,
             )
 
-        kwargs = dict(
-            model=self._model,
-            messages=messages,
-            temperature=temperature if temperature is not None else self._temperature,
-            max_tokens=max_tokens if max_tokens is not None else self._max_tokens,
-            stream=True,
-            stream_options={"include_usage": True},
-        )
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
-
-        # reasoning_effort -> 各家顶层字段（见 _thinking_params；extra_body 的上层键
-        # 就是 HTTP 请求体的顶层键，不会被再包一层）
-        #   off/disabled/none -> DeepSeek 系 {thinking:{type:disabled}}；OpenAI/OpenRouter 不发
-        #   deepseek/兼容网关 -> {thinking:{type:enabled}, reasoning_effort:值}
-        #   openai 官方       -> {reasoning_effort:值}
-        #   zhipu GLM(<5.2)   -> {thinking:{type:enabled}} (仅支持开/关)
-        #   None -> 不指定(服务端默认)
-        _re = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
-        if _re:
-            kwargs["extra_body"] = self._thinking_params(_re)
-        # 用户透传（NPC_LLM_EXTRA_BODY）最后合并，可覆盖上面拼好的思考参数
-        kwargs = self._apply_extra_body(kwargs)
+        kwargs = self._build_kwargs(messages, tools, tool_choice, temperature,
+                                    max_tokens, reasoning_effort, stream=True)
 
         stream_response = await self._async_client.chat.completions.create(**kwargs)
 
         chunk_index = 0
         async for event in stream_response:
-            chunk_index += 1
             choice = event.choices[0] if event.choices else None
 
             if choice is None:
@@ -396,24 +393,27 @@ class OpenAIProvider(ProviderProtocol):
             # 带 tools 时 DeepSeek 要求把 CoT 原样回传，所以不能在这里丢掉。
             reasoning = _delta_reasoning(delta)
 
-            tool_call_delta = None
+            # 并行工具调用在一个 delta 里带多段 tool_calls —— 逐个产出；
+            # 只取 [0] 会把其余调用整段丢掉（并行动作丢一半，还拼不回来）
+            tool_deltas: List[Optional[Dict[str, Any]]] = [None]
             if delta is not None and delta.tool_calls:
-                tc = delta.tool_calls[0]
-                tool_call_delta = {
+                tool_deltas = [{
                     "index": getattr(tc, "index", 0),
                     "id": getattr(tc, "id", None),
                     "function_name": getattr(tc.function, "name", None) if tc.function else None,
                     "function_arguments": getattr(tc.function, "arguments", None) if tc.function else None,
-                }
+                } for tc in delta.tool_calls]
 
-            yield StreamChunk(
-                content=content,
-                reasoning=reasoning,
-                tool_call_delta=tool_call_delta,
-                finish_reason=finish_reason,
-                model=event.model,
-                index=chunk_index,
-            )
+            for pos, tool_call_delta in enumerate(tool_deltas):
+                chunk_index += 1
+                yield StreamChunk(
+                    content=content if pos == 0 else "",
+                    reasoning=reasoning if pos == 0 else "",
+                    tool_call_delta=tool_call_delta,
+                    finish_reason=finish_reason if pos == 0 else None,
+                    model=event.model,
+                    index=chunk_index,
+                )
 
     # ── 便捷方法 ─────────────────────────────────────────
 

@@ -10,6 +10,13 @@ import memory
 
 
 NOW = 1_800_000_000.0
+
+
+@pytest.fixture
+def no_jieba(monkeypatch):
+    """钉死分词路径为「无 jieba 兜底」：检索断言不再随环境里装没装 jieba 漂移
+    （有 jieba 的机器与没有的机器跑出来必须一样）。"""
+    monkeypatch.setattr(memory, "jieba", None)
 HOUR = 3600.0
 
 
@@ -41,7 +48,7 @@ def test_uuid_ids_do_not_collide(tmp_store):
 
 # ── 检索（相关度门槛 + 相关度为主、重要度为辅）────────────
 
-def test_retrieve_below_min_rel_not_returned(tmp_store):
+def test_retrieve_below_min_rel_not_returned(tmp_store, no_jieba):
     """相关度低于门槛的条目不返回 —— 哪怕重要度很高。"""
     _add(tmp_store, content="玩家爱吃面", importance=9)
     _add(tmp_store, content="今天天气不错", importance=9)
@@ -51,7 +58,7 @@ def test_retrieve_below_min_rel_not_returned(tmp_store):
     assert [e["content"] for e in entries] == ["玩家爱吃面"]
 
 
-def test_retrieve_importance_breaks_relevance_tie(tmp_store):
+def test_retrieve_importance_breaks_relevance_tie(tmp_store, no_jieba):
     """相关度相同时重要度高的在前。"""
     _add(tmp_store, content="面食小事", importance=1)
     _add(tmp_store, content="面食大事", importance=9)
@@ -61,12 +68,12 @@ def test_retrieve_importance_breaks_relevance_tie(tmp_store):
     assert [e["content"] for e in entries] == ["面食大事", "面食小事"]
 
 
-def test_retrieve_all_irrelevant_returns_empty(tmp_store):
+def test_retrieve_all_irrelevant_returns_empty(tmp_store, no_jieba):
     _add(tmp_store, content="玩家爱吃面", importance=9)
     assert memory.retrieve("cang", "完全无关的查询词", store_dir=tmp_store) == []
 
 
-def test_retrieve_newer_first_on_full_tie(tmp_store):
+def test_retrieve_newer_first_on_full_tie(tmp_store, no_jieba):
     """rank 相同（相关度、重要度都一样）→ created_at 新的在前。"""
     _add(tmp_store, content="面旧", created_at=NOW - 100 * HOUR)
     _add(tmp_store, content="面新", created_at=NOW)
@@ -82,7 +89,7 @@ def test_relevance_is_token_hit_ratio():
     assert memory._relevance_score("面汤", "面 汤", ["面", "汤"], set(), set()) == pytest.approx(1.0)
 
 
-def test_synonyms_boost_ranking(tmp_store):
+def test_synonyms_boost_ranking(tmp_store, no_jieba):
     _add(tmp_store, content="木材")      # 无同义词表时与 query「柴」零命中 → 连门槛都过不了
     _add(tmp_store, content="石头")
 
@@ -95,7 +102,7 @@ def test_synonyms_boost_ranking(tmp_store):
 
 
 def test_synonyms_come_only_from_explicit_table(tmp_store):
-    """同义词表只认显式传入的那份 —— 进程级全局表已删（P-24 阶段 2）。
+    """同义词表只认显式传入的那份 —— 进程级全局表已删。
 
     多 NPC 并发口径：除了调用方传进来的表，检索不看任何别处 ——
     A 的同义词表没有可能"留在什么地方"污染 B 的检索。
@@ -110,7 +117,7 @@ def test_synonyms_come_only_from_explicit_table(tmp_store):
     assert [e["content"] for e in entries] == ["木材"]   # 只按传入的表召回
 
 
-def test_retrieve_top_k_and_empty_card(tmp_store):
+def test_retrieve_top_k_and_empty_card(tmp_store, no_jieba):
     for i in range(6):
         _add(tmp_store, content=f"第{i}件")
     assert len(memory.retrieve("cang", "第", top_k=2,
@@ -293,6 +300,14 @@ def test_broken_json_raises_with_path(tmp_store):
     memory.card_path("cang", store_dir=tmp_store).write_text('{"a": 1}', encoding="utf-8")
     with pytest.raises(ValueError):
         memory.load_card("cang", store_dir=tmp_store)
+
+
+def test_bad_utf8_is_treated_as_broken_card(tmp_store):
+    """非法 UTF-8 也归"坏卡"语义：统一 ValueError + 损坏文案，别让 UnicodeDecodeError 裸着逃。"""
+    memory.card_path("cang", store_dir=tmp_store).write_bytes(b"[\xff\xfe]")
+    with pytest.raises(ValueError) as exc:
+        memory.load_card("cang", store_dir=tmp_store)
+    assert "记忆卡 JSON 损坏" in str(exc.value)
 
 
 def test_entry_without_content_rejected(tmp_store):

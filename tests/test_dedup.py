@@ -1,7 +1,7 @@
-"""重复动作保护（任务 7）—— 在途（进行中 / 待确认）的同名同参动作不重复下发。
+"""重复动作保护 —— 在途（进行中 / 待确认）的同名同参动作不重复下发。
 
 `call_id` 幂等只保护「同一个 `call_id` 被重发」；LLM 自己再调一次同名动作会生成
-**新的** `call_id`，Mod 无从识别。默认策略（**需确认**）：动作名 + 参数都相同才拦截
+**新的** `call_id`，Mod 无从识别。默认策略：动作名 + 参数都相同才拦截
 （参数按规范化 JSON 比较），参数不同 = 新指令（如"再砍 3 根"），正常放行。
 
 被拦截的调用：不发给 mod、不写记忆、不进 action 帧（executed），trace 的 tools 里
@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import memory
-from test_server import CAPS, FakeExecutor, frames, kinds
+from conftest import CAPS, FakeExecutor, frames, kinds
 
 
 def test_timeout_then_same_action_is_not_resent(tmp_store, write_persona, make_app_client,

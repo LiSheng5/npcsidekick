@@ -62,6 +62,19 @@ def test_glm_below_52_only_switches():
     assert provider._thinking_params("high") == {"thinking": {"type": "enabled"}}
 
 
+def test_glm_version_is_compared_as_major_minor():
+    """glm-5.10 是 5.10 > 5.2 —— 按 float 比（5.1）会把新版误判成不支持。"""
+    def glm(model: str):
+        return _provider("https://open.bigmodel.cn/api/paas/v4", model)
+
+    assert glm("glm-5.10")._glm_supports_effort() is True
+    assert glm("glm-5.2")._glm_supports_effort() is True
+    assert glm("glm-5.1")._glm_supports_effort() is False
+    assert glm("glm-4.6")._glm_supports_effort() is False
+    assert glm("glm-5.10")._thinking_params("high") == {
+        "thinking": {"type": "enabled"}, "reasoning_effort": "high"}
+
+
 def test_chat_puts_thinking_params_in_request_body(monkeypatch):
     """真·请求参数：extra_body 的键就是 HTTP 请求体顶层键，不被再包一层。"""
     provider = _provider()
@@ -115,6 +128,36 @@ def test_stream_parses_reasoning_content(monkeypatch):
 
     assert "".join(c.reasoning for c in chunks) == "先想一想"
     assert "".join(c.content for c in chunks) == "嗯。"
+
+
+def test_stream_keeps_all_parallel_tool_calls(monkeypatch):
+    """并行工具调用在一个 delta 里带多段 tool_calls —— 逐个产出，只取 [0] 会丢一半。"""
+    provider = _provider()
+    tool_calls = [
+        types.SimpleNamespace(index=0, id="call_a",
+                              function=types.SimpleNamespace(name="cook",
+                                                             arguments='{"dish": "面"}')),
+        types.SimpleNamespace(index=1, id="call_b",
+                              function=types.SimpleNamespace(name="goto",
+                                                             arguments='{"place": "厨房"}')),
+    ]
+    delta = types.SimpleNamespace(content=None, reasoning_content=None, reasoning=None,
+                                  tool_calls=tool_calls)
+    event = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(delta=delta, finish_reason="tool_calls")],
+        model="deepseek-v4-pro")
+    provider._async_client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=_async_return(_FakeStream([event])))))
+
+    chunks = asyncio.run(_collect(provider.stream([{"role": "user", "content": "在吗"}])))
+
+    deltas = [c.tool_call_delta for c in chunks if c.has_tool_call]
+    assert [(d["index"], d["id"], d["function_name"]) for d in deltas] == [
+        (0, "call_a", "cook"), (1, "call_b", "goto")]
+    assert deltas[0]["function_arguments"] == '{"dish": "面"}'
+    assert deltas[1]["function_arguments"] == '{"place": "厨房"}'
+    assert "".join(c.content for c in chunks) == ""          # 纯工具 delta 没台词
 
 
 async def _collect(agen):

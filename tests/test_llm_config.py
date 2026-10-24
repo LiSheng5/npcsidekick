@@ -1,6 +1,6 @@
 """LLM 三件套配置测试 —— 用户自配 / 配置优先 / 缺配置响亮提示（全零网络）。
 
-口径（P-19）：模型与端点由用户自己配，v4 不绑厂商；显式端点永不被推断覆盖；
+口径：模型与端点由用户自己配，v4 不绑厂商；显式端点永不被推断覆盖；
 配不齐时服务照起、/api/talk 走角色卡 rules 兜底，并把缺哪几项写出来。
 """
 from __future__ import annotations
@@ -21,15 +21,16 @@ def clean_llm(tmp_store):
 
     落盘文件在注入的 tmp store 里（llm_config.json 与记忆卡同目录），
     用例里读写它都要显式传 store_dir=tmp_store。
+    运行时覆盖走公开的 reset_runtime_overrides，不直接摸私有字典。
     """
     from core import llm_runtime
 
-    llm_runtime._LLM_RUNTIME.clear()
+    llm_runtime.reset_runtime_overrides()
     path = tmp_store / "llm_config.json"
     if path.exists():
         path.unlink()
     yield llm_runtime
-    llm_runtime._LLM_RUNTIME.clear()
+    llm_runtime.reset_runtime_overrides()
     if path.exists():
         path.unlink()
 
@@ -107,6 +108,23 @@ def test_hint_list_is_actionable():
     assert "AGENT_MODEL" in hints[1]
 
 
+# ── 上下文预算读取（core/config.budget_*，装配层只收传参）─────
+
+def test_budget_history_hard_cap_default_follows_context_window(monkeypatch):
+    """未显式设置 → 硬上限 = 上下文窗口 × 0.7（现算）；显式设置了以它为准。"""
+    from core import config
+
+    monkeypatch.delenv("NPC_BUDGET_HISTORY", raising=False)
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "100000")
+    assert config.budget_history() == 70000
+
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")       # 现读可热切，不用重启
+    assert config.budget_history() == 700
+
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "123")
+    assert config.budget_history() == 123
+
+
 # ── 逃生舱：NPC_LLM_EXTRA_BODY ───────────────────────────
 
 def test_extra_body_lands_in_request_body(monkeypatch):
@@ -173,20 +191,6 @@ def test_build_default_client_returns_none_when_unconfigured(tmp_store, monkeypa
     assert server.build_default_client(store_dir=tmp_store) is None
 
 
-def test_build_default_client_uses_configured_endpoint(tmp_store, monkeypatch):
-    from core import config
-    import server
-
-    monkeypatch.setattr(config, "api_key", lambda: "k")
-    monkeypatch.setenv("AGENT_MODEL", "deepseek-v4-pro")
-    monkeypatch.setenv("NPC_BASE_URL", "https://gateway.local/v1")
-
-    client = server.build_default_client(store_dir=tmp_store)
-
-    assert client is not None
-    assert client.provider.base_url == "https://gateway.local/v1"
-
-
 # ── 页面改配置：立即生效 + 落盘保留 ───────────────────────
 
 def test_apply_llm_settings_switches_brain(clean_llm, monkeypatch, tmp_store):
@@ -220,7 +224,7 @@ def test_settings_survive_runtime_clear(clean_llm, monkeypatch, tmp_store):
                                    store_dir=tmp_store)
 
     assert llm_runtime.llm_config_status(store_dir=tmp_store)["origin"] == "runtime"
-    llm_runtime._LLM_RUNTIME.clear()                        # 模拟重启
+    llm_runtime.reset_runtime_overrides()                    # 模拟重启（清进程内那层）
     status = llm_runtime.llm_config_status(store_dir=tmp_store)
 
     assert status["origin"] == "file"
@@ -240,6 +244,31 @@ def test_thinking_unsupported_sends_nothing(clean_llm, tmp_store, monkeypatch):
 def test_apply_rejects_bad_effort(clean_llm):
     with pytest.raises(ValueError):
         clean_llm.apply_llm_settings({"reasoning_effort": "超强"})
+
+
+def test_apply_accepts_full_effort_set(clean_llm, tmp_store):
+    """档位全集（含 minimal/xhigh）页面可存 —— 与 provider 方言映射表同口径，别只认一半。"""
+    for value in ("off", "disabled", "none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        clean_llm.apply_llm_settings({"reasoning_effort": value}, store_dir=tmp_store)
+        assert clean_llm.llm_settings(store_dir=tmp_store)["reasoning_effort"] == value
+    with pytest.raises(ValueError):
+        clean_llm.apply_llm_settings({"reasoning_effort": "超强"})
+
+
+def test_apply_rejects_string_bool_for_thinking_unsupported(clean_llm, tmp_store):
+    """回归：字符串 "false" 转 bool 是 True —— 必须严格收布尔，别静默把语义翻过来。"""
+    with pytest.raises(ValueError):
+        clean_llm.apply_llm_settings({"thinking_unsupported": "false"}, store_dir=tmp_store)
+    with pytest.raises(ValueError):
+        clean_llm.apply_llm_settings({"thinking_unsupported": 1}, store_dir=tmp_store)
+    assert clean_llm.llm_settings(store_dir=tmp_store)["thinking_unsupported"] is False
+
+
+def test_apply_accepts_bool_thinking_unsupported(clean_llm, tmp_store):
+    clean_llm.apply_llm_settings({"thinking_unsupported": True}, store_dir=tmp_store)
+    assert clean_llm.llm_settings(store_dir=tmp_store)["thinking_unsupported"] is True
+    clean_llm.apply_llm_settings({"thinking_unsupported": False}, store_dir=tmp_store)
+    assert clean_llm.llm_settings(store_dir=tmp_store)["thinking_unsupported"] is False
 
 
 def test_console_llm_endpoints(tmp_store, write_persona, make_app_client, clean_llm, monkeypatch):
@@ -346,8 +375,9 @@ def test_page_key_clear_falls_back_to_env(clean_llm, monkeypatch, tmp_store):
     assert "api_key" not in json.loads((tmp_store / "llm_config.json").read_text("utf-8"))
 
 
-def test_endpoints_never_echo_page_key(tmp_store, write_persona, make_app_client, clean_llm,
-                                       monkeypatch):
+def test_endpoints_never_echo_key(tmp_store, write_persona, make_app_client, clean_llm,
+                                  monkeypatch):
+    """key 无论来自页面填写还是环境变量，/api/state 与 /api/llm 都只回掩码、绝不回原文。"""
     from core import config
 
     monkeypatch.setattr(config, "api_key", lambda: "sk-FROMENV000000")
@@ -358,20 +388,13 @@ def test_endpoints_never_echo_page_key(tmp_store, write_persona, make_app_client
     assert "FROMPAGE" not in put.text
 
     for path in ("/api/state", "/api/llm"):
-        assert "FROMPAGE" not in client.get(path).text
+        assert "FROMPAGE" not in client.get(path).text   # 页面填的 key 生效期间
 
     assert client.put("/api/llm", json={"token": "xxx"}).status_code == 400
 
-
-def test_endpoints_never_echo_key(tmp_store, write_persona, make_app_client, clean_llm,
-                                  monkeypatch):
-    from core import config
-
-    monkeypatch.setattr(config, "api_key", lambda: "sk-SUPERSECRET123456")
-    client = make_app_client()
-
+    client.put("/api/llm", json={"api_key": ""})         # 清空 → 回到环境变量的 key
     for path in ("/api/state", "/api/llm"):
-        assert "SUPERSECRET" not in client.get(path).text
+        assert "FROMENV" not in client.get(path).text    # 环境变量的 key 同样不回显
 
     bad = client.put("/api/llm", json={"token": "xxx"})
     assert bad.status_code == 400

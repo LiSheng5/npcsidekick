@@ -13,7 +13,11 @@ import asyncio
 import base64
 import hashlib
 import importlib.util
+from collections import OrderedDict
 from typing import Optional
+
+from core.llm_runtime import scrub
+from core.logging_config import log
 
 # 全局默认音色（persona["voice"] 可覆盖）
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
@@ -21,8 +25,9 @@ DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 # 合成超时（秒）—— 语音是锦上添花，超时就不等（纯文本保底）
 SYNTH_TIMEOUT_SEC = 5.0
 
-# 内存缓存：相同文本 + 音色不重复合成（常见台词/兜底话术复用）
-_cache: dict[str, bytes] = {}
+# 内存缓存：相同文本 + 音色不重复合成（常见台词/兜底话术复用）。
+# OrderedDict 按使用序淘汰最久没用的（LRU）—— mp3 不小，整表 clear 会把热台词也一起扔了
+_cache: "OrderedDict[str, bytes]" = OrderedDict()
 _CACHE_LIMIT = 512
 
 
@@ -55,6 +60,7 @@ async def synthesize(text: str, voice: str) -> Optional[bytes]:
     key = _cache_key(text, voice)
     cached = _cache.get(key)
     if cached is not None:
+        _cache.move_to_end(key)          # 命中也算一次使用（LRU）
         return cached
     try:
         import edge_tts
@@ -68,10 +74,11 @@ async def synthesize(text: str, voice: str) -> Optional[bytes]:
         if not result:
             return None
         if len(_cache) >= _CACHE_LIMIT:
-            _cache.clear()
+            _cache.popitem(last=False)   # 只淘汰最久没用的那条，别整表清空
         _cache[key] = result
         return result
-    except Exception:
+    except Exception as exc:
+        log.warning("tts_synthesis_failed", voice=voice, error=scrub(str(exc))[:120])
         return None
 
 
@@ -79,5 +86,9 @@ async def synthesize_safe(text: str, voice: str) -> Optional[bytes]:
     """合成音频，超时/失败 → None（调用方回退纯文本，绝不卡对话）。"""
     try:
         return await asyncio.wait_for(synthesize(text, voice), timeout=SYNTH_TIMEOUT_SEC)
-    except Exception:
+    except asyncio.TimeoutError:
+        log.warning("tts_synthesis_timeout", voice=voice, timeout_s=SYNTH_TIMEOUT_SEC)
+        return None
+    except Exception as exc:
+        log.warning("tts_synthesis_failed", voice=voice, error=scrub(str(exc))[:120])
         return None

@@ -1,7 +1,8 @@
 """记忆卡 — 条目 + 相关度检索。
 
-记忆卡的写入口只有三个：remember 工具（remember_entry）、动作结果回报
-（add_action_result）、人工手改 JSON 文件。本模块不提供其他写通道。
+记忆卡的写入口有四条：remember 工具（remember_entry）、动作结果回报
+（add_action_result）、控制台的条目级增删改（add_entry / update_entry /
+delete_entry）、人工手改 JSON 文件。本模块不开别的写通道。
 
 存储格式：store/{id}_memory.json —— JSON 条目列表，可直接手改。
 条目: {id, content, importance, category, created_at, pinned?}
@@ -191,13 +192,13 @@ def _normalize_entry(raw: Any, index: int) -> Dict[str, Any]:
 
 
 def load_card(npc_id: str, store_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """读记忆卡。文件不存在 → 空列表；内容损坏 → 响亮失败（ValueError）。"""
+    """读记忆卡。文件不存在 → 空列表；内容损坏（含非法 UTF-8）→ 响亮失败（ValueError）。"""
     path = card_path(npc_id, store_dir)
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text("utf-8"))
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f"记忆卡 JSON 损坏，无法解析: {path} ({exc})") from exc
     if not isinstance(data, list):
         raise ValueError(f"记忆卡必须是 JSON 数组: {path}")
@@ -214,7 +215,7 @@ def save_card(npc_id: str, entries: List[Dict[str, Any]],
     os.replace(tmp, path)
 
 
-# ── 写入口（三个通道中的两个：remember 工具 / 动作结果回报）─
+# ── 写入口（四条通道中的两条：remember 工具 / 动作结果回报）─
 
 def add_entry(npc_id: str, content: str, importance: int = DEFAULT_IMPORTANCE,
               category: str = DEFAULT_CATEGORY, pinned: bool = False,
@@ -346,7 +347,7 @@ def format_for_context(entries: List[Dict[str, Any]]) -> str:
     return "\n".join(f"- [{e['id'][:_SHORT_ID_LEN]}] {e['content']}" for e in entries)
 
 
-# ── 条目级人工编辑（控制台用的就是"直接手改记忆卡"这条通道）─
+# ── 条目级增删改（控制台的程序化写通道；人工手改 JSON 文件是另一条）─
 
 def find_entry(npc_id: str, entry_id: str,
                store_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:

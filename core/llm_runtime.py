@@ -26,7 +26,8 @@ from core.logging_config import log
 from core.paths import resolve_store
 
 # 思考模式档位：未设置 → 不指定，用服务端默认；
-# off/disabled/none → 显式关闭；low/medium/high/max → 开启
+# off/disabled/none → 显式关闭；minimal/low/medium/high/xhigh/max → 开启
+# （minimal/xhigh 等高档位按端点方言归一，映射表见 openai_provider._thinking_params 与 README）
 _ENV_REASONING_EFFORT = "NPC_REASONING_EFFORT"
 
 
@@ -50,7 +51,7 @@ def thinking_effort(store_dir: Optional[Path] = None) -> Optional[str]:
 # ── LLM 设置（页面可改，落 store/llm_config.json；key 不在这里）──
 
 _LLM_FIELDS = ("model", "base_url", "api_key", "reasoning_effort", "thinking_unsupported")
-_EFFORT_VALUES = ("off", "disabled", "none", "low", "medium", "high", "max")
+_EFFORT_VALUES = ("off", "disabled", "none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 # 只有 api_key 是允许字段（页面可填，明文落盘，见 _PLAIN_KEY_WARNING）；
 # 其余凭据类字段一律响亮拒绝，别被静默吞掉。
@@ -78,15 +79,24 @@ def effective_api_key(store_dir: Optional[Path] = None) -> str:
         or (config.api_key() or "")
 
 
-def scrub(text: str) -> str:
-    """日志/报错脱敏：把生效 key 与环境变量 key 的原文都换成掩码。"""
+def scrub(text: str, store_dir: Optional[Path] = None) -> str:
+    """日志/报错脱敏：把生效 key 与环境变量 key 的原文都换成掩码。
+
+    `store_dir` 与调用方的数据目录对齐（自定义 store 下页面存的 key 才能被脱掉）。
+    """
     from core import config
 
     out = text or ""
-    for key in {effective_api_key(), config.api_key() or ""}:
+    for key in {effective_api_key(store_dir=store_dir), config.api_key() or ""}:
         if len(key) >= 6 and key in out:
             out = out.replace(key, mask_secret(key))
     return out
+
+
+def short_err(exc: BaseException, store_dir: Optional[Path] = None,
+              limit: int = 120) -> str:
+    """报错摘要（scrub 脱敏后截断）—— 日志口径统一走这里，别再手写 `[:120]`。"""
+    return scrub(str(exc), store_dir=store_dir)[:limit]
 
 
 def api_key_status(store_dir: Optional[Path] = None) -> Dict[str, Any]:
@@ -103,15 +113,15 @@ def api_key_status(store_dir: Optional[Path] = None) -> Dict[str, Any]:
         "masked": mask_secret(key) or None,
         "source": "store/llm_config.json（页面填的）" if from_page else (api_key_source() or None),
         "from_page": bool(from_page),
-        "perm_hint": key_perm_hint(),     # api_key.txt 权限太松时的提示（Windows 才有）
+        "perm_hint": key_perm_hint(store_dir=store_dir),     # key 文件权限太松时的提示（Windows 才有）
         "plain_warning": _PLAIN_KEY_WARNING if from_page else None,
     }
 
 
 # ── api_key.txt 权限：只检测，不自动改 ────────────────────
 
-_KEY_PERM_HINT: Optional[str] = None
-_KEY_PERM_CHECKED = False
+# 提示缓存以文件路径为键 —— 自定义 store 的 llm_config.json 各算各的，不跨 store 复用
+_KEY_PERM_HINTS: Dict[str, Optional[str]] = {}
 
 
 def _world_readable_lines(icacls_output: str, path: str = "") -> List[str]:
@@ -159,13 +169,13 @@ def scan_key_file_perm(path: Optional[Path] = None) -> Optional[str]:
 
 
 def key_perm_hint(refresh: bool = False, store_dir: Optional[Path] = None) -> Optional[str]:
-    """给日志与页面用的提示（只算一次，重启才刷新）。
+    """给日志与页面用的提示（每个文件只算一次，refresh=True 强制重扫；缓存按路径分开）。
 
     扫两处明文 key：工程根 `api_key.txt`、以及页面存下来的 `store/llm_config.json`
     （只在它真存了 key 时才提示）。
     """
-    global _KEY_PERM_HINT, _KEY_PERM_CHECKED
-    if refresh or not _KEY_PERM_CHECKED:
+    cache_key = str(llm_config_path(store_dir))
+    if refresh or cache_key not in _KEY_PERM_HINTS:
         hints: List[str] = []
         root = scan_key_file_perm()
         if root:
@@ -174,12 +184,20 @@ def key_perm_hint(refresh: bool = False, store_dir: Optional[Path] = None) -> Op
             stored = scan_key_file_perm(llm_config_path(store_dir))
             if stored:
                 hints.append(stored)
-        _KEY_PERM_HINT = "；".join(hints) or None
-        _KEY_PERM_CHECKED = True
-    return _KEY_PERM_HINT
+        _KEY_PERM_HINTS[cache_key] = "；".join(hints) or None
+    return _KEY_PERM_HINTS[cache_key]
 
 
 _LLM_RUNTIME: Dict[str, Any] = {}          # 页面改过的值（优先级最高，进程内有效）
+
+
+def reset_runtime_overrides() -> None:
+    """清掉页面改的运行时覆盖（回落到落盘文件 / 环境变量那一层）。
+
+    `reset_llm_settings` 是给 HTTP 端点用的（连带删落盘文件并换脑）；
+    这里只清进程内那层 —— 测试隔离用，别再直接摸 `_LLM_RUNTIME`。
+    """
+    _LLM_RUNTIME.clear()
 
 
 def llm_config_path(store_dir: Optional[Path] = None) -> Path:
@@ -203,16 +221,29 @@ def _save_llm_file(cfg: Dict[str, Any], store_dir: Optional[Path] = None) -> Non
         # 明文 key 落盘 —— 文件自带一行警告：万一被拷走/误发，打开就看得见
         blob["_warning"] = ("本文件含明文 API Key：不要分享、不要提交到仓库；"
                             "想更安全就删掉它，改用环境变量 NPC_API_KEY。")
-    path.write_text(json.dumps(blob, ensure_ascii=False, indent=2), encoding="utf-8")
+    # tmp + os.replace 原子落盘：写一半崩溃也不会留下损坏的配置；
+    # 含明文 key，POSIX 下顺手把权限收紧到仅属主
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(blob, ensure_ascii=False, indent=2), encoding="utf-8")
+    if os.name == "posix":
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+    os.replace(tmp, path)
 
 
 def _env_llm_config() -> Dict[str, Any]:
-    """环境变量那一层 —— 页面与文件都没设时的起点。"""
+    """环境变量那一层 —— 页面与文件都没设时的起点。
+
+    env 回退链单源在 core/settings.AgentSettings（AGENT_MODEL→NPC_MODEL、
+    NPC_BASE_URL→旧名），这里只走 core.config，不再自己 or 一遍。
+    """
     from core import config
 
     return {
-        "model": env_text("AGENT_MODEL") or env_text("NPC_MODEL") or "",
-        "base_url": env_text("NPC_BASE_URL") or config.base_url() or "",
+        "model": config.model_name(),
+        "base_url": config.base_url(),
         "api_key": config.api_key() or "",
         "reasoning_effort": env_text(_ENV_REASONING_EFFORT) or "",
         "thinking_unsupported": False,
@@ -289,7 +320,11 @@ def apply_llm_settings(patch: Dict[str, Any],
             continue
         clean[key] = value
     if patch.get("thinking_unsupported") is not None:
-        clean["thinking_unsupported"] = bool(patch["thinking_unsupported"])
+        flag = patch["thinking_unsupported"]
+        if not isinstance(flag, bool):
+            # 字符串 "false" 转 bool 是 True —— 严格收布尔，别静默把语义翻过来
+            raise ValueError("字段 thinking_unsupported 必须是布尔值")
+        clean["thinking_unsupported"] = flag
 
     _LLM_RUNTIME.update(clean)
     saved = _persisted_llm_config(store_dir=store_dir)
@@ -297,7 +332,7 @@ def apply_llm_settings(patch: Dict[str, Any],
         saved.pop("api_key", None)
     _save_llm_file(saved, store_dir=store_dir)
     if holder is not None:
-        rebuild_llm(holder)
+        rebuild_llm(holder, store_dir=store_dir)
     return llm_config_status(store_dir=store_dir)
 
 
@@ -310,22 +345,24 @@ def reset_llm_settings(holder: Optional[Dict[str, Any]] = None,
     except OSError:
         pass
     if holder is not None:
-        rebuild_llm(holder)
+        rebuild_llm(holder, store_dir=store_dir)
     return llm_config_status(store_dir=store_dir)
 
 
-def rebuild_llm(holder: Dict[str, Any]) -> None:
+def rebuild_llm(holder: Dict[str, Any], store_dir: Optional[Path] = None) -> None:
     """按生效设置重建大脑；没配齐 → None（/api/talk 走角色卡 rules 兜底）。
 
     旧大脑的 HTTP 连接池顺手关掉（别等 GC），失败不影响换脑。
+    `store_dir` 与调用方一致 —— 换脑要读同一份 llm_config.json，脱敏也认同一把 key。
     """
     old = holder.get("client")
-    holder["client"] = build_default_client()
+    holder["client"] = build_default_client(store_dir=store_dir)
     if old is not None and old is not holder["client"]:
         try:
             old.close()
         except Exception as exc:
-            log.warning("llm_client_close_failed", error=scrub(str(exc))[:120])
+            log.warning("llm_client_close_failed",
+                        error=short_err(exc, store_dir=store_dir))
 
 
 def build_default_client(store_dir: Optional[Path] = None) -> Optional[LLMClient]:

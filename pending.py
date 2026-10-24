@@ -49,7 +49,7 @@ def _norm_params(params: Any) -> str:
 class PendingActions:
     """`call_id -> {call_id, npc_id, action, params, mod, state, created_at}`，插入序即 FIFO 序。
 
-    `state`（任务 5）：`running`（mod 已受理、还在做）/ `unknown`（同步等待超时、
+    `state`：`running`（mod 已受理、还在做）/ `unknown`（同步等待超时、
     没收到回应，不确定做没做成）—— 近况层据此把两类**分开写**（「进行中」/「待确认」）。
     """
 
@@ -84,9 +84,10 @@ class PendingActions:
 
     def alive(self, npc_id: Optional[str] = None,
               now: Optional[float] = None) -> List[Dict[str, Any]]:
-        """未过期的待定动作（按登记序），可按 npc_id 过滤 —— 任务 5 近况层读这个。
+        """未过期的待定动作（按登记序），可按 npc_id 过滤 —— 近况层读这个。
 
-        过期条目由调用方先 `expire()` 清理（写失败卡），这里只做纯读。
+        过期条目在这里就被过滤（调用方没跑 `expire()` 也不会混进返回值，
+        直接调 `stream_turn` 的路径同样安全）；把过期项落成失败卡的清理职责仍在 `expire()`。
         """
         moment = time.time() if now is None else now
         ttl = self.ttl()
@@ -98,7 +99,7 @@ class PendingActions:
                        params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """同 NPC 下「动作名 + 参数都相同」的在途条目（`running` / `unknown` 都算），没有 → None。
 
-        重复动作保护（任务 7）：LLM 自己重发同一动作会生成**新的** `call_id`，
+        重复动作保护：LLM 自己重发同一动作会生成**新的** `call_id`，
         `call_id` 幂等拦不住，只能按名 + 参（规范化 JSON 比较）识别。只读，不移除。
         """
         target = _norm_params(params)

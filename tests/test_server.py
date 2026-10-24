@@ -1,43 +1,16 @@
-"""server.py 测试 —— 游戏面四端点的契约行为（全零网络）。"""
-from __future__ import annotations
+"""server.py 测试（游戏面主链路）—— 报到校验 / talk 基础与装配 / 记忆工具循环 / 降级。
 
-import asyncio
-import json
+按端点拆分后的分工：动作执行与工具轮 → test_server_actions.py；
+动作结果回报与 pending 对账 → test_server_action_result.py；
+/api/state、/api/npcs 与大脑装配 → test_server_state.py。"""
+
+from __future__ import annotations
 
 import pytest
 
+import chatlog
 import memory
-import tools
-
-
-CAPS = {
-    "mod": "mygame",
-    "execute_url": "http://127.0.0.1:8766/execute",
-    "actions": [
-        {"name": "cook", "desc": "用厨房做饭", "params": {"dish": "菜名(字符串)"}},
-        {"name": "goto", "desc": "走到某地", "params": {"place": "地点名(字符串)"}},
-        {"name": "chat", "desc": "主动找某人说话",
-         "params": {"target": "对象名", "topic": "话题"}},
-    ],
-}
-
-
-def frames(response) -> list[dict]:
-    """把 SSE 响应体拆成帧列表。"""
-    out = []
-    for line in response.text.splitlines():
-        if line.startswith("data: "):
-            out.append(json.loads(line[len("data: "):]))
-    return out
-
-
-def kinds(response) -> list[str]:
-    return [f["type"] for f in frames(response)]
-
-
-def text_of(response) -> str:
-    return "".join(f.get("text", "") for f in frames(response) if f["type"] == "delta")
-
+from conftest import CAPS, BoomProvider, kinds, text_of
 
 # ── /api/capabilities（mod 报到：声明动作 + 心跳）─────────
 
@@ -49,7 +22,6 @@ def test_capabilities_ok(tmp_store, write_persona, make_app_client):
     assert res.status_code == 200
     assert res.json() == {"ok": True, "mod": "mygame", "actions": ["cook", "goto", "chat"]}
     assert client.get("/api/state").json()["mods"]["mygame"]["actions"] == 3
-
 
 @pytest.mark.parametrize("bad", [
     {},
@@ -65,6 +37,20 @@ def test_capabilities_invalid_400(tmp_store, write_persona, make_app_client, bad
     client = make_app_client()
     assert client.post("/api/capabilities", json=bad).status_code == 400
 
+def test_capabilities_execute_url_must_be_http(tmp_store, write_persona, make_app_client):
+    """execute_url 是大脑要 POST 的地址：非 http(s) scheme 一律不收（SSRF 面收紧）。"""
+    client = make_app_client()
+    for bad in ("file:///etc/passwd", "ftp://x/execute", "http://", "javascript:alert(1)"):
+        assert client.post("/api/capabilities",
+                           json=dict(CAPS, execute_url=bad)).status_code == 400, bad
+    assert client.post("/api/capabilities",
+                       json=dict(CAPS, execute_url="http://127.0.0.1:8766/execute")
+                       ).status_code == 200
+    assert client.post("/api/capabilities",
+                       json=dict(CAPS, execute_url="https://mod.example/execute")
+                       ).status_code == 200
+    assert client.post("/api/capabilities",
+                       json=dict(CAPS, execute_url="")).status_code == 200      # 空 = 没给
 
 def test_malformed_json_body_400(tmp_store, write_persona, make_app_client):
     client = make_app_client()
@@ -87,13 +73,12 @@ def test_talk_plain_text(tmp_store, write_persona, make_app_client, make_provide
     assert kinds(res)[-1] == "done" and set(kinds(res)) == {"delta", "done"}
     assert text_of(res) == "行啊，我去给你煮碗面。"
     # 台词进了持久聊天记录（每轮两行：用户一行 + 助手一行）
-    assert [m["content"] for m in __import__("chatlog").load_turns(
+    assert [m["content"] for m in chatlog.load_turns(
         "cang", store_dir=tmp_store)] == [
         "你能帮我做顿饭吗", "行啊，我去给你煮碗面。"]
 
-
 def test_talk_observation_reaches_prompt(tmp_store, write_persona, make_app_client, make_provider):
-    """任务 3 起观测不再进 system：system 只放人设+规矩（固定层，利于前缀缓存），
+    """观测不进 system：system 只放人设+规矩（固定层，利于前缀缓存），
     观测进最后一条 user 消息的【当前情况】块。"""
     write_persona("cang")
     provider = make_provider(turns=[{"text": "嗯。"}])
@@ -112,7 +97,6 @@ def test_talk_observation_reaches_prompt(tmp_store, write_persona, make_app_clie
     assert user["role"] == "user"
     assert "玩家在厨房，刚下班" in user["content"]          # 观测进了 user 前缀块
     assert user["content"].endswith("玩家说：在吗")
-
 
 def test_talk_oversized_observation_truncated_with_log(tmp_store, write_persona,
                                                        make_app_client, make_provider,
@@ -136,10 +120,9 @@ def test_talk_oversized_observation_truncated_with_log(tmp_store, write_persona,
     assert "观" * 300 not in user                          # 超预算部分真的被截掉了
     assert "context_section_truncated" in caplog.text      # 带层名的日志
 
-
 def test_talk_chatlog_stores_raw_message_without_prefix(tmp_store, write_persona,
                                                         make_app_client, make_provider):
-    """任务 3：资料块只是 LLM 上下文的前缀，聊天记录里仍只存玩家原话。"""
+    """资料块只是 LLM 上下文的前缀，聊天记录里仍只存玩家原话。"""
     import chatlog
 
     write_persona("cang")
@@ -155,7 +138,6 @@ def test_talk_chatlog_stores_raw_message_without_prefix(tmp_store, write_persona
     assert "【当前情况】" not in turns[0]["content"]
     assert "玩家说：" not in turns[0]["content"]
 
-
 def test_talk_missing_fields_400(tmp_store, write_persona, make_app_client):
     write_persona("cang")
     client = make_app_client()
@@ -164,13 +146,11 @@ def test_talk_missing_fields_400(tmp_store, write_persona, make_app_client):
     assert client.post("/api/talk", json={"npc_id": "cang"}).status_code == 400
     assert client.post("/api/talk", json={"npc_id": "cang", "message": "  "}).status_code == 400
 
-
 def test_talk_unknown_npc_400(tmp_store, write_persona, make_app_client):
     client = make_app_client()
     res = client.post("/api/talk", json={"npc_id": "nobody", "message": "在吗"})
     assert res.status_code == 400
     assert "nobody" in res.json()["detail"]
-
 
 def test_talk_rejects_traversal_npc_id(tmp_store, write_persona, make_app_client):
     """npc_id 会拼进文件名：穿越企图一律 400，不许读写 store/ 之外的文件。"""
@@ -183,7 +163,6 @@ def test_talk_rejects_traversal_npc_id(tmp_store, write_persona, make_app_client
     assert client.post("/api/action_result",
                        json={"npc_id": "cang/../x", "action": "cook", "ok": True}
                        ).status_code == 400
-
 
 def test_talk_broken_persona_400(tmp_store, persona_dir, make_app_client):
     (persona_dir / "cang.json").write_text("{坏", encoding="utf-8")
@@ -213,7 +192,6 @@ def test_talk_runs_remember_then_replies(tmp_store, write_persona, make_app_clie
     roles = [m["role"] for m in provider.stream_calls[1]["messages"]]
     assert roles[-1] == "tool"
 
-
 def test_talk_recall_loop(tmp_store, write_persona, make_app_client, make_provider):
     write_persona("cang")
     memory.add_entry("cang", "玩家上次说爱吃面", importance=8, store_dir=tmp_store)
@@ -229,13 +207,12 @@ def test_talk_recall_loop(tmp_store, write_persona, make_app_client, make_provid
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert "玩家上次说爱吃面" in tool_msg["content"]              # 逐字记忆进了上下文
 
-
 def test_talk_uses_persona_synonyms_explicitly(tmp_store, write_persona,
                                                make_app_client, make_provider):
     """同义词族按角色卡**显式传参**进检索 —— 没有进程级全局表可依赖。
 
     多 NPC 并发对话时，A 的同义词表不会污染 B 的检索：除了本次请求传进来的表，
-    检索不看任何别处（P-24 阶段 2 删掉了 `memory.set_synonyms` 全局表）。
+    检索不看任何别处（进程级全局同义词表 `memory.set_synonyms` 已删）。
     """
     write_persona("cang", entity_synonyms={"木材": ["木材", "柴", "木头"]})
     wood = memory.add_entry("cang", "存着过冬的木材", importance=5, store_dir=tmp_store)
@@ -254,337 +231,6 @@ def test_talk_uses_persona_synonyms_explicitly(tmp_store, write_persona,
     assert not hasattr(memory, "_ACTIVE_SYNONYMS")    # 进程级全局表已不存在
     assert kinds(res)[-1] == "done"
 
-
-# ── /api/talk：动作 = LLM 直接调用的工具（大脑同步转发 mod 执行）──
-
-class FakeExecutor:
-    """假执行器：记录每次调用，按脚本返回（results 队列优先）或抛异常。"""
-
-    def __init__(self, result=None, results=None, error=None, delay=0.0):
-        self.calls = []
-        self.results = list(results) if results else None
-        self.result = result or {"ok": True, "status": "done", "note": "面煮好了"}
-        self.error = error
-        self.delay = delay
-
-    async def __call__(self, url, payload, timeout):
-        self.calls.append({"url": url, "payload": payload, "timeout": timeout})
-        if self.delay:
-            await asyncio.sleep(self.delay)
-        if self.error is not None:
-            raise self.error
-        if self.results:
-            return self.results.pop(0)
-        return dict(self.result)
-
-
-def test_talk_action_executes_via_mod_then_writes_memory(tmp_store, write_persona,
-                                                         make_app_client, make_provider):
-    """大脑同步转发 mod 的 execute_url → 结果当场回上下文继续推理 + 写进记忆卡（协议 §3）。
-
-    流末尾的 action 帧只是"本回合已执行的动作"的记录，mod 不需要照它做任何事。
-    """
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "行啊，", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "面好了，趁热吃。"},
-    ])
-    executor = FakeExecutor()
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    res = client.post("/api/talk", json={"npc_id": "cang", "message": "你能帮我做顿饭吗",
-                                         "mod": "mygame"})
-
-    assert kinds(res)[-1] == "done"
-    assert kinds(res).count("action") == 1
-    record = frames(res)[-2]["action"]
-    assert record["name"] == "cook" and record["params"] == {"dish": "面"}
-    assert record["ok"] is True and record["status"] == "done"   # 结果也进帧（任务 5）
-    assert text_of(res) == "行啊，面好了，趁热吃。"
-    # mod 真的被同步调用了，载荷符合协议 §3（call_id = 大脑生成，Mod 回报时原样带回）
-    call = executor.calls[0]
-    assert call["url"] == CAPS["execute_url"] and call["timeout"] == 30.0
-    payload = call["payload"]
-    assert len(payload["call_id"]) == 32                        # uuid4().hex
-    assert payload["call_id"] == record["call_id"]              # 帧里的 id 与发给 mod 的一致
-    assert {k: v for k, v in payload.items() if k != "call_id"} == {
-        "npc_id": "cang", "action": "cook", "params": {"dish": "面"}, "mod": "mygame"}
-    # 结果当场写卡 + 第二轮上下文里带上工具结果
-    assert [e["content"] for e in memory.load_card("cang",
-                                                   store_dir=tmp_store)] == ["完成: 面煮好了"]
-    tool_msg = provider.stream_calls[1]["messages"][-1]
-    assert tool_msg["role"] == "tool" and "面煮好了" in tool_msg["content"]
-
-
-def test_talk_action_failure_is_not_pretended(tmp_store, write_persona,
-                                              make_app_client, make_provider):
-    """执行接口连不上 = 失败：不写"完成"，让 LLM 自己圆场（协议 §3）。"""
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "灶好像坏了，没做成。"},
-    ])
-    executor = FakeExecutor(error=RuntimeError("connect refused"))
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
-
-    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
-        "没做成: 执行接口没接上（RuntimeError）"]
-    tool_msg = provider.stream_calls[1]["messages"][-1]
-    assert tool_msg["role"] == "tool" and tool_msg["content"].startswith("没做成")
-    assert text_of(res) == "灶好像坏了，没做成。"
-    # 失败的动作在帧里必须看得出来（任务 5）：旧字段仍在，新增 ok / status
-    record = [f["action"] for f in frames(res) if f["type"] == "action"][0]
-    assert record["name"] == "cook" and record["params"] == {"dish": "面"}
-    assert record["ok"] is False and record["status"] == "failed"
-    assert len(record["call_id"]) == 32
-
-
-def test_talk_action_timeout_is_unknown_not_failure(tmp_store, write_persona, make_app_client,
-                                                    make_provider, monkeypatch):
-    """等待超过 NPC_EXECUTE_TIMEOUT = **不知道做没做**：不写失败卡，登记 pending 等回报。
-
-    （任务 4 默认方案：超时 ≠ 没做成 —— mod 可能已经执行了，只是没等到回应。）
-    """
-    write_persona("cang")
-    monkeypatch.setenv("NPC_EXECUTE_TIMEOUT", "0.05")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "灶是不是坏了……" },
-    ])
-    executor = FakeExecutor(delay=0.5)
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
-
-    assert executor.calls[0]["timeout"] == 0.05
-    assert memory.load_card("cang", store_dir=tmp_store) == []       # 不当成"没做成"
-    assert len(client.app.state.pending) == 1                        # 登记待定，等 mod 回报
-    tool_msg = provider.stream_calls[1]["messages"][-1]
-    assert "不确定" in tool_msg["content"]                            # 给模型留圆场余地
-    assert text_of(res) == "灶是不是坏了……"
-    assert kinds(res).count("action") == 1
-
-
-def test_talk_action_timeout_late_report_writes_memory(tmp_store, write_persona, make_app_client,
-                                                       make_provider, monkeypatch):
-    """超时后 mod 晚到的成功回报（带 call_id）→ 正确写"完成"卡。"""
-    write_persona("cang")
-    monkeypatch.setenv("NPC_EXECUTE_TIMEOUT", "0.05")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "稍等。"},
-    ])
-    executor = FakeExecutor(delay=0.5)
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
-    call_id = executor.calls[0]["payload"]["call_id"]
-
-    res = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "note": "其实煮好了",
-        "call_id": call_id, "mod": "mygame"})
-
-    assert res.json()["matched"] is True
-    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
-        "完成: 其实煮好了"]
-    assert len(client.app.state.pending) == 0
-
-
-def test_talk_action_timeout_without_report_expires_into_failure(tmp_store, write_persona,
-                                                                 make_app_client, make_provider,
-                                                                 monkeypatch):
-    """超时登记的动作一直没回报 → TTL 到点写一条失败记忆（"没做成: 一直没等到结果"）。"""
-    write_persona("cang")
-    monkeypatch.setenv("NPC_EXECUTE_TIMEOUT", "0.05")
-    monkeypatch.setenv("NPC_PENDING_TTL", "0")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "稍等。"},
-        {"text": "嗯。"},
-    ])
-    executor = FakeExecutor(delay=0.5)
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
-    assert len(client.app.state.pending) == 1
-    assert memory.load_card("cang", store_dir=tmp_store) == []
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "好了没"})   # 下一轮开头顺手 expire
-
-    assert len(client.app.state.pending) == 0
-    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
-        "没做成: 一直没等到结果"]
-
-
-def test_talk_action_running_is_not_recorded(tmp_store, write_persona, make_app_client,
-                                             make_provider):
-    """mod 回 status=running：结果还没定 —— 不写卡（等 §4 回报），只告诉 LLM 进行中。"""
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "火还没关，再等会儿。"},
-    ])
-    executor = FakeExecutor(result={"ok": False, "status": "running", "note": "cook 超时没做完"})
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
-
-    assert memory.load_card("cang", store_dir=tmp_store) == []  # 没定论就不写卡
-    tool_msg = provider.stream_calls[1]["messages"][-1]
-    assert "还在进行中" in tool_msg["content"]
-    assert kinds(res).count("action") == 1                     # 调过就有记录
-    record = frames(res)[-2]["action"]
-    assert record["ok"] is False and record["status"] == "running"   # 帧里如实带结果（任务 5）
-
-
-def test_talk_running_action_registers_pending_then_report_writes_once(tmp_store, write_persona,
-                                                                      make_app_client,
-                                                                      make_provider):
-    """mod 回 running → 登记 call_id；带 call_id 回报写卡**一次**；重复回报不再写（协议 §4）。"""
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "火还没关，再等会儿。"},
-    ])
-    executor = FakeExecutor(result={"ok": False, "status": "running", "note": "还在煮"})
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
-
-    pending = client.app.state.pending
-    call_id = executor.calls[0]["payload"]["call_id"]
-    assert len(pending) == 1                                   # running → 登记待定
-    assert memory.load_card("cang", store_dir=tmp_store) == []  # 还没定论就不写卡
-
-    first = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "note": "面煮好了",
-        "call_id": call_id, "mod": "mygame"})
-
-    assert first.status_code == 200 and first.json()["matched"] is True
-    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
-        "完成: 面煮好了"]
-    assert len(pending) == 0                                   # 精确销账
-
-    again = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "note": "面煮好了", "call_id": call_id})
-
-    assert again.status_code == 200 and again.json()["matched"] is False
-    assert len(memory.load_card("cang", store_dir=tmp_store)) == 1   # 重复回报不写第二遍
-
-
-def test_talk_two_action_rounds_emit_two_frames(tmp_store, write_persona, make_app_client,
-                                                make_provider):
-    """同一回合连续调两个动作工具：两轮转发、两条写卡、两个 action 帧。"""
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "", "tool_calls": [{"name": "goto", "arguments": {"place": "厨房"}}]},
-        {"text": "做好了，我端过去。"},
-    ])
-    executor = FakeExecutor(results=[
-        {"ok": True, "status": "done", "note": "面煮好了"},
-        {"ok": True, "status": "done", "note": "走到厨房了"},
-    ])
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭端过来",
-                                         "mod": "mygame"})
-
-    assert len(executor.calls) == 2
-    assert kinds(res).count("action") == 2
-    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
-        "完成: 面煮好了", "完成: 走到厨房了"]
-
-
-def test_talk_tool_budget_exhausted_still_speaks(tmp_store, write_persona, make_app_client,
-                                                 make_provider):
-    """工具轮预算用满后仍有一次收尾轮：动作做了，台词不会缺席（不带工具，逼模型说话）。"""
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "", "tool_calls": [{"name": "goto", "arguments": {"place": "厨房"}}]},
-        {"text": "", "tool_calls": [{"name": "remember",
-                                     "arguments": {"content": "玩家要一碗面", "importance": 5}}]},
-        {"text": "都办好了，趁热吃。"},
-    ])
-    executor = FakeExecutor(results=[{"ok": True, "status": "done", "note": "面煮好了"},
-                                     {"ok": True, "status": "done", "note": "走到厨房了"}])
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭端过来",
-                                         "mod": "mygame"})
-
-    assert len(executor.calls) == 2                            # 两个动作都执行了
-    assert text_of(res) == "都办好了，趁热吃。"                  # 收尾轮一定有台词
-    assert provider.stream_calls[-1]["tools"] is None          # 收尾轮不给工具
-    assert kinds(res)[-1] == "done"
-
-
-def test_talk_closing_round_without_tools_forces_text(tmp_store, write_persona, make_app_client,
-                                                      make_provider):
-    """模型每轮都想调工具也拦不住最后一轮说话：收尾轮不给工具定义，只出文本。
-
-    回归：工具预算用满后如果直接结束循环，动作做了、台词一句没有（NPC 哑巴收场）。
-    """
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "", "tool_calls": [{"name": "goto", "arguments": {"place": "厨房"}}]},
-        {"text": "", "tool_calls": [{"name": "remember",
-                                     "arguments": {"content": "玩家要一碗面", "importance": 5}}]},
-        # 收尾轮：模型仍然"想"调工具（假 provider 不看 tools，照吐调用）——必须被忽略
-        {"text": "都办好了，趁热吃。", "tool_calls": [{"name": "cook", "arguments": {"dish": "汤"}}]},
-    ])
-    executor = FakeExecutor(results=[{"ok": True, "status": "done", "note": "面煮好了"},
-                                     {"ok": True, "status": "done", "note": "走到厨房了"}])
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭端过来",
-                                         "mod": "mygame"})
-
-    assert len(executor.calls) == 2                            # 收尾轮的工具调用不再执行
-    assert text_of(res) == "都办好了，趁热吃。"                  # 台词一定有（delta 帧）
-    assert "delta" in kinds(res)
-    last = provider.stream_calls[-1]
-    assert last["tools"] is None                               # 收尾轮不给工具定义
-    assert all(c["tools"] for c in provider.stream_calls[:-1])  # 前面的轮次照常给
-    assert kinds(res)[-1] == "done"
-
-
-def test_talk_bad_tool_arguments_goes_back_to_model(tmp_store, write_persona, make_app_client,
-                                                    make_provider):
-    """工具参数不是合法 JSON：不拿空参数去执行动作，而是回给模型让它重发。"""
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "raw_arguments": "{坏"}]},
-        {"text": "我再看看怎么做。"},
-    ])
-    executor = FakeExecutor()
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
-
-    assert executor.calls == []                                # 没执行任何动作
-    assert memory.load_card("cang", store_dir=tmp_store) == []  # 也没写卡
-    assert kinds(res).count("action") == 0
-    assert text_of(res) == "我再看看怎么做。"
-    tool_msg = provider.stream_calls[1]["messages"][-1]
-    assert tool_msg["role"] == "tool" and "合法 JSON" in tool_msg["content"]
-
-
 def test_talk_bad_args_on_memory_tool_keeps_missing_arg_error(tmp_store, write_persona,
                                                               make_app_client, make_provider):
     """记忆工具参数坏 JSON：行为不变 —— 照旧执行，落在自己的缺参提示上（不写卡）。"""
@@ -602,179 +248,9 @@ def test_talk_bad_args_on_memory_tool_keeps_missing_arg_error(tmp_store, write_p
     assert memory.load_card("cang", store_dir=tmp_store) == []
 
 
-def test_talk_mixed_memory_and_action_in_one_round(tmp_store, write_persona, make_app_client,
-                                                   make_provider):
-    """同一条 assistant 消息里混合记忆工具与动作工具：都执行，顺序按调用顺序。"""
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [
-            {"name": "remember", "arguments": {"content": "玩家爱吃面", "importance": 7}},
-            {"name": "cook", "arguments": {"dish": "面"}},
-        ]},
-        {"text": "记住了，也做好了。"},
-    ])
-    executor = FakeExecutor()
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "记住我爱吃面，做一碗",
-                                   "mod": "mygame"})
-
-    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
-        "玩家爱吃面", "完成: 面煮好了"]
-
-
-def test_talk_without_execute_url_gets_no_action_tools(tmp_store, write_persona,
-                                                       make_app_client, make_provider):
-    """没给执行接口 = 没有可执行的动作：动作不进工具定义（协议 §1）。"""
-    write_persona("cang")
-    provider = make_provider(turns=[{"text": "嗯。"}])
-    executor = FakeExecutor()
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json={"mod": "mygame", "actions": CAPS["actions"]})
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "做顿饭", "mod": "mygame"})
-
-    names = [t["function"]["name"] for t in provider.stream_calls[0]["tools"]]
-    assert names == ["remember", "recall"]
-    assert executor.calls == []
-
-
-def test_capabilities_execute_url_type_and_state(tmp_store, write_persona, make_app_client):
-    """execute_url 必须是字符串（非法 → 400）；报到后能在 /api/state 看到。"""
-    client = make_app_client()
-    assert client.post("/api/capabilities",
-                       json=dict(CAPS, execute_url=123)).status_code == 400
-
-    assert client.post("/api/capabilities", json=CAPS).status_code == 200
-    assert client.get("/api/state").json()["mods"]["mygame"]["execute_url"] == CAPS["execute_url"]
-
-
-def test_execute_timeout_env(monkeypatch):
-    """NPC_EXECUTE_TIMEOUT 现读、可热切；非法值回默认 30s。"""
-    import server
-
-    monkeypatch.delenv("NPC_EXECUTE_TIMEOUT", raising=False)
-    assert server.execute_timeout() == 30.0
-
-    monkeypatch.setenv("NPC_EXECUTE_TIMEOUT", "5")
-    assert server.execute_timeout() == 5.0
-
-    monkeypatch.setenv("NPC_EXECUTE_TIMEOUT", " 坏 ")
-    assert server.execute_timeout() == 30.0
-
-
-def test_registry_execute_url_semantics():
-    """执行接口地址：离线 / 没声明 → None；只有恰好一个在线 mod 时才兜底。"""
-    import server
-
-    reg = server.Registry(timeout=60.0)
-    reg.declare("mygame", [{"name": "cook", "desc": "做饭", "params": {}}],
-                execute_url="http://127.0.0.1:8766/execute")
-    assert reg.execute_url("mygame") == "http://127.0.0.1:8766/execute"
-    assert reg.execute_url(None) == "http://127.0.0.1:8766/execute"   # 只有一个在线 mod → 用它
-
-    reg.declare("other", [{"name": "x", "desc": "y", "params": {}}])  # 没给执行接口
-    assert reg.execute_url(None) is None                              # 两个在线 → 不猜
-    assert reg.execute_url("other") is None
-
-    offline = server.Registry(timeout=0.0)
-    offline.declare("mygame", [{"name": "cook", "desc": "做饭", "params": {}}],
-                    execute_url="http://127.0.0.1:8766/execute")
-    assert offline.execute_url("mygame") is None                       # 离线 → 不调动作
-
-
-def test_http_execute_real_roundtrip():
-    """默认执行器走一条真的本地 HTTP（零外网）：POST JSON → 解析 JSON 响应。"""
-    import threading
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-    import turn
-
-    seen = {}
-
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def log_message(self, *args):
-            pass
-
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length") or 0)
-            seen["payload"] = json.loads(self.rfile.read(length).decode("utf-8"))
-            body = json.dumps({"ok": True, "status": "done", "note": "面煮好了"},
-                              ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=httpd.serve_forever)
-    thread.daemon = True
-    thread.start()
-    try:
-        url = "http://127.0.0.1:%d/execute" % httpd.server_address[1]
-        result = asyncio.run(turn._http_execute(url, {
-            "npc_id": "cang", "action": "cook", "params": {"dish": "面"}, "mod": "mygame"}, 5.0))
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-        thread.join(timeout=2)
-
-    assert result == {"ok": True, "status": "done", "note": "面煮好了"}
-    assert seen["payload"]["action"] == "cook"
-
-
-def test_talk_tool_definitions_follow_whitelist(tmp_store, write_persona, make_app_client,
-                                                make_provider):
-    write_persona("cang")
-    provider = make_provider(turns=[{"text": "嗯。"}])
-    client = make_app_client(provider=provider)
-    client.post("/api/capabilities", json=CAPS)
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "在吗", "mod": "mygame"})
-
-    names = [t["function"]["name"] for t in provider.stream_calls[0]["tools"]]
-    assert names == ["remember", "recall", "cook", "goto", "chat"]
-
-
-def test_talk_offline_mod_gets_no_action_tools(tmp_store, write_persona, make_app_client,
-                                               make_provider):
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "嗯，我记下了。"},
-    ])
-    client = make_app_client(provider=provider, heartbeat_timeout_override=0.0)
-    client.post("/api/capabilities", json=CAPS)
-
-    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
-
-    names = [t["function"]["name"] for t in provider.stream_calls[0]["tools"]]
-    assert names == ["remember", "recall"]                         # mod 离线 → 不给动作工具
-    assert "action" not in kinds(res)
-
-
-def test_talk_heartbeat_kept_alive_by_request(tmp_store, write_persona, make_app_client,
-                                              make_provider):
-    write_persona("cang")
-    provider = make_provider(turns=[{"text": "嗯。"}])
-    client = make_app_client(provider=provider)
-    client.post("/api/capabilities", json=CAPS)
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "在吗", "mod": "mygame"})
-
-    names = [t["function"]["name"] for t in provider.stream_calls[0]["tools"]]
-    assert "cook" in names                                         # 请求里捎带 mod 即刷新心跳，视为活着
-
-
 # ── /api/talk：LLM 不可用降级（回退角色卡规则回复）────────
 
 def test_talk_falls_back_to_persona_rules(tmp_store, write_persona, make_app_client):
-    from conftest import BoomProvider
-
     write_persona("cang")
     client = make_app_client(provider=BoomProvider())
 
@@ -785,10 +261,7 @@ def test_talk_falls_back_to_persona_rules(tmp_store, write_persona, make_app_cli
     assert text_of(res) == "别追跑得快的。"          # 命中角色卡 rules.replies 的关键词
     assert "action" not in kinds(res)
 
-
 def test_talk_fallback_uses_default_when_no_keyword(tmp_store, write_persona, make_app_client):
-    from conftest import BoomProvider
-
     write_persona("cang")
     client = make_app_client(provider=BoomProvider())
 
@@ -797,243 +270,7 @@ def test_talk_fallback_uses_default_when_no_keyword(tmp_store, write_persona, ma
     assert text_of(res) == "嗯，火塘边坐着说。"
 
 
-# ── /api/action_result（游戏回报 → 写记忆卡）──────────────
-
-def test_action_result_writes_memory(tmp_store, write_persona, make_app_client):
-    write_persona("cang")
-    client = make_app_client()
-
-    res = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "note": "面煮好了，玩家吃了说不错"})
-
-    assert res.status_code == 200
-    assert res.json()["ok"] is True
-    assert memory.load_card("cang", store_dir=tmp_store)[0]["content"] == \
-        "完成: 面煮好了，玩家吃了说不错"
-
-
-def test_action_result_failure_wording(tmp_store, write_persona, make_app_client):
-    write_persona("cang")
-    client = make_app_client()
-
-    client.post("/api/action_result", json={"npc_id": "cang", "action": "goto", "ok": False})
-
-    assert memory.load_card("cang", store_dir=tmp_store)[0]["content"] == "没做成: goto"
-
-
-def test_action_result_unknown_call_id_is_not_recorded(tmp_store, write_persona, make_app_client):
-    """未知 / 重复 / 已过期的 call_id：不写卡（同一次动作不能写两遍），仍返回 200。"""
-    write_persona("cang")
-    client = make_app_client()
-
-    res = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "note": "面好了",
-        "call_id": "查无此id"})
-
-    assert res.status_code == 200
-    assert res.json()["matched"] is False and res.json()["entry"] is None
-    assert memory.load_card("cang", store_dir=tmp_store) == []
-
-
-def test_action_result_bad_call_id_type_400(tmp_store, write_persona, make_app_client):
-    write_persona("cang")
-    client = make_app_client()
-    res = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "call_id": 42})
-    assert res.status_code == 400
-
-
-def test_action_result_legacy_without_call_id_records_and_clears_pending_fifo(
-        tmp_store, write_persona, make_app_client, make_provider):
-    """旧 mod（回报不带 call_id）：照旧写卡，并按 FIFO 销掉**最早**那条登记（旧回报不能丢）。"""
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "行。"},
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "汤"}}]},
-        {"text": "行。"},
-    ])
-    executor = FakeExecutor(result={"ok": False, "status": "running", "note": ""})
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    for message in ("做点面", "再弄碗汤"):
-        client.post("/api/talk", json={"npc_id": "cang", "message": message, "mod": "mygame"})
-
-    pending = client.app.state.pending
-    assert len(pending) == 2
-
-    res = client.post("/api/action_result", json={"npc_id": "cang", "action": "cook", "ok": True})
-
-    assert res.json()["matched"] is True                       # 命中登记 → matched=true
-    assert res.json()["entry"]["content"] == "完成: cook（dish=面）"   # FIFO：销掉最早那条
-    assert len(pending) == 1
-
-    client.post("/api/action_result", json={"npc_id": "cang", "action": "cook", "ok": False})
-
-    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
-        "完成: cook（dish=面）", "没做成: cook（dish=汤）"]
-    assert len(pending) == 0
-
-
-def test_action_result_call_id_match_does_not_mix_same_action(tmp_store, write_persona,
-                                                             make_app_client, make_provider):
-    """同一 NPC 连开两个同名动作：按 call_id 精确销账，互不串（不走 FIFO）。"""
-    write_persona("cang")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "行。"},
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "汤"}}]},
-        {"text": "行。"},
-    ])
-    executor = FakeExecutor(result={"ok": False, "status": "running", "note": ""})
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    for message in ("做点面", "再弄碗汤"):
-        client.post("/api/talk", json={"npc_id": "cang", "message": message, "mod": "mygame"})
-
-    pending = client.app.state.pending
-    first_id = executor.calls[0]["payload"]["call_id"]
-    second_id = executor.calls[1]["payload"]["call_id"]
-    assert len(pending) == 2 and first_id != second_id
-
-    # 先回报**后**开的那条：拿到的必须是它自己的参数（dish=汤），不是最早那条
-    res = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "call_id": second_id})
-    assert res.json()["entry"]["content"] == "完成: cook（dish=汤）"
-    assert len(pending) == 1
-
-    res = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "call_id": first_id})
-    assert res.json()["entry"]["content"] == "完成: cook（dish=面）"
-    assert len(pending) == 0
-
-
-def test_pending_ttl_expiry_writes_failure_memory(tmp_store, write_persona, make_app_client,
-                                                  make_provider, monkeypatch):
-    """TTL 到点还没回报 → 写一条失败记忆；此后迟到的回报不再写卡（协议 §4）。"""
-    write_persona("cang")
-    monkeypatch.setenv("NPC_PENDING_TTL", "0")
-    provider = make_provider(turns=[
-        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
-        {"text": "再等等。"},
-        {"text": "嗯。"},
-    ])
-    executor = FakeExecutor(result={"ok": False, "status": "running", "note": ""})
-    client = make_app_client(provider=provider, executor=executor)
-    client.post("/api/capabilities", json=CAPS)
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
-    call_id = executor.calls[0]["payload"]["call_id"]
-    assert len(client.app.state.pending) == 1
-    assert memory.load_card("cang", store_dir=tmp_store) == []
-
-    client.post("/api/talk", json={"npc_id": "cang", "message": "好了没"})   # 下一轮开头顺手 expire
-
-    assert len(client.app.state.pending) == 0
-    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
-        "没做成: 一直没等到结果"]
-
-    late = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "note": "其实做成了",
-        "call_id": call_id})
-
-    assert late.json()["matched"] is False                     # 过期了：迟到的回报不写卡
-    assert len(memory.load_card("cang", store_dir=tmp_store)) == 1
-
-
-def test_pending_ttl_env(monkeypatch):
-    """NPC_PENDING_TTL 现读、可热切；非法值回默认 120s。"""
-    import pending
-
-    monkeypatch.delenv("NPC_PENDING_TTL", raising=False)
-    assert pending.pending_ttl() == 120.0
-
-    monkeypatch.setenv("NPC_PENDING_TTL", "5")
-    assert pending.pending_ttl() == 5.0
-
-    monkeypatch.setenv("NPC_PENDING_TTL", " 坏 ")
-    assert pending.pending_ttl() == 120.0
-
-
-def test_action_result_with_mod_refreshes_heartbeat(tmp_store, write_persona, make_app_client):
-    """回报结果时捎带 mod 也算一次心跳（协议 §1 / 简报 §3）。
-
-    场景：mod 执行长动作（>60s 没说话）后回报 —— 不该被判离线，否则大脑不再调动作。
-    口径：只刷新**已报到过**的 mod；不带 mod 不猜是哪一个，心跳不动。
-    """
-    write_persona("cang")
-    client = make_app_client()
-    client.post("/api/capabilities", json=CAPS)
-    registry = client.app.state.registry
-
-    def online():
-        return client.get("/api/state").json()["mods"]["mygame"]["online"]
-
-    registry._mods["mygame"]["last_seen"] = 0.0            # 伪造成很久以前的心跳 = 已离线
-    assert online() is False
-
-    res = client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "note": "面好了", "mod": "mygame"})
-
-    assert res.status_code == 200
-    assert online() is True                               # 回报捎带 mod → 心跳刷新、重新在线
-
-    registry._mods["mygame"]["last_seen"] = 0.0
-    client.post("/api/action_result", json={
-        "npc_id": "cang", "action": "cook", "ok": True, "note": "面好了"})   # 不带 mod
-
-    assert online() is False                              # 不带 mod 不刷新（不猜是哪个 mod）
-
-
-@pytest.mark.parametrize("bad", [
-    {},
-    {"npc_id": "cang"},
-    {"npc_id": "cang", "action": "cook"},
-    {"npc_id": "cang", "action": "cook", "ok": "true"},
-    {"npc_id": "cang", "action": "cook", "ok": True, "note": 5},
-])
-def test_action_result_invalid_400(tmp_store, write_persona, make_app_client, bad):
-    write_persona("cang")
-    client = make_app_client()
-    assert client.post("/api/action_result", json=bad).status_code == 400
-
-
-# ── 状态查询（/api/state、/api/npcs）─────────────────────
-
-def test_state_endpoint(tmp_store, write_persona, make_app_client):
-    write_persona("cang")
-    client = make_app_client()
-    client.post("/api/capabilities", json=CAPS)
-
-    state = client.get("/api/state").json()
-
-    assert state["model"] == "fake-model"
-    assert state["store_dir"] == str(tmp_store)
-    assert state["npcs"] == 1
-    assert state["mods"]["mygame"]["online"] is True
-    assert state["heartbeat_timeout_s"] == 60.0
-
-
-def test_npcs_endpoint(tmp_store, write_persona, make_app_client, make_provider):
-    write_persona("cang")
-    write_persona("ali", name="阿黎")
-    memory.add_entry("cang", "一条记忆", store_dir=tmp_store)
-    client = make_app_client(provider=make_provider(turns=[{"text": "嗯。"}]))
-    client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"})
-
-    data = client.get("/api/npcs").json()["npcs"]
-
-    by_id = {n["npc_id"]: n for n in data}
-    assert set(by_id) == {"cang", "ali"}
-    assert by_id["cang"]["memory_entries"] == 1
-    assert by_id["cang"]["chat_messages"] == 2
-    assert by_id["cang"]["last_activity"] > 0
-    assert by_id["ali"]["chat_messages"] == 0
-
-
-# ── 工具与提示词单元行为 ─────────────────────────────────
+# ── 提示词 / 规则回复 / 思考档位（单元）──────────────────
 
 def test_build_system_prompt_includes_persona_fields():
     from core.personas import build_system_prompt
@@ -1049,7 +286,6 @@ def test_build_system_prompt_includes_persona_fields():
     assert "玩家在厨房" in prompt
     assert "recall" in prompt                     # 接地：涉及往事先 recall，按逐字结果回答
     assert "不知道" in prompt                     # 接地：查不到就说不知道，绝不编造
-
 
 def test_system_prompt_matches_new_execution_model():
     """执行模型只有一种：LLM 调用工具执行（动作 = 工具调用）。
@@ -1067,7 +303,6 @@ def test_system_prompt_matches_new_execution_model():
     assert "我去煮饭" in prompt          # 台词：自然语言表达动作
     assert "提议" not in prompt
 
-
 def test_reasoning_effort_env(monkeypatch):
     import server
 
@@ -1080,67 +315,8 @@ def test_reasoning_effort_env(monkeypatch):
     monkeypatch.setenv("NPC_REASONING_EFFORT", "off")
     assert server.reasoning_effort() == "off"
 
-
-# ── 事件循环不被同步 IO 堵住（回合里的阻塞调用走线程池）─────
-
-def test_summary_llm_does_not_block_event_loop(tmp_store, paths, write_persona, monkeypatch):
-    """滚动摘要里的同步 LLM 请求必须走线程池。
-
-    回归：build_history 以前在 SSE 生成器里直接调同步 llm.chat —— 摘要一变慢
-    （几秒到几十秒），整个事件循环就被卡住，别的 NPC / 控制台全部无响应。
-    """
-    import asyncio
-    import time
-
-    import httpx
-
-    import chatlog
-    import server
-    from core.client import LLMClient, LLMResponse
-    from core.types import StreamChunk
-
-    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")
-    monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.01")        # 阈值 = 10：提示必越线
-    monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "0")
-    monkeypatch.setenv("NPC_BUDGET_HISTORY", "100000")
-    write_persona("cang")
-    chatlog.append_turn("cang", "你好世界", "嗯", store_dir=tmp_store)   # 制造可压的旧轮次 + 提示越线 → 必触发摘要
-
-    class SlowSummaryProvider:
-        """stream 立刻回台词；chat（摘要走这条）故意慢，模拟真实 LLM 延迟。"""
-        model_name = "slow-fake"
-        delay = 0.4
-
-        def chat(self, messages, **kwargs):
-            time.sleep(self.delay)
-            return LLMResponse(content="（前情摘要）", tool_calls=[],
-                               finish_reason="stop", model=self.model_name, usage=None)
-
-        async def stream(self, messages, **kwargs):
-            yield StreamChunk(content="在的。", model=self.model_name)
-            yield StreamChunk(finish_reason="stop", model=self.model_name)
-
-    app = server.create_app(llm_client=LLMClient(provider=SlowSummaryProvider()),
-                            paths=paths)
-
-    async def main() -> float:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            started = time.perf_counter()
-            talk = asyncio.create_task(
-                ac.post("/api/talk", json={"npc_id": "cang", "message": "在吗"}))
-            await asyncio.sleep(0.1)          # 循环若被摘要堵住，这一觉会被一起拖长
-            drift = time.perf_counter() - started - 0.1
-            assert (await talk).status_code == 200
-        return drift
-
-    drift = asyncio.run(main())
-
-    assert drift < 0.2, f"事件循环被同步摘要堵住了 {drift:.2f}s"
-
-    monkeypatch.setenv("NPC_REASONING_EFFORT", " high ")
+    monkeypatch.setenv("NPC_REASONING_EFFORT", " high ")   # 空白剥掉
     assert server.reasoning_effort() == "high"
-
 
 def test_reasoning_effort_reaches_provider(tmp_store, write_persona, make_app_client,
                                           make_provider, monkeypatch):
@@ -1158,7 +334,6 @@ def test_reasoning_effort_reaches_provider(tmp_store, write_persona, make_app_cl
     assert provider.stream_calls[1]["reasoning_effort"] == "off"   # 现读环境变量，可热切
     assert client.get("/api/state").json()["reasoning_effort"] == "off"
 
-
 def test_rule_reply_keyword_and_fallback():
     from core.personas import rule_reply
 
@@ -1166,83 +341,3 @@ def test_rule_reply_keyword_and_fallback():
     assert rule_reply(persona, "柴火怎么选") == "挑干透的。"
     assert rule_reply(persona, "你好") == "嗯。"
     assert rule_reply({}, "你好") == "……"
-
-
-def test_tool_call_buffer_reassembles_split_chunks():
-    import turn
-
-    buf = turn._ToolCallBuffer()
-    buf.feed({"index": 0, "id": "call_1", "function_name": "co", "function_arguments": None})
-    buf.feed({"index": 0, "id": None, "function_name": "ok", "function_arguments": '{"dish"'})
-    buf.feed({"index": 0, "id": None, "function_name": None, "function_arguments": ': "面"}'})
-
-    call = buf.finalize(0)
-    assert call == {"id": "call_1", "name": "cook", "args": {"dish": "面"}}
-
-
-def test_tool_call_buffer_tolerates_bad_json():
-    import turn
-
-    buf = turn._ToolCallBuffer()
-    buf.feed({"index": 0, "function_name": "cook", "function_arguments": "{坏"})
-    call = buf.finalize(0)
-    assert call["args"] == {}
-    assert call["bad_args"] is True                            # 标记出来，执行前要回给模型重发
-    assert buf.bad_args is True                                # 兼容旧口径：缓冲器上也留一份
-    assert call["name"] == "cook" and call["id"]               # 不抛异常，照样给出调用形态
-
-    # 合法 JSON 但不是对象（数组 / 字符串）同样按坏参数处理
-    buf2 = turn._ToolCallBuffer()
-    buf2.feed({"index": 0, "function_name": "cook", "function_arguments": "[1, 2]"})
-    assert buf2.finalize(0)["bad_args"] is True
-
-
-def test_build_default_client_follows_user_config(tmp_store, monkeypatch):
-    """三件套由用户自配：缺模型名/端点 → None（不偷偷用默认厂商）；配齐 → 用配置的那套。"""
-    import server
-    from core import config
-
-    monkeypatch.setattr(config, "api_key", lambda: "sk-test")
-    monkeypatch.delenv("AGENT_MODEL", raising=False)
-    monkeypatch.delenv("NPC_MODEL", raising=False)
-    monkeypatch.delenv("NPC_BASE_URL", raising=False)
-    assert server.build_default_client(store_dir=tmp_store) is None
-
-    monkeypatch.setenv("AGENT_MODEL", "qwen-plus")
-    monkeypatch.setenv("NPC_BASE_URL", "https://dashscope.example/v1")
-    client = server.build_default_client(store_dir=tmp_store)
-    assert client.model == "qwen-plus"
-    assert client.provider.base_url == "https://dashscope.example/v1"
-
-    # 换模型名不改端点：显式配的端点永远优先，不被厂商推断覆盖
-    monkeypatch.setenv("AGENT_MODEL", "deepseek-v4-pro")
-    assert server.build_default_client(
-        store_dir=tmp_store).provider.base_url == "https://dashscope.example/v1"
-
-
-def test_build_default_client_without_key(tmp_store, monkeypatch):
-    import server
-    from core import config
-
-    monkeypatch.setattr(config, "api_key", lambda: "")
-    assert server.build_default_client(store_dir=tmp_store) is None
-
-
-def test_registry_actions_empty_when_offline():
-    import server
-
-    reg = server.Registry(timeout=0.0)
-    reg.declare("mygame", [{"name": "cook", "desc": "做饭", "params": {}}])
-    assert reg.actions("mygame") == []
-    assert reg.actions(None) == []
-
-    reg2 = server.Registry(timeout=60.0)
-    reg2.declare("mygame", [{"name": "cook", "desc": "做饭", "params": {}}])
-    assert reg2.actions("mygame")[0]["name"] == "cook"
-    assert reg2.actions(None)[0]["name"] == "cook"          # 只有一个在线 mod → 用它
-
-
-def test_tools_module_whitelist_matches_server():
-    """server 用 tools 的白名单判定动作，不另立一套。"""
-    assert tools.is_action_tool("cook", CAPS["actions"]) is True
-    assert tools.is_action_tool("dance", CAPS["actions"]) is False

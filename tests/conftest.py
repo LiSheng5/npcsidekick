@@ -1,10 +1,13 @@
-"""pytest 共享夹具。
+"""pytest 共享夹具与共享测试工具。
 
 - 把工程根插入 sys.path，使 `import core.*` / `import memory` 等可用
-- 所有测试零网络：LLM 一律用 FakeProvider 注入
+- 所有测试零外网、允许回环：LLM 一律用 FakeProvider 注入；
+  少数测试会起本地回环 HTTP 服务器（见 test_server 的真实往返用例）
+- 共享常量 / SSE 解析助手 / FakeExecutor 统一放这里 —— 测试模块之间不要互相 import
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -134,6 +137,62 @@ class BoomProvider(FakeProvider):
     async def stream(self, *a, **kw):
         raise RuntimeError("boom")
         yield  # pragma: no cover
+
+
+# ── 共享常量 / SSE 助手 / 假执行器（所有测试模块共用，别再各自复制）──
+
+# mod 报上来的动作声明（cook / goto / chat）与标准 capabilities 载荷
+ACTIONS: List[Dict[str, Any]] = [
+    {"name": "cook", "desc": "用厨房做饭", "params": {"dish": "菜名(字符串)"}},
+    {"name": "goto", "desc": "走到某地", "params": {"place": "地点名(字符串)"}},
+    {"name": "chat", "desc": "主动找某人说话",
+     "params": {"target": "对象名", "topic": "话题"}},
+]
+CAPS: Dict[str, Any] = {
+    "mod": "mygame",
+    "execute_url": "http://127.0.0.1:8766/execute",
+    "actions": list(ACTIONS),
+}
+
+
+def frames(response) -> list:
+    """把 SSE 响应体拆成帧列表。"""
+    out = []
+    for line in response.text.splitlines():
+        if line.startswith("data: "):
+            out.append(json.loads(line[len("data: "):]))
+    return out
+
+
+def kinds(response) -> list:
+    """SSE 帧的 type 序列。"""
+    return [f["type"] for f in frames(response)]
+
+
+def text_of(response) -> str:
+    """SSE 帧里 delta 台词的拼接。"""
+    return "".join(f.get("text", "") for f in frames(response) if f["type"] == "delta")
+
+
+class FakeExecutor:
+    """假执行器：记录每次调用，按脚本返回（results 队列优先）或抛异常。"""
+
+    def __init__(self, result=None, results=None, error=None, delay=0.0):
+        self.calls = []
+        self.results = list(results) if results else None
+        self.result = result or {"ok": True, "status": "done", "note": "面煮好了"}
+        self.error = error
+        self.delay = delay
+
+    async def __call__(self, url, payload, timeout):
+        self.calls.append({"url": url, "payload": payload, "timeout": timeout})
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        if self.results:
+            return self.results.pop(0)
+        return dict(self.result)
 
 
 # ── 夹具 ─────────────────────────────────────────────────

@@ -175,7 +175,6 @@ def _as_importance(raw: Any) -> int:
 def _result(name: str, status: ToolResultStatus, data: Any = None,
             error: Optional[str] = None, started: float = 0.0) -> ToolResult:
     return ToolResult(
-        call_id="",
         tool=name,
         status=status,
         data=data,

@@ -8,10 +8,7 @@ import pytest
 import chatlog
 import memory
 import server
-
-
-CAPS = {"mod": "mygame", "actions": [
-    {"name": "cook", "desc": "用厨房做饭", "params": {"dish": "菜名(字符串)"}}]}
+from conftest import CAPS
 
 
 # ── 静态挂载 ─────────────────────────────────────────────
@@ -95,6 +92,21 @@ def test_delete_persona_keeps_memory_and_chat(tmp_store, persona_dir, write_pers
     assert kept["store_dir"]
 
     assert client.delete("/api/personas/cang").status_code == 404
+
+
+def test_delete_persona_tolerates_broken_memory_card(tmp_store, persona_dir, write_persona,
+                                                     make_app_client):
+    """坏记忆卡不许拖挂删卡 —— 数字点不清就置空（前端显示 '?'），删除照常。"""
+    write_persona("cang")
+    (tmp_store / "cang_memory.json").write_text("{坏掉的卡", encoding="utf-8")
+    client = make_app_client()
+
+    res = client.delete("/api/personas/cang")
+
+    assert res.status_code == 200 and res.json()["ok"] is True
+    kept = res.json()["kept"]
+    assert kept["memory_entries"] is None
+    assert kept["chat_messages"] == 0
 
 
 def test_delete_persona_rejects_template_and_traversal(tmp_store, persona_dir, write_persona,

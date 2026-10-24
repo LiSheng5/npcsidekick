@@ -1,4 +1,4 @@
-"""turn.py 的回合 trace（turn_trace）测试 —— 任务 1。
+"""turn.py 的回合 trace（turn_trace）测试。
 
 每回合结束输出一条结构化日志 turn_trace（含降级回合）；NPC_TRACE_FILE 非空时
 同一条记录以 JSONL 追加写入该文件。测试用 JSONL 落盘通道断言记录内容。
@@ -8,8 +8,7 @@ from __future__ import annotations
 import json
 
 import chatlog
-from conftest import BoomProvider
-from test_server import CAPS, FakeExecutor, frames, kinds, text_of
+from conftest import CAPS, BoomProvider, FakeExecutor, frames, kinds, text_of
 
 
 def read_traces(path) -> list[dict]:
@@ -17,6 +16,7 @@ def read_traces(path) -> list[dict]:
     return [json.loads(line) for line in path.read_text("utf-8").splitlines() if line.strip()]
 
 
+# turn_trace 必须携带的关键字段（超集口径：允许以后加新观测字段，不许挪走这些）
 TRACE_KEYS = {"npc_id", "rounds", "llm_fallback", "summarized", "no_dialogue",
               "tools", "tokens", "summary_trigger", "memory_prefetch",
               "first_token_ms", "total_ms", "message_len", "reply_len"}
@@ -46,7 +46,7 @@ def test_turn_trace_two_tool_calls_records_rounds_and_tools(tmp_store, write_per
     traces = read_traces(trace_file)
     assert len(traces) == 1                       # 一条回合一条 trace
     trace = traces[0]
-    assert set(trace) == TRACE_KEYS
+    assert TRACE_KEYS <= set(trace)          # 超集断言：加字段不红，挪字段才红
     assert trace["npc_id"] == "cang"
     assert trace["rounds"] == 2                   # 一轮工具 + 一轮收尾台词
     assert len(provider.stream_calls) == 2
@@ -91,7 +91,7 @@ def test_turn_trace_fallback_turn_has_llm_fallback(tmp_store, write_persona,
     traces = read_traces(trace_file)
     assert len(traces) == 1
     trace = traces[0]
-    assert set(trace) == TRACE_KEYS
+    assert TRACE_KEYS <= set(trace)          # 超集断言：加字段不红，挪字段才红
     assert trace["llm_fallback"] is True
     assert trace["tools"] == []
     assert trace["rounds"] >= 1
@@ -147,7 +147,7 @@ def test_turn_trace_no_dialogue_flag(tmp_store, write_persona, make_app_client,
 
 def test_turn_trace_summarized_flag(tmp_store, write_persona, make_app_client,
                                     make_provider, monkeypatch, tmp_path):
-    """触发摘要的回合：summarized=true（任务 6 后 = 本回合启动了后台摘要）。
+    """触发摘要的回合：summarized=true（本回合启动了后台摘要）。
 
     摘要已移出关键路径：回合的 stream 先跑（台词「嗯。」），摘要的 llm.chat
     在回合结束后台才跑（回「摘要内容」）—— 假 Provider 的 turns 顺序按此排列。

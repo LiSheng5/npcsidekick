@@ -7,14 +7,7 @@ from core.schema import ToolResultStatus
 
 import memory
 import tools
-
-
-# mod 报上来的三个动作声明（cook / goto / chat）
-CAPS = [
-    {"name": "cook", "desc": "用厨房做饭", "params": {"dish": "菜名(字符串)"}},
-    {"name": "goto", "desc": "走到某地", "params": {"place": "地点名(字符串)"}},
-    {"name": "chat", "desc": "主动找某人说话", "params": {"target": "对象名", "topic": "话题"}},
-]
+from conftest import ACTIONS
 
 
 def _defs_by_name(defs):
@@ -39,7 +32,7 @@ def test_memory_tool_schemas():
 
 
 def test_action_tool_schema_from_declaration():
-    schema = tools.action_tool_schema(CAPS[0])
+    schema = tools.action_tool_schema(ACTIONS[0])
     assert schema.name == "cook" and schema.description == "用厨房做饭"
     fn = schema.to_openai_function()["function"]
     assert fn["parameters"]["properties"]["dish"] == {
@@ -53,18 +46,18 @@ def test_action_without_params():
 
 
 def test_build_tool_definitions_includes_declared_actions():
-    defs = _defs_by_name(tools.build_tool_definitions(CAPS))
+    defs = _defs_by_name(tools.build_tool_definitions(ACTIONS))
     assert set(defs) == {"remember", "recall", "cook", "goto", "chat"}
     assert defs["chat"]["function"]["parameters"]["required"] == ["target", "topic"]
 
 
 def test_whitelist_red_line():
     """未声明的动作不可能出现在工具定义里（白名单是唯一闸门）。"""
-    defs = _defs_by_name(tools.build_tool_definitions([CAPS[0]]))
+    defs = _defs_by_name(tools.build_tool_definitions([ACTIONS[0]]))
     assert "cook" in defs
     assert "goto" not in defs and "chat" not in defs
-    assert not tools.is_action_tool("goto", [CAPS[0]])
-    assert tools.is_action_tool("cook", CAPS)
+    assert not tools.is_action_tool("goto", [ACTIONS[0]])
+    assert tools.is_action_tool("cook", ACTIONS)
 
 
 def test_offline_mod_gets_memory_tools_only():
@@ -157,7 +150,7 @@ def test_run_recall_passes_synonyms(tmp_store):
 
 def test_action_tool_is_not_executed(tmp_store):
     """动作工具不在 tools 里执行 —— 由 server 转发 mod 的 /execute（协议 §3）。"""
-    res = tools.run_tool("cook", {"dish": "面"}, "cang", capabilities=CAPS,
+    res = tools.run_tool("cook", {"dish": "面"}, "cang", capabilities=ACTIONS,
                          store_dir=tmp_store)
 
     assert res.status == ToolResultStatus.REJECTED
@@ -165,14 +158,14 @@ def test_action_tool_is_not_executed(tmp_store):
 
 
 def test_unknown_tool_is_error_not_raise(tmp_store):
-    res = tools.run_tool("乱来的工具", {}, "cang", capabilities=CAPS,
+    res = tools.run_tool("乱来的工具", {}, "cang", capabilities=ACTIONS,
                          store_dir=tmp_store)
     assert res.status == ToolResultStatus.ERROR
     assert "未知工具" in res.error
 
 
 def test_undeclared_action_name_is_unknown(tmp_store):
-    res = tools.run_tool("goto", {"place": "河边"}, "cang", capabilities=[CAPS[0]],
+    res = tools.run_tool("goto", {"place": "河边"}, "cang", capabilities=[ACTIONS[0]],
                          store_dir=tmp_store)
     assert res.status == ToolResultStatus.ERROR
 

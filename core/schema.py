@@ -21,9 +21,9 @@ class ToolResultStatus(str, Enum):
 
 @dataclass
 class ToolResult:
-    """统一工具结果格式。"""
+    """统一工具结果格式（不携带 call_id —— 回传给 LLM 的 tool_call_id 用的是
+    模型自己给的那次调用的 id，由调用方 turn.py 直接取，与本结果对象无关）。"""
 
-    call_id: str
     tool: str
     status: ToolResultStatus
     data: Any = None

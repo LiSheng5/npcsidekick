@@ -1,4 +1,4 @@
-"""摘要移出关键路径（任务 6）测试 —— 回合结束后台触发 maybe_summarize。
+"""摘要移出关键路径测试 —— 回合结束后台触发 maybe_summarize。
 
 要点：
   · build_history 不再同步跑摘要 LLM（turn.py 传 summarize=False）——
@@ -15,22 +15,15 @@ import json
 import threading
 import time
 
-import pytest
-
 import chatlog
 import turn
 from core.client import LLMClient, LLMResponse
 from core.types import StreamChunk
 
 
-@pytest.fixture(autouse=True)
-def _clean_summary_state():
-    """清掉后台摘要的模块级状态，避免测试间互相污染。"""
-    turn._SUMMARIZING.clear()
-    turn._SUMMARY_TASKS.clear()
-    yield
-    turn._SUMMARIZING.clear()
-    turn._SUMMARY_TASKS.clear()
+def fresh_scheduler() -> turn.SummaryScheduler:
+    """每个用例自己的摘要调度账本（可注入对象，不再清模块级全局）。"""
+    return turn.SummaryScheduler()
 
 
 class SummaryProvider:
@@ -82,14 +75,19 @@ def _parse(frame: str) -> dict:
     return json.loads(frame.split("data: ", 1)[1].strip())
 
 
-async def _run_turn(llm, message: str, store_dir, npc_id: str = "shu"):
-    """跑完一回合 → (帧列表, 首个 delta 到达时摘要 chat 是否已跑完)。"""
+async def _run_turn(llm, message: str, store_dir, npc_id: str = "shu",
+                    scheduler: "turn.SummaryScheduler | None" = None):
+    """跑完一回合 → (帧列表, 首个 delta 到达时摘要 chat 是否已跑完)。
+
+    scheduler 显式注入一份独立的（默认模块实例是共享全局，测试间会串）。
+    """
     frames = []
     chat_done_at_first_delta = None
     async for raw in turn.stream_turn(llm=LLMClient(provider=llm), npc_id=npc_id,
                                       message=message, persona=_persona(),
                                       lock=asyncio.Lock(), store_dir=store_dir,
-                                      execute_timeout=lambda: 5.0):
+                                      execute_timeout=lambda: 5.0,
+                                      summary_scheduler=scheduler or turn.SummaryScheduler()):
         frames.append(_parse(raw))
         if chat_done_at_first_delta is None and frames[-1]["type"] == "delta":
             chat_done_at_first_delta = llm.chat_done
@@ -168,11 +166,12 @@ def test_no_concurrent_summaries_for_same_npc(tmp_store, monkeypatch):
     _ratio_env(monkeypatch)
     _over_threshold_chatlog("shu", tmp_store)
     provider = SummaryProvider(summary_text="前情摘要", block=True)
+    scheduler = fresh_scheduler()          # 两个回合共用一份账本才会"看到彼此"
 
     async def main():
-        for _ in range(2):                        # 连续两回合，都满足摘要条件
-            await _run_turn(provider, "在吗", tmp_store)
-        provider.release.set()                    # 放行第一回合启动的那次摘要
+        for _ in range(2):                # 连续两回合，都满足摘要条件
+            await _run_turn(provider, "在吗", tmp_store, scheduler=scheduler)
+        provider.release.set()            # 放行第一回合启动的那次摘要
         return await _wait_for(
             lambda: chatlog.summary_path("shu", store_dir=tmp_store).exists())
 

@@ -21,7 +21,7 @@ import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
 
 from core.config_flags import env_text
-from core.types import StreamChunk
+from core.types import LLMResponse, StreamChunk   # LLMResponse 的家在 types.py，这里 re-export
 from core.logging_config import log
 from core import config
 
@@ -147,7 +147,8 @@ class LLMClient:
           temperature: 覆盖默认温度
           max_tokens: 覆盖默认 max_tokens
           response_format: {"type": "json_object"} 强制 JSON 输出
-          reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")
+          reasoning_effort: 思考档位（None = 不指定；"off"/"disabled"/"none" = 显式关闭；
+            "minimal"/"low"/"medium"/"high"/"xhigh"/"max" = 开启，按端点方言归一）
         """
         return _chat_with_retry(self._provider, dict(
             messages=messages,
@@ -197,7 +198,8 @@ class LLMClient:
           tool_choice: "auto" | "none" | "required"
           temperature: 覆盖默认温度
           max_tokens: 覆盖默认 max_tokens
-          reasoning_effort: 推理力度 (None | "low" | "medium" | "high" | "max")
+          reasoning_effort: 思考档位（None = 不指定；"off"/"disabled"/"none" = 显式关闭；
+            "minimal"/"low"/"medium"/"high"/"xhigh"/"max" = 开启，按端点方言归一）
         """
         kwargs = dict(
             messages=messages,
@@ -241,37 +243,3 @@ class LLMClient:
     def replays_reasoning_content(self) -> bool:
         """当前 Provider 是否要求回传 reasoning_content（DeepSeek 带 tools 时强制）。"""
         return bool(getattr(self._provider, "replays_reasoning_content", False))
-
-
-class LLMResponse:
-    """
-    LLM 响应封装。
-
-    属性:
-      content: 文本内容
-      tool_calls: OpenAI tool_call 对象列表
-      finish_reason: "stop" | "tool_calls" | "length"
-      model: 使用的模型名
-      usage: token 用量统计
-    """
-
-    def __init__(self, content: str, tool_calls: List, finish_reason: str,
-                 model: str, usage: Any, reasoning: str = ""):
-        self.content = content
-        self.tool_calls = tool_calls
-        self.finish_reason = finish_reason
-        self.model = model
-        self.usage = usage
-        self.reasoning = reasoning   # 思考可视化: 模型思考内容(无则空串)
-
-    @property
-    def has_tool_calls(self) -> bool:
-        return len(self.tool_calls) > 0
-
-    @property
-    def is_stop(self) -> bool:
-        return self.finish_reason == "stop"
-
-    def __repr__(self) -> str:
-        tc = f", {len(self.tool_calls)} tool_calls" if self.tool_calls else ""
-        return f"<LLMResponse finish={self.finish_reason}{tc} content={self.content[:60]}...>"

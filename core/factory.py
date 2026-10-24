@@ -18,48 +18,19 @@ v4 不绑定任何厂商：谁来当大脑由 `AGENT_MODEL` + `NPC_API_KEY` + `N
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from core.base import ProviderProtocol
-from core.config_flags import env_text
 from core.openai_provider import OpenAIProvider
+from core.settings import DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE
+from core.vendor import (
+    detect_base_url,
+    detect_provider_name,
+    dialect_of,
+)
 
-
-# 已知 provider 的默认 base_url（仅在用户没配 NPC_BASE_URL 时兜底）
-_KNOWN_BASE_URLS: dict[str, str] = {
-    "openai": "https://api.openai.com/v1",
-    "deepseek": "https://api.deepseek.com",
-    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "moonshot": "https://api.moonshot.cn/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-    "ollama": "http://localhost:11434/v1",
-    "xai": "https://api.x.ai/v1",
-    "mistral": "https://api.mistral.ai/v1",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
-}
-
-# 各 provider 的模型名关键词（顺序 = 匹配优先级）
-_PROVIDER_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "deepseek": ("deepseek",),
-    "zhipu": ("glm", "zhipu", "chatglm"),
-    "qwen": ("qwen", "dashscope", "通义"),
-    "moonshot": ("kimi", "moonshot"),
-    "ark": ("doubao", "ark", "豆包"),
-    "hunyuan": ("hunyuan", "混元"),
-    "openrouter": ("openrouter",),
-    "ollama": ("ollama",),
-    "xai": ("grok", "xai"),
-    "gemini": ("gemini",),
-    "claude": ("claude", "anthropic"),
-    "minimax": ("minimax", "abab"),
-    "mistral": ("mistral", "codestral"),
-    "baichuan": ("baichuan", "百川"),
-    "step": ("step-", "阶跃"),
-    "yi": ("yi-", "零一"),
-    "siliconflow": ("siliconflow",),
-    "openai": ("gpt", "openai", "o1", "o3", "o4", "o5", "o6", "o7", "o8", "o9"),
-}
+# 厂商探测（模型名关键词 / 内置端点 / 思考参数方言）单一来源在 core/vendor.py；
+# 这里 import 后 detect_provider_name / detect_base_url 继续以 factory.* 可用（既有调用方口径不变）。
 
 # 缺某一项时给用户的提示文案（响亮失败：说清该配什么）
 _CONFIG_HINTS: dict[str, str] = {
@@ -67,32 +38,6 @@ _CONFIG_HINTS: dict[str, str] = {
     "AGENT_MODEL": "AGENT_MODEL（或 NPC_MODEL）—— 模型名由用户自定",
     "NPC_BASE_URL": "NPC_BASE_URL（OpenAI 兼容端点，见厂商文档）",
 }
-
-
-def detect_provider_name(model_name: str) -> str:
-    """按模型名猜厂商（仅用于没配端点时兜底与报错提示）。"""
-    lower = model_name.lower()
-    for provider, keywords in _PROVIDER_KEYWORDS.items():
-        if any(kw in lower for kw in keywords):
-            return provider
-    return "unknown"  # 未知模型 — 由调用方决定如何处理
-
-
-def detect_base_url(model_name: str, configured_url: str = "") -> str:
-    """
-    解析端点：用户配的端点永远优先。
-
-    优先级:
-      1. configured_url 非空 → 原样返回（厂商推断不再覆盖它）
-      2. 未配置 + 认出厂商且有内置端点 → 该端点兜底
-      3. 都没有 → 空字符串（= 未配置）
-    """
-    if configured_url:
-        return configured_url
-    provider = detect_provider_name(model_name)
-    if provider in _KNOWN_BASE_URLS:
-        return _KNOWN_BASE_URLS[provider]
-    return ""
 
 
 def hint_list(missing: List[str]) -> List[str]:
@@ -134,22 +79,24 @@ def resolve_llm_config(api_key: str, model_name: str, base_url: str = "") -> Dic
 
 
 def current_llm_config() -> Dict[str, Any]:
-    """现读环境变量解析三件套（端点与模型名每次调用现读，可热切）。"""
+    """现读环境变量解析三件套（端点与模型名每次现读，可热切）。
+
+    env 回退链只有一份（core/settings.AgentSettings 的字段默认值），
+    这里直接走 core.config，不再自己 or 一遍。
+    """
     from core import config
 
-    model = env_text("AGENT_MODEL") or env_text("NPC_MODEL") or config.model_name()
-    base = env_text("NPC_BASE_URL") or config.base_url()
-    return resolve_llm_config(api_key=config.api_key() or "", model_name=model, base_url=base)
+    return resolve_llm_config(api_key=config.api_key() or "",
+                              model_name=config.model_name(),
+                              base_url=config.base_url())
 
 
 def create_provider(
     api_key: str,
     model_name: str,
     base_url: str = "",
-    temperature: float = 0.2,
-    max_tokens: int = 8192,
-    provider_name: str = "auto",
-    extra_body: Optional[dict] = None,
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> ProviderProtocol:
     """
     创建 Provider 实例。
@@ -160,8 +107,6 @@ def create_provider(
       base_url: OpenAI 兼容端点 (用户自配；留空则按模型名兜底)
       temperature: 温度参数
       max_tokens: 最大 token 数
-      provider_name: "auto" | "openai" | "deepseek" | ... — 仅在没配 base_url 时生效
-      extra_body: 额外请求体片段 (也可用环境变量 NPC_LLM_EXTRA_BODY 现读)
 
     Returns:
       ProviderProtocol 实例
@@ -176,8 +121,6 @@ def create_provider(
       # 本地 Ollama
       p = create_provider("ollama", "qwen3:8b", base_url="http://localhost:11434/v1")
     """
-    if provider_name != "auto" and not base_url and provider_name in _KNOWN_BASE_URLS:
-        base_url = _KNOWN_BASE_URLS[provider_name]
     base_url = detect_base_url(model_name, base_url)
 
     if not base_url:
@@ -189,12 +132,13 @@ def create_provider(
             f"请设置环境变量 NPC_BASE_URL（OpenAI 兼容端点）。"
         )
 
-    # 所有已知 provider 都使用 OpenAI 兼容 API
+    # 所有已知 provider 都使用 OpenAI 兼容 API；思考参数方言由 core/vendor 判定后
+    # 显式传给 provider（provider 不再按域名自己猜一遍）
     return OpenAIProvider(
         api_key=api_key,
         base_url=base_url,
         model=model_name,
         temperature=temperature,
         max_tokens=max_tokens,
-        extra_body=extra_body,
+        dialect=dialect_of(model_name, base_url),
     )

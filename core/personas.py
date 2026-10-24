@@ -18,7 +18,7 @@ from core.paths import require_npc_id
 
 
 class PersonaError(Exception):
-    """角色卡读不了：缺文件 / JSON 坏 / 不是 JSON 对象。
+    """角色卡读不了：缺文件 / JSON 坏 / 文件读不动（权限/坏编码）/ 不是 JSON 对象。
 
     `missing` 供调用方区分"没有这张卡"（控制台回 404）与"卡坏了"（回 400）。
     """
@@ -46,13 +46,15 @@ def persona_ids(persona_dir: Path) -> List[str]:
 
 
 def read_persona(path: Path) -> Dict[str, Any]:
-    """读一张角色卡；缺文件 / JSON 坏 / 不是对象 → `PersonaError`。"""
+    """读一张角色卡；缺文件 / JSON 坏 / 读不动（权限/坏编码）/ 不是对象 → `PersonaError`。"""
     if not path.exists():
         raise PersonaError(f"未找到 NPC 角色卡: {path}", missing=True)
     try:
         data = json.loads(path.read_text("utf-8"))
     except json.JSONDecodeError as exc:
         raise PersonaError(f"角色卡 JSON 损坏: {path} ({exc})") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PersonaError(f"角色卡读不了: {path} ({exc})") from exc
     if not isinstance(data, dict):
         raise PersonaError(f"角色卡必须是 JSON 对象: {path}")
     return data

@@ -43,6 +43,20 @@ def test_bad_line_is_skipped(tmp_store):
     assert [m["content"] for m in msgs] == ["好的", "嗯"]
 
 
+def test_bad_byte_line_is_skipped(tmp_store):
+    """非法 UTF-8 的坏行也按"坏行"跳过 —— 一个坏字节不许炸掉整份记录。"""
+    path = chatlog.chat_path("cang", store_dir=tmp_store)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bad_line = b'{"role": "user", "content": "\xff\xfe' + "坏字节".encode("utf-8") + b'"}\n'
+    path.write_bytes(
+        json.dumps({"role": "user", "content": "好的"}, ensure_ascii=False).encode("utf-8") + b"\n"
+        + bad_line
+        + json.dumps({"role": "assistant", "content": "嗯"}, ensure_ascii=False).encode("utf-8") + b"\n")
+
+    msgs = chatlog.load_turns("cang", store_dir=tmp_store)
+    assert [m["content"] for m in msgs] == ["好的", "嗯"]
+
+
 # ── token 估算与裁剪 ─────────────────────────────────────
 
 def test_estimate_tokens():
