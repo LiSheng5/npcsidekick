@@ -1327,6 +1327,22 @@ async function renderModel(view) {
   effort.value = cur.reasoning_effort || ''
   const noThink = h('input', { type: 'checkbox' })
   noThink.checked = !!cur.thinking_unsupported
+  // 上下文窗口：整数 ≥ 8000，留空 = 不改；预设 32K / 128K / 300K / 1M
+  const win = h('input', {
+    class: 'input narrow', type: 'number', min: '8000', step: '1',
+    placeholder: '上下文窗口（token），最低 8000',
+  })
+  win.value = cur.context_window != null ? String(cur.context_window) : ''
+  const WINDOW_PRESETS = [['32K', 32000], ['128K', 128000], ['300K', 300000], ['1M', 1000000]]
+  const ratio = (store.state && store.state.summary_ratio != null) ? store.state.summary_ratio : 0.4
+  const winHint = () => {
+    const n = parseInt(win.value, 10)
+    return Number.isFinite(n) && n >= 8000
+      ? `触发线 = 窗口 × ${ratio} ≈ ${Math.round(n * ratio)} token（提示估算到这个数就滚动压缩）`
+      : `触发线 = 窗口 × ${ratio}（窗口要 ≥ 8000 的整数）`
+  }
+  const winHintEl = h('p', { class: 'hint', text: winHint() })
+  win.addEventListener('input', () => { winHintEl.textContent = winHint() })
   // key 明文落盘：输入不回显（页面只回掩码），留空 = 不改
   const apiKey = h('input', {
     class: 'input', type: 'password', autocomplete: 'off',
@@ -1351,6 +1367,7 @@ async function renderModel(view) {
         model: model.value, base_url: base.value,
         reasoning_effort: effort.value, thinking_unsupported: noThink.checked,
         ...(apiKey.value ? { api_key: apiKey.value } : {}),   // 留空 = 不动已保存的
+        ...(win.value.trim() ? { context_window: win.value.trim() } : {}),  // 留空 = 不改
       },
     })
     return next.ready
@@ -1378,8 +1395,15 @@ async function renderModel(view) {
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '模型名：' }), model),
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '端点：' }), base),
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '深度思考：' }), effort),
+      h('p', { class: 'hint', text: '建议：对话推荐 off 或 low —— 档位玩家自选，不做自动切换' }),
       h('label', { class: 'filter-row' }, noThink,
         h('span', { class: 'hint', text: '该模型不认思考参数 —— 勾上后一律不下发（不支持深度思考的模型选这个，效果等于关闭且不会报错）' })),
+      h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '上下文窗口：' }), win,
+        ...WINDOW_PRESETS.map(([t, v]) => h('button', {
+          class: 'btn tiny', type: 'button', text: t,
+          onclick: () => { win.value = String(v); winHintEl.textContent = winHint() },
+        }))),
+      winHintEl,
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: 'API Key：' }), apiKey),
       ...(cur.api_key && cur.api_key.from_page
         ? [banner('已保存的 key 是明文存在 store/llm_config.json —— 不要分享、不要提交这个文件（store/ 已在 .gitignore，不会进仓库）', 'error'),
@@ -1410,6 +1434,10 @@ function modelStatusCard(cur) {
         ? '一个思考参数都不发'
         : (['off', 'disabled', 'none'].includes(cur.thinking_effort)
           ? '关闭思考（thinking: disabled）' : `发 ${cur.thinking_effort}`) })),
+    h('div', { class: 'kv' }, h('span', { class: 'k', text: '上下文窗口' }),
+      h('span', { class: 'v', text: cur.context_window != null
+        ? `${cur.context_window} token（触发线 ≈ ${Math.round(cur.context_window * ((store.state && store.state.summary_ratio != null) ? store.state.summary_ratio : 0.4))}）`
+        : '未取到（旧后端？）' })),
     h('div', { class: 'kv' }, h('span', { class: 'k', text: 'API Key' }),
       h('span', { class: 'v', text: cur.api_key && cur.api_key.present
         ? `${cur.api_key.masked}（来自 ${cur.api_key.source || '未知'}）`

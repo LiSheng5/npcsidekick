@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 import chatlog
+from core.client import LLMResponse
 
 
 # ── 追加 / 读取 ──────────────────────────────────────────
@@ -84,8 +85,10 @@ def _fill(store, npc_id: str, rounds: int, size: int = 10):
                             store_dir=store)
 
 
-def _ratio_env(monkeypatch, window: str = "1000", ratio: str = "0.4"):
-    """窗口 × 比例 = 压缩阈值（1000 × 0.4 → 400）；硬上限放开，避免干扰断言。"""
+def _ratio_env(monkeypatch, window: str = "8000", ratio: str = "0.05"):
+    """窗口 × 比例 = 压缩阈值（8000 × 0.05 → 400）；硬上限放开，避免干扰断言。
+
+    窗口不能低于 8000（config 的下限校验），要压阈值就调比例。"""
     monkeypatch.setenv("NPC_CONTEXT_WINDOW", window)
     monkeypatch.setenv("NPC_SUMMARY_RATIO", ratio)
     monkeypatch.setenv("NPC_BUDGET_HISTORY", "1000000")
@@ -93,7 +96,7 @@ def _ratio_env(monkeypatch, window: str = "1000", ratio: str = "0.4"):
 
 def test_no_summary_below_ratio(tmp_store, make_provider, monkeypatch):
     """prompt_tokens 低于窗口 × 比例（400）→ 不摘要、不惊动 LLM。"""
-    _ratio_env(monkeypatch)                               # 阈值 = 1000 × 0.4 = 400
+    _ratio_env(monkeypatch)                               # 阈值 = 8000 × 0.05 = 400
     _fill(tmp_store, "cang", 5)
     provider = make_provider()
 
@@ -170,6 +173,83 @@ def test_summary_skipped_when_nothing_to_fold(tmp_store, make_provider, monkeypa
     assert chatlog.maybe_summarize("cang", provider, prompt_tokens=10**6,
                                    store_dir=tmp_store) is None
     assert provider.chat_calls == []
+
+
+# ── D7 分片折叠：老积压多片滚完，每片不超限，失败不回退 ─────────
+
+class _FailAfterProvider:
+    """前 ok_slices 次 chat 返回摘要，之后抛异常（模拟折叠中途 LLM 挂掉）。"""
+
+    def __init__(self, ok_slices: int):
+        self.ok_slices = ok_slices
+        self.chat_calls: list = []
+
+    def chat(self, messages, tools=None, tool_choice="auto", temperature=None,
+             max_tokens=None, response_format=None, reasoning_effort=None):
+        self.chat_calls.append({"messages": messages, "reasoning_effort": reasoning_effort})
+        if len(self.chat_calls) > self.ok_slices:
+            raise RuntimeError("boom")
+        return LLMResponse(content="摘要片段%d" % len(self.chat_calls), tool_calls=[],
+                           finish_reason="stop", model="fail-after", usage=None)
+
+
+def test_summary_slices_large_backlog_within_cap(tmp_store, make_provider, monkeypatch):
+    """D7 验收：约 200K token 积压 + 窗口 32K → 分多片完成，每片输入 ≤ 窗口 × 0.3。"""
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "1000000")
+    for i in range(50):                                    # 每轮 ≈ 4K token → ≈ 200K
+        chatlog.append_turn("cang", "问" * 2000 + str(i), "答" * 2000 + str(i),
+                            store_dir=tmp_store)
+    provider = make_provider(turns=[{"text": "第%d片摘要" % i} for i in range(40)])
+
+    summary = chatlog.maybe_summarize("cang", provider, store_dir=tmp_store)
+
+    assert summary is not None
+    cap = int(32000 * 0.3)
+    assert len(provider.chat_calls) > 1                    # 分多片，不是一整块
+    for call in provider.chat_calls:                       # 每片输入都不超限
+        assert chatlog.estimate_tokens(call["messages"][1]["content"]) <= cap
+    state = chatlog.load_summary("cang", store_dir=tmp_store)
+    assert state["covered"] == 100 - 2 * 3                 # 全部可压轮次压完，只留最近 3 轮
+    assert state["summary"] == summary
+
+
+def test_summary_slice_failure_keeps_covered(tmp_store, monkeypatch):
+    """中途失败停在已完成处：covered 推进到最后一片成功处，不回退、聊天记录一行不动。"""
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("NPC_BUDGET_HISTORY", "1000000")
+    for i in range(50):
+        chatlog.append_turn("cang", "问" * 2000 + str(i), "答" * 2000 + str(i),
+                            store_dir=tmp_store)
+    before = len(chatlog.load_turns("cang", store_dir=tmp_store))
+    provider = _FailAfterProvider(ok_slices=3)
+
+    summary = chatlog.maybe_summarize("cang", provider, store_dir=tmp_store)
+
+    assert summary == "摘要片段3"                           # 用最后一片成功的摘要
+    assert len(provider.chat_calls) == 4                   # 第 4 片失败后就停，不再往下试
+    state = chatlog.load_summary("cang", store_dir=tmp_store)
+    assert 0 < state["covered"] < 94                       # 推进了但没推满
+    assert state["covered"] % 2 == 0                       # 落在轮次边界（消息对）
+    assert state["summary"] == "摘要片段3"
+    assert len(chatlog.load_turns("cang", store_dir=tmp_store)) == before
+
+
+def test_summary_disables_thinking_but_respects_unsupported(tmp_store, make_provider,
+                                                            monkeypatch):
+    """摘要调用显式关思考（发 off）；模型不认思考参数（thinking_unsupported）→ 一个都不发。"""
+    _ratio_env(monkeypatch)
+    _fill(tmp_store, "cang", 5, size=20)
+    provider = make_provider(turns=[{"text": "摘要"}])
+    chatlog.maybe_summarize("cang", provider, prompt_tokens=500, store_dir=tmp_store)
+    assert provider.chat_calls[0]["reasoning_effort"] == "off"
+
+    (tmp_store / "llm_config.json").write_text(
+        json.dumps({"thinking_unsupported": True}), encoding="utf-8")
+    _fill(tmp_store, "shu", 5, size=20)
+    provider2 = make_provider(turns=[{"text": "摘要2"}])
+    chatlog.maybe_summarize("shu", provider2, prompt_tokens=500, store_dir=tmp_store)
+    assert provider2.chat_calls[0]["reasoning_effort"] is None
 
 
 def test_build_history_includes_summary_and_recent(tmp_store, make_provider, monkeypatch):

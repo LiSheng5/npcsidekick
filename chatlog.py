@@ -15,7 +15,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.config import budget_history, context_window, summary_keep_recent, summary_ratio
 from core.logging_config import log
@@ -30,12 +30,13 @@ _SUMMARY_PROMPT = (
 )
 
 
-def summary_limit() -> int:
+def summary_limit(store_dir: Optional[Path] = None) -> int:
     """压缩触发阈值（token）= 上下文窗口 × NPC_SUMMARY_RATIO，现读可热切。
 
     本回合提示的本地 token 估算达到这个数，回合结束就后台压缩旧轮次。
+    `store_dir` 传给 context_window —— 页面改的窗口存在各自的 llm_config.json。
     """
-    return int(context_window() * summary_ratio())
+    return int(context_window(store_dir) * summary_ratio())
 
 
 # ── 路径 ─────────────────────────────────────────────────
@@ -176,21 +177,28 @@ def _save_summary(npc_id: str, summary: str, covered: int,
 
 # 聊天记录一轮 = 用户 + 助手各一行（jsonl 行数口径），keep_recent 轮 → 行数 ×2
 _MESSAGES_PER_TURN = 2
+# D7 分片折叠：单片输入上限 = 窗口 × 0.3。老存档积压按轮次切片滚完 ——
+# 每片成功就落盘推进 covered，失败停在已完成处，不丢数据。
+_FOLD_SLICE_RATIO = 0.3
 
 
 def _fold_plan(npc_id: str, prompt_tokens: Optional[int] = None,
                keep_recent: Optional[int] = None,
-               store_dir: Optional[Path] = None):
+               store_dir: Optional[Path] = None,
+               turns: Optional[List[Dict[str, Any]]] = None):
     """摘要计划 → `(turns, state, covered, cutoff)`；不该摘要 / 没得压 → None。纯读。
 
     触发条件 = 传入的本回合提示 token 数 ≥ 窗口 × NPC_SUMMARY_RATIO，且保留窗口
     之外还有没被摘要覆盖的旧轮次。`prompt_tokens=None`（旧调用方 / 手动触发）→
     不看阈值，只要有可压的旧轮次就压（强制压缩）。
     `maybe_summarize` 与 `needs_summary` 共用这份判断，两处口径永远一致。
+    `turns` 可传入已读好的聊天记录（turn.py 的 needs_summary → 后台折叠共享一次
+    读盘）；state 每次现读 —— covered 可能被并行摘要推进，小 JSON 不值得缓存。
     """
     keep = summary_keep_recent() if keep_recent is None else max(0, keep_recent)
-    turns = load_turns(npc_id, store_dir=store_dir)
-    if prompt_tokens is not None and prompt_tokens < summary_limit():
+    if turns is None:
+        turns = load_turns(npc_id, store_dir=store_dir)
+    if prompt_tokens is not None and prompt_tokens < summary_limit(store_dir=store_dir):
         return None
     state = load_summary(npc_id, store_dir=store_dir)
     covered = min(state["covered"], len(turns))
@@ -200,54 +208,110 @@ def _fold_plan(npc_id: str, prompt_tokens: Optional[int] = None,
     return turns, state, covered, cutoff
 
 
+def summary_plan(npc_id: str, prompt_tokens: Optional[int] = None,
+                 keep_recent: Optional[int] = None,
+                 store_dir: Optional[Path] = None):
+    """公开的摘要计划（turn.py 拿它决定调度，并把 turns 传给后台折叠，共享读盘）。"""
+    return _fold_plan(npc_id, prompt_tokens, keep_recent, store_dir)
+
+
 def needs_summary(npc_id: str, prompt_tokens: Optional[int] = None,
                   keep_recent: Optional[int] = None,
-                  store_dir: Optional[Path] = None) -> bool:
+                  store_dir: Optional[Path] = None,
+                  turns: Optional[List[Dict[str, Any]]] = None) -> bool:
     """现在该不该摘要（提示 token ≥ 窗口 × 比例，且有可压的旧轮次）？纯读、不惊动 LLM。
 
     回合结束用它决定要不要后台触发摘要（turn.py）；`prompt_tokens` =
     本回合提示的本地 token 估算，拿不到传 None = 不看阈值（强制压缩口径）。
     """
-    return _fold_plan(npc_id, prompt_tokens, keep_recent, store_dir) is not None
+    return _fold_plan(npc_id, prompt_tokens, keep_recent, store_dir, turns=turns) is not None
+
+
+def _turn_line(msg: Dict[str, Any]) -> str:
+    """一轮消息 → 摘要输入里的一行。"""
+    return f"{'玩家' if msg['role'] == 'user' else 'NPC'}：{msg['content']}"
+
+
+def _take_slice(turns: List[Dict[str, Any]], start: int, end: int,
+                budget: int) -> Tuple[List[Dict[str, Any]], int]:
+    """从 turns[start:end] 按轮次（消息对）取一片：各行估算合计 ≤ budget，至少取一轮。
+
+    返回 (片内消息, 下一游标)。单轮就超预算时也必须取 —— 否则原地卡死；
+    这种巨型单轮只此一次，日志由调用方记。
+    """
+    picked: List[Dict[str, Any]] = []
+    used = 0
+    cursor = start
+    while cursor < end:
+        pair = turns[cursor:cursor + _MESSAGES_PER_TURN]
+        cost = sum(estimate_tokens(_turn_line(m)) for m in pair)
+        if picked and used + cost > budget:
+            break
+        picked.extend(pair)
+        used += cost
+        cursor += len(pair)
+    return picked, cursor
+
+
+def _summary_effort(store_dir: Optional[Path] = None) -> Optional[str]:
+    """摘要调用显式关思考（不值得为摘要烧思考 token）。
+
+    尊重「该模型不认思考参数」（thinking_unsupported）→ 一个参数都不发（None），
+    否则显式发 off。
+    """
+    from core import llm_runtime
+
+    if llm_runtime.llm_settings(store_dir=store_dir).get("thinking_unsupported"):
+        return None
+    return "off"
 
 
 def maybe_summarize(npc_id: str, llm, prompt_tokens: Optional[int] = None,
                     keep_recent: Optional[int] = None,
-                    store_dir: Optional[Path] = None) -> Optional[str]:
+                    store_dir: Optional[Path] = None,
+                    turns: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
     """提示 token ≥ 窗口 × 比例时把最旧的轮次压成摘要；`prompt_tokens=None` = 强制压缩
     （不看阈值，只要有可压的旧轮次就压）。未到阈值/无内容可压/失败 → None。
 
-    成功返回新摘要文本并落盘（covered 推进）；失败不写任何东西，
-    聊天记录一行不动。
+    D7：积压按轮次切片、滚动折叠 —— 每片输入 ≤ 窗口 × 0.3，上一片的摘要作为
+    「前情摘要」进下一片；每片成功就落盘推进 covered，中途失败停在已完成处。
+    聊天记录一行不动、不丢数据。成功返回最新摘要文本（至少一片成功）。
     """
-    plan = _fold_plan(npc_id, prompt_tokens, keep_recent, store_dir)
+    plan = _fold_plan(npc_id, prompt_tokens, keep_recent, store_dir, turns=turns)
     if plan is None:
         return None
-    turns, state, covered, cutoff = plan
+    turns_all, state, covered, cutoff = plan
 
-    old = turns[covered:cutoff]
-    payload = []
-    if state["summary"]:
-        payload.append(f"前情摘要：{state['summary']}")
-    payload.extend(f"{'玩家' if m['role'] == 'user' else 'NPC'}：{m['content']}" for m in old)
-
-    try:
-        resp = llm.chat([
-            {"role": "system", "content": _SUMMARY_PROMPT},
-            {"role": "user", "content": "\n".join(payload)},
-        ])
-    except Exception as exc:               # LLM 不可用 → 降级，不丢数据
-        log.warning("summary_failed", npc_id=npc_id, error=str(exc)[:120])
-        return None
-
-    summary = (getattr(resp, "content", "") or "").strip()
-    if not summary:
-        log.warning("summary_empty", npc_id=npc_id)
-        return None
-
-    _save_summary(npc_id, summary, cutoff, store_dir=store_dir)
-    log.info("summary_updated", npc_id=npc_id, covered=cutoff, folded=len(old))
-    return summary
+    slice_cap = max(1, int(context_window(store_dir) * _FOLD_SLICE_RATIO))
+    summary_text = state["summary"]
+    cursor = covered
+    folded_any = False
+    while cursor < cutoff:
+        head = f"前情摘要：{summary_text}" if summary_text else ""
+        budget = slice_cap - (estimate_tokens(head) if head else 0)
+        chunk, next_cursor = _take_slice(turns_all, cursor, cutoff, max(1, budget))
+        if not chunk:
+            break
+        payload = ([head] if head else []) + [_turn_line(m) for m in chunk]
+        try:
+            resp = llm.chat([
+                {"role": "system", "content": _SUMMARY_PROMPT},
+                {"role": "user", "content": "\n".join(payload)},
+            ], reasoning_effort=_summary_effort(store_dir))
+        except Exception as exc:               # LLM 不可用 → 降级，不丢数据
+            log.warning("summary_failed", npc_id=npc_id, covered=cursor,
+                        error=str(exc)[:120])
+            break
+        summary = (getattr(resp, "content", "") or "").strip()
+        if not summary:
+            log.warning("summary_empty", npc_id=npc_id, covered=cursor)
+            break
+        summary_text = summary
+        cursor = next_cursor
+        folded_any = True
+        _save_summary(npc_id, summary_text, cursor, store_dir=store_dir)
+        log.info("summary_updated", npc_id=npc_id, covered=cursor, folded=len(chunk))
+    return summary_text if folded_any else None
 
 
 def _history_message(msg: Dict[str, Any], reasoning_replay: bool) -> Dict[str, Any]:
@@ -286,7 +350,7 @@ def build_history(npc_id: str, llm, token_budget: Optional[int] = None,
     turns = load_turns(npc_id, store_dir=store_dir)
     covered = min(state["covered"], len(turns))
     if token_budget is None:
-        token_budget = budget_history()   # 对话层硬上限（core/config，单源）
+        token_budget = budget_history(store_dir=store_dir)   # 对话层硬上限（core/config，单源）
 
     history: List[Dict[str, Any]] = []
     if state["summary"]:

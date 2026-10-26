@@ -7,11 +7,15 @@
 """
 from __future__ import annotations
 
-from core.config_flags import env_num, warn_once
+from pathlib import Path
+from typing import Any, Optional
+
+from core.config_flags import env_num, env_text, warn_once
 from core.settings import AgentSettings
 
 # 上下文压缩（窗口 × 比例触发）默认值；环境变量每次现读可热切
-_DEFAULT_CONTEXT_WINDOW = 1_000_000
+_DEFAULT_CONTEXT_WINDOW = 300_000
+_MIN_CONTEXT_WINDOW = 8_000
 _DEFAULT_SUMMARY_RATIO = 0.4
 _DEFAULT_SUMMARY_KEEP_RECENT = 3
 
@@ -45,10 +49,57 @@ def max_tokens() -> int:
     return AgentSettings().max_tokens
 
 
-def context_window() -> int:
-    """当前模型的上下文窗口（token）。NPC_CONTEXT_WINDOW —— 换模型要同步改，
-    否则「提示用到窗口的 40% 就压缩」会按错的窗口算比例。"""
-    return max(1, int(env_num(_ENV_CONTEXT_WINDOW, _DEFAULT_CONTEXT_WINDOW, cast=int)))
+def valid_context_window(value: Any) -> Optional[int]:
+    """整数且 ≥ 8000 才合法（D1 下限），否则 None。可无损转换的字符串也认。"""
+    if isinstance(value, bool):
+        return None
+    try:
+        text = str(value).strip()
+        if not text or str(int(text)) != text:
+            return None
+        number = int(text)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= _MIN_CONTEXT_WINDOW else None
+
+
+def env_context_window() -> int:
+    """环境变量层的窗口：NPC_CONTEXT_WINDOW，默认 300000。
+
+    非法或低于 8000 → 回落默认并告警一次。llm_runtime 的环境层起点走这里
+    （**不要**在它里面调 context_window() —— 那会经 llm_settings 绕回来）。
+    """
+    raw = env_text(_ENV_CONTEXT_WINDOW, "").strip()
+    if not raw:
+        return _DEFAULT_CONTEXT_WINDOW
+    number = valid_context_window(raw)
+    if number is None:
+        warn_once(_ENV_CONTEXT_WINDOW, "env_value_invalid_fallback", raw[:40],
+                  raw=raw[:40], fallback=str(_DEFAULT_CONTEXT_WINDOW),
+                  min=_MIN_CONTEXT_WINDOW)
+        return _DEFAULT_CONTEXT_WINDOW
+    return number
+
+
+def context_window(store_dir: Optional[Path] = None) -> int:
+    """当前模型的上下文窗口（token）—— 三层合并：页面 > store/llm_config.json >
+    环境变量（NPC_CONTEXT_WINDOW），默认 300000。换模型要同步改，
+    否则「提示用到窗口的 40% 就压缩」会按错的窗口算比例。
+
+    页面在控制台「模型」页改、落 llm_config.json，改值不重启即生效。
+    合并结果非法（手改文件写坏等）→ 回落默认并告警一次。
+    函数内惰性 import llm_runtime：它的环境层反过来读本模块，避免循环依赖。
+    """
+    from core import llm_runtime
+
+    raw = llm_runtime.llm_settings(store_dir=store_dir).get("context_window")
+    number = valid_context_window(raw)
+    if number is None:
+        warn_once("context_window", "value_invalid_fallback", str(raw)[:40],
+                  raw=str(raw)[:40], fallback=str(_DEFAULT_CONTEXT_WINDOW),
+                  min=_MIN_CONTEXT_WINDOW)
+        return _DEFAULT_CONTEXT_WINDOW
+    return number
 
 
 def summary_ratio() -> float:
@@ -76,10 +127,11 @@ def summary_keep_recent() -> int:
 # 预算读取放这里（而不是 context.py）的理由：它们是环境变量读取项，与
 # context「纯函数、不读环境变量」的自我声明冲突；chatlog.build_history 的
 # 硬上限兜底也要用它 —— 放 core 后 chatlog 不必反向依赖装配层。
-# 默认值：state 800、memory 600；history 不设固定默认 ——
-# 硬上限 = 上下文窗口 × 0.7（HISTORY_BUDGET_RATIO）。
+# 默认值：state 800、memory 2000（D4：600 → 2000，记忆块在最后一条 user 里、
+# 不进前缀缓存，满载时每回合多约 1.4K 未缓存 token，卡小时无影响）；
+# history 不设固定默认 —— 硬上限 = 上下文窗口 × 0.7（HISTORY_BUDGET_RATIO）。
 DEFAULT_BUDGET_STATE = 800
-DEFAULT_BUDGET_MEMORY = 600
+DEFAULT_BUDGET_MEMORY = 2000
 HISTORY_BUDGET_RATIO = 0.7
 
 _ENV_BUDGET_STATE = "NPC_BUDGET_STATE"
@@ -97,13 +149,13 @@ def budget_memory() -> int:
     return max(0, int(env_num(_ENV_BUDGET_MEMORY, DEFAULT_BUDGET_MEMORY, cast=int)))
 
 
-def budget_history() -> int:
+def budget_history(store_dir: Optional[Path] = None) -> int:
     """对话层硬上限（token），现读环境变量，经 build_history(token_budget=...) 生效。
 
-    未显式设置 `NPC_BUDGET_HISTORY` 时 = 上下文窗口 × 0.7（现算）。
+    未显式设置 `NPC_BUDGET_HISTORY` 时 = 上下文窗口 × 0.7（现算，窗口取三层合并值）。
     正常不会触发：历史 = 摘要 + 未被摘要覆盖的全部聊天记录，提示用到窗口的
     NPC_SUMMARY_RATIO（默认 40%）就压缩、只留最近几轮；这个硬上限只防摘要
     失败（LLM 不可用）时历史无限涨、把上下文撑爆。
     """
-    default = int(context_window() * HISTORY_BUDGET_RATIO)
+    default = int(context_window(store_dir) * HISTORY_BUDGET_RATIO)
     return max(0, int(env_num(_ENV_BUDGET_HISTORY, default, cast=int)))

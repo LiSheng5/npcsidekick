@@ -27,7 +27,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 from core.client import LLMClient
 from core import config
-from core.config_flags import env_num, env_text
+from core.config_flags import env_flag, env_num, env_text
 from core.llm_runtime import short_err, thinking_effort
 from core.logging_config import log
 from core.personas import rule_reply
@@ -45,6 +45,26 @@ MAX_TOOL_ROUNDS = 3
 
 # 记忆检索返回条数（recall 工具 + 回合开始的记忆预取共用这个 top-k）
 RECALL_TOP_K = 5
+
+# T4·remember 静默收尾开关（家规：现读环境变量、可热切）。
+# 开：一轮里只有 remember 且台词已出 → 当场收尾，不再多跑一轮逼台词；
+# 关：保持旧节奏（工具轮之后总是再跑一轮拿台词）。
+_ENV_SILENT_REMEMBER = "NPC_SILENT_REMEMBER"
+
+# T6·动作参数校验开关（家规：现读环境变量、可热切）。
+# 开：执行前按声明校验（D9）—— 非法参数不下发给 mod，回灌错误让模型重发；
+# 关：老行为（声明只当说明，拿到什么发什么）。
+_ENV_VALIDATE_ACTION_ARGS = "NPC_VALIDATE_ACTION_ARGS"
+
+
+def silent_remember_enabled() -> bool:
+    """remember 静默收尾开关（现读，可热切）：NPC_SILENT_REMEMBER，默认开。"""
+    return env_flag(_ENV_SILENT_REMEMBER, True)
+
+
+def validate_action_args_enabled() -> bool:
+    """动作参数校验开关（现读，可热切）：NPC_VALIDATE_ACTION_ARGS，默认关（先关后开）。"""
+    return env_flag(_ENV_VALIDATE_ACTION_ARGS, False)
 
 
 def _sse(payload: Dict[str, Any]) -> str:
@@ -78,7 +98,7 @@ def _emit_turn_trace(record: Dict[str, Any]) -> None:
 def _trace_tool(name: str, capabilities: Optional[List[dict]], ok: bool,
                 status: str, ms: float) -> Dict[str, Any]:
     """trace 的一条工具记录。`status` 如实保留执行侧取值（done/running/unknown/failed、
-    memory 的 success/error/rejected，以及 bad_args / ignored / 之后的 deduped）。"""
+    memory 的 success/error/rejected，以及 bad_args / ignored / deduped / invalid_args）。"""
     return {
         "name": name,
         "kind": "action" if tools.is_action_tool(name, capabilities) else "memory",
@@ -101,8 +121,9 @@ class _TurnTrace:
     tools: List[Dict[str, Any]] = field(default_factory=list)  # {name, kind, ok, status, ms}
     llm_fallback: bool = False          # 是否走了规则回复
     summarized: bool = False            # 本回合是否触发了摘要（启动了后台摘要）
+    ended_early: bool = False           # T4：静默收尾触发（只有静默调用且台词已出 → 提前收尾）
     tokens: Dict[str, int] = field(default_factory=lambda: {
-        "system": 0, "history": 0, "state": 0, "memory": 0, "user": 0})
+        "system": 0, "history": 0, "state": 0, "memory": 0, "user": 0, "tools": 0})
     mem_hits: int = 0                   # 记忆预取进块条数（含 pinned）
     mem_filtered: int = 0               # 记忆预取没进块条数（action 类 + 预算外的）
     first_delta_at: Optional[float] = None
@@ -116,19 +137,21 @@ class _TurnTrace:
                  status: str, ms: float) -> None:
         self.tools.append(_trace_tool(name, capabilities, ok, status, ms))
 
-    def record(self, npc_id: str, message: str, run: "_TurnRun") -> Dict[str, Any]:
+    def record(self, npc_id: str, message: str, run: "_TurnRun",
+               store_dir: Optional[Path] = None) -> Dict[str, Any]:
         """拼 turn_trace 记录（发出时现算耗时；tokens.total = 各层之和）。"""
         return {
             "npc_id": npc_id,
             "rounds": self.rounds,
             "llm_fallback": self.llm_fallback,
             "summarized": self.summarized,
+            "ended_early": self.ended_early,
             "no_dialogue": not run.dialogue_emitted,
             "tools": self.tools,
             "tokens": {**self.tokens, "total": sum(self.tokens.values())},
             # 压缩触发对照：本回合提示 token（本地估算）vs 阈值（窗口 × 比例）
             "summary_trigger": {"prompt_tokens": sum(self.tokens.values()),
-                                "limit": chatlog.summary_limit()},
+                                "limit": chatlog.summary_limit(store_dir=store_dir)},
             "memory_prefetch": {"hits": self.mem_hits, "filtered": self.mem_filtered},
             "first_token_ms": (None if self.first_delta_at is None
                                else round((self.first_delta_at - self.t_start) * 1000, 1)),
@@ -299,21 +322,27 @@ class SummaryScheduler:
         self.summarizing: set = set()      # 正在摘要的 npc_id
         self.tasks: set = set()            # 在途任务引用（防 GC 半路取消）
 
-    async def _run(self, llm: Any, npc_id: str, store_dir: Optional[Path]) -> None:
+    async def _run(self, llm: Any, npc_id: str, store_dir: Optional[Path],
+                   turns: Optional[List[Dict[str, Any]]] = None) -> None:
         try:
-            await asyncio.to_thread(chatlog.maybe_summarize, npc_id, llm, store_dir=store_dir)
+            await asyncio.to_thread(chatlog.maybe_summarize, npc_id, llm,
+                                    store_dir=store_dir, turns=turns)
         except Exception as exc:                    # 后台摘要失败绝不连累回合
             log.warning("summary_background_failed", npc_id=npc_id,
                         error=short_err(exc, store_dir=store_dir))
         finally:
             self.summarizing.discard(npc_id)
 
-    def schedule(self, llm: Any, npc_id: str, store_dir: Optional[Path]) -> bool:
-        """回合结束触发后台摘要；同 NPC 已有摘要在跑 / 没有 LLM → 跳过。返回是否启动。"""
+    def schedule(self, llm: Any, npc_id: str, store_dir: Optional[Path],
+                 turns: Optional[List[Dict[str, Any]]] = None) -> bool:
+        """回合结束触发后台摘要；同 NPC 已有摘要在跑 / 没有 LLM → 跳过。返回是否启动。
+
+        `turns` = 调用方已读好的聊天记录（省一次整文件读盘）；不传则后台自己读。
+        """
         if llm is None or npc_id in self.summarizing:
             return False
         self.summarizing.add(npc_id)                # 先占位再起任务，同回合内不可重入
-        task = asyncio.create_task(self._run(llm, npc_id, store_dir))
+        task = asyncio.create_task(self._run(llm, npc_id, store_dir, turns=turns))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return True
@@ -340,25 +369,28 @@ def _schedule_summary(llm: Any, npc_id: str, store_dir: Optional[Path]) -> bool:
 # · 预取只读卡，不改任何字段；失败只告警，回合照常（不带记忆块）。
 
 def _prefetch_memory_text(npc_id: str,
-                          store_dir: Optional[Path] = None) -> Tuple[str, int, int]:
+                          store_dir: Optional[Path] = None,
+                          entries: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, int, int]:
     """按「置顶 → 重要度 → 新旧」塞进记忆预算 → (块正文, 进块条数, 被滤条数)。
 
     只读卡、不改任何字段。排除 action 类。无可放条目/出错 → ("", 0, …)
     （出错时被滤数无意义，记 0）。同步 IO（读记忆卡）——调用方包
     `asyncio.to_thread`。本函数不抛。
+    `entries` = 调用方已读好的整张记忆卡（T7：一回合只读一次，与近况层共用）；
+    不传则自己读（原签名保持兼容）。
     被滤条数 = 读到的总数 − 进块数（含 action 类和预算外的），语义同
     trace 里 memory_prefetch.filtered。
     """
     try:
-        card = memory.load_card(npc_id, store_dir=store_dir)
-        entries = [e for e in card if e.get("category") != "action"]
-        entries.sort(key=lambda e: (not bool(e.get("pinned")),
-                                    -int(e.get("importance", memory.DEFAULT_IMPORTANCE)),
-                                    -float(e.get("created_at", 0.0))))
+        card = memory.load_card(npc_id, store_dir=store_dir) if entries is None else entries
+        picked = [e for e in card if e.get("category") != "action"]
+        picked.sort(key=lambda e: (not bool(e.get("pinned")),
+                                   -int(e.get("importance", memory.DEFAULT_IMPORTANCE)),
+                                   -float(e.get("created_at", 0.0))))
         budget = config.budget_memory()
         used = 0
         kept: List[Dict[str, Any]] = []
-        for e in entries:
+        for e in picked:
             line = memory.format_for_context([e])
             need = estimate_tokens(("\n" if kept else "") + line)
             if used + need > budget:
@@ -437,11 +469,14 @@ def _pending_lines(infos: List[Dict[str, Any]],
 
 
 def _recent_result_lines(npc_id: str, store_dir: Optional[Path] = None,
-                         now: Optional[float] = None) -> List[str]:
+                         now: Optional[float] = None,
+                         entries: Optional[List[Dict[str, Any]]] = None) -> List[str]:
     """最近 M 分钟内 category == "action" 的记忆条目，取最近 N 条（新→旧）→ 行文本。
 
     行文本 = 卡片正文原样（「完成: …」/「没做成: …」由 add_action_result 写卡时定）。
     同步 IO（读记忆卡）—— 调用方包 `asyncio.to_thread`。读卡失败只告警 → 空列表。
+    `entries` = 调用方已读好的整张记忆卡（T7：与预取共用，一回合只读一次）；
+    不传则自己读（原签名保持兼容）。
     """
     limit = recent_results_limit()
     if limit <= 0:
@@ -449,12 +484,12 @@ def _recent_result_lines(npc_id: str, store_dir: Optional[Path] = None,
     moment = time.time() if now is None else now
     window = recent_results_minutes() * 60.0
     try:
-        entries = memory.load_card(npc_id, store_dir=store_dir)
+        card = memory.load_card(npc_id, store_dir=store_dir) if entries is None else entries
     except Exception as exc:
         log.warning("recent_results_failed", npc_id=npc_id,
                     error=short_err(exc, store_dir=store_dir))
         return []
-    action = [e for e in entries if e.get("category") == "action"]
+    action = [e for e in card if e.get("category") == "action"]
     action.sort(key=lambda e: float(e.get("created_at", 0.0)), reverse=True)
     lines: List[str] = []
     for e in action:
@@ -470,16 +505,18 @@ def _recent_result_lines(npc_id: str, store_dir: Optional[Path] = None,
 
 def _recent_layer(npc_id: str, pending_infos: List[Dict[str, Any]],
                   store_dir: Optional[Path] = None,
-                  now: Optional[float] = None) -> Tuple[List[str], List[str], List[str]]:
+                  now: Optional[float] = None,
+                  entries: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[str], List[str], List[str]]:
     """近况层三组行 → (最近动作结果, 进行中, 待确认)。
 
     同步 IO（读记忆卡）—— 调用方包 `asyncio.to_thread`。本函数不抛：
     近况只是参考资料，取不到就少一块，绝不连累回合。
+    `entries` = 调用方已读好的整张记忆卡（T7：与预取共用，一回合只读一次）。
     """
     moment = time.time() if now is None else now
     try:
         running, unknown = _pending_lines(pending_infos, moment)
-        return _recent_result_lines(npc_id, store_dir, moment), running, unknown
+        return _recent_result_lines(npc_id, store_dir, moment, entries), running, unknown
     except Exception as exc:                        # 防御：上面各步已各自兜底
         log.warning("recent_layer_failed", npc_id=npc_id,
                     error=short_err(exc, store_dir=store_dir))
@@ -487,6 +524,27 @@ def _recent_layer(npc_id: str, pending_infos: List[Dict[str, Any]],
 
 
 # ── 回合 ─────────────────────────────────────────────────
+
+# 工具定义的 token 估算缓存：键 = 能力清单的动作名（remember/recall 恒在）。
+# D3：工具定义计入压缩触发的估算 —— 同一套能力整个会话反复出现，
+# json.dumps + estimate_tokens 没必要每回合重算。上限 32 条，满了整体清掉重来。
+_TOOL_DEFS_TOKENS: Dict[Tuple[str, ...], int] = {}
+_TOOL_DEFS_TOKENS_MAX = 32
+
+
+def _tool_defs_tokens(tool_defs: List[dict]) -> int:
+    """工具定义数组的 token 估算（本地口径，与各层同源）。"""
+    key = tuple(sorted(
+        str(d.get("function", {}).get("name", "")) for d in tool_defs if isinstance(d, dict)))
+    cached = _TOOL_DEFS_TOKENS.get(key)
+    if cached is not None:
+        return cached
+    value = estimate_tokens(json.dumps(tool_defs, ensure_ascii=False))
+    if len(_TOOL_DEFS_TOKENS) >= _TOOL_DEFS_TOKENS_MAX:
+        _TOOL_DEFS_TOKENS.clear()
+    _TOOL_DEFS_TOKENS[key] = value
+    return value
+
 
 async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[str, Any],
                            observation: Any, message: str,
@@ -505,19 +563,27 @@ async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[
     # DeepSeek 带 tools 时硬要求把 assistant 的 reasoning_content 原样回传
     # （缺了直接 400）；别的家没有这个字段，别塞给它们
     replay_reasoning = bool(getattr(llm, "replays_reasoning_content", False))
+    # 记忆卡一回合只读一次（T7）：预取与近况层共用同一份，读卡挪线程池；
+    # 读失败只告警（与预取失败同一条日志），两层都退化为空、回合照常
+    try:
+        card = await asyncio.to_thread(memory.load_card, npc_id, store_dir=store_dir)
+    except Exception as exc:
+        log.warning("memory_prefetch_failed", npc_id=npc_id,
+                    error=short_err(exc, store_dir=store_dir))
+        card = []
     # 记忆预取：置顶 → 重要度 → 新旧，到记忆预算为止，失败只告警
     memory_text, trace.mem_hits, trace.mem_filtered = await asyncio.to_thread(
-        _prefetch_memory_text, npc_id, store_dir)
+        _prefetch_memory_text, npc_id, store_dir, card)
     # 近况层：最近动作结果 + 进行中 / 待确认。pending.alive() 是纯内存
-    # 读（过期清理已在 /api/talk 开始时做完），最近动作结果那次读卡挪线程池
+    # 读（过期清理已在 /api/talk 开始时做完），最近动作结果共用上面那份卡
     pending_infos = pending_actions.alive(npc_id) if pending_actions else []
     recent_results, recent_running, recent_unknown = await asyncio.to_thread(
-        _recent_layer, npc_id, pending_infos, store_dir)
+        _recent_layer, npc_id, pending_infos, store_dir, entries=card)
     # summarize=False：回合内不跑摘要 LLM，只读现成的摘要状态；
     # 摘要在回合结束、append_turn 之后后台触发（见 _closing_frames）
     history = await asyncio.to_thread(
         chatlog.build_history, npc_id, llm,
-        token_budget=config.budget_history(),     # 对话层预算
+        token_budget=config.budget_history(store_dir=store_dir),     # 对话层预算
         store_dir=store_dir, summarize=False,
         reasoning_replay=replay_reasoning)         # DeepSeek 带 tools 要回传 CoT
     # 装配走 context.assemble（system 固定层，观测等易变块挪到
@@ -531,9 +597,12 @@ async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[
                                  recent_running=recent_running,
                                  recent_unknown=recent_unknown)
     trace.tokens.update(assembled.section_tokens)
+    # 工具定义也占上下文（D3）：计入估算，total 与 summary_trigger.prompt_tokens 自然包含它
+    tool_defs = tools.build_tool_definitions(capabilities)
+    trace.tokens["tools"] = _tool_defs_tokens(tool_defs)
     for cut in assembled.truncated:                # 截断绝不静默：每层一条日志
         log.warning("context_section_truncated", npc_id=npc_id, **cut)
-    return assembled.messages, tools.build_tool_definitions(capabilities), replay_reasoning
+    return assembled.messages, tool_defs, replay_reasoning
 
 
 async def _run_action_call(c: Dict[str, Any], *, npc_id: str,
@@ -612,9 +681,21 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
 
     stream_turn 三段式的第二段。工具轮预算用满后追加一次**收尾轮**（不带工具）：
     否则模型可能连续几轮只调工具，预算一耗尽就"哑巴收场"—— 动作做了，台词一句没有。
+
+    T4（NPC_SILENT_REMEMBER 开时）每轮工具执行完先判断收尾：
+      · 有非静默调用（recall / 动作）→ 照常继续（要结果的调用不能拦）；
+      · 有 bad_args（模型重发才能修好）→ 继续；
+      · 整个回合到现在一句台词都没出 → 继续（台词义务没完成）；
+      · 否则（只有 remember 且台词已出）→ **提前收尾**（trace.ended_early），不再多跑一轮。
+    另：只有静默工具且台词为空时，下一轮改 `tools=None` —— 防止模型连环 remember
+    永远不开口。历史只落文本（chatlog 不存 tool_calls），提前收尾不会留下悬空调用；
+    `turn_reasoning` 取收尾那一轮的思考，与台词配套。
     """
+    silent_finish = silent_remember_enabled()   # T4 开关（现读，可热切）
+    validate_args = validate_action_args_enabled()   # T6 开关（现读，可热切）
+    force_close = False    # 只有静默工具且没台词 → 下一轮不给工具
     for round_no in range(MAX_TOOL_ROUNDS + 1):
-        closing = round_no == MAX_TOOL_ROUNDS
+        closing = round_no == MAX_TOOL_ROUNDS or force_close
         buffers: Dict[int, _ToolCallBuffer] = {}
         round_text: List[str] = []
         round_reasoning: List[str] = []
@@ -672,6 +753,23 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
                 # 回给模型让它重发；记忆工具照旧执行（落在自己的缺参提示上）
                 tool_text = f"{c['name']} 的参数不是合法 JSON，请按工具定义重发一次"
                 trace.add_tool(c["name"], capabilities, False, "bad_args", 0.0)
+            elif is_action and validate_args:
+                # T6：执行前按声明校验（D9）—— 非法不下发给 mod，回灌错误让模型重发
+                # （trace 记 invalid_args，计入工具轮数预算）；合法则转型后照常执行
+                cleaned, err = tools.validate_action_args(
+                    tools.find_action(c["name"], capabilities) or {}, c["args"])
+                if err:
+                    log.warning("action_args_invalid", npc_id=npc_id,
+                                action=c["name"], error=err)
+                    tool_text = f"参数不合法：{err}，请重发"
+                    trace.add_tool(c["name"], capabilities, False, "invalid_args", 0.0)
+                else:
+                    tool_text = await _run_action_call(
+                        {**c, "args": cleaned}, npc_id=npc_id, capabilities=capabilities,
+                        execute_url=execute_url, mod=mod, executor=executor,
+                        execute_timeout=execute_timeout,
+                        pending_actions=pending_actions, store_dir=store_dir,
+                        run=run, trace=trace)
             elif is_action:
                 # 动作工具：同步调 mod 的 /execute，结果当场回上下文继续推理
                 tool_text = await _run_action_call(
@@ -688,6 +786,17 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
             })
         if round_no == MAX_TOOL_ROUNDS - 1:
             log.warning("talk_tool_rounds_exhausted", npc_id=npc_id)
+        if not silent_finish:
+            continue
+        # T4 收尾判断：要结果的调用 / 坏参数 / 台词义务没完成 → 继续；否则提前收尾
+        silent_only = all(tools.is_silent_tool(c["name"]) for c in calls)
+        if not silent_only or bad_ids or not run.dialogue_emitted:
+            if silent_only and not run.dialogue_emitted:
+                force_close = True      # 只会 remember、一句台词没有：下一轮不给工具
+            continue
+        # 只有静默调用且台词已出（本轮或更早）：记住的事照常落卡，当场收尾
+        trace.ended_early = True
+        break
 
 
 async def _closing_frames(llm: Optional[LLMClient], npc_id: str, persona: Dict[str, Any],
@@ -700,18 +809,21 @@ async def _closing_frames(llm: Optional[LLMClient], npc_id: str, persona: Dict[s
     append_turn 之后才后台触发，不挡首字；失败只告警不打断收尾 —— 后面的
     action / done 帧必须发出去。
     """
-    # 该不该摘要用 needs_summary（纯读）判断：本回合提示 token（trace 的
+    # 该不该摘要用 summary_plan（纯读）判断：本回合提示 token（trace 的
     # tokens.total，本地估算口径）≥ 窗口 × NPC_SUMMARY_RATIO 才压；
     # 拿不到估算（出错没走到装配）/ 降级回合 → 不触发，下回合再说；
     # 同 NPC 已有摘要在跑就跳过。
     # trace 的 summarized = 本回合启动了后台摘要（不是"摘要已经跑完"）。
+    # plan 里的 turns 直接传给后台折叠 —— 整文件读盘只此一次，后台不再重读。
     try:
         trace_tokens_total = sum(trace.tokens.values())
-        needed = (not trace.llm_fallback and trace_tokens_total > 0
-                  and await asyncio.to_thread(
-                      chatlog.needs_summary, npc_id, trace_tokens_total,
-                      store_dir=store_dir))
-        trace.summarized = needed and scheduler.schedule(llm, npc_id, store_dir)
+        plan = None
+        if not trace.llm_fallback and trace_tokens_total > 0:
+            plan = await asyncio.to_thread(
+                chatlog.summary_plan, npc_id, trace_tokens_total,
+                store_dir=store_dir)
+        trace.summarized = bool(plan) and scheduler.schedule(
+            llm, npc_id, store_dir, turns=plan[0] if plan else None)
     except Exception as exc:
         log.warning("summary_trigger_failed", npc_id=npc_id,
                     error=short_err(exc, store_dir=store_dir))
@@ -803,9 +915,10 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
         # 回合收尾：一条 turn_trace（结构化日志 + 可选 JSONL）。先置位再发 —— to_thread 被
         # 取消也不至于 finally 再发一条；trace 写失败只告警（_emit_turn_trace 内吞掉），不影响回合。
         trace_sent = True
-        await asyncio.to_thread(_emit_turn_trace, trace.record(npc_id, message, run))
+        await asyncio.to_thread(_emit_turn_trace,
+                                trace.record(npc_id, message, run, store_dir=store_dir))
         yield _sse({"type": "done"})
     finally:
         if not trace_sent:
             # 断连 / 取消兜底：此时不能再 await，同步发（同上面 chatlog 落盘的理由）
-            _emit_turn_trace(trace.record(npc_id, message, run))
+            _emit_turn_trace(trace.record(npc_id, message, run, store_dir=store_dir))

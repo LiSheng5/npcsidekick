@@ -38,7 +38,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.client import LLMClient
-from core.config import summary_keep_recent, summary_ratio
+from core.config import context_window, summary_keep_recent, summary_ratio
 from core.config_flags import env_num
 from core.llm_runtime import (
     apply_llm_settings,
@@ -58,6 +58,7 @@ from pending import PendingActions
 import chatlog
 import console_api
 import memory
+import tools
 import tts
 import turn
 
@@ -315,6 +316,14 @@ def _routes_contract(app: FastAPI, ctx: _GameCtx) -> None:
             params = action.get("params", {})
             if params is not None and not isinstance(params, dict):
                 raise HTTPException(status_code=400, detail=f"actions[{i}].params 必须是对象")
+            for key, spec in (params or {}).items():
+                # params 值两种形态（T6）：字符串（老写法）/ 对象 {type, enum, desc, optional}；
+                # 形态非法当场 400，别等 LLM 看到一份坏 schema
+                problem = tools.param_spec_error(spec)
+                if problem:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"actions[{i}].params.{key} {problem}")
             clean.append({"name": name.strip(), "desc": desc.strip(), "params": params or {}})
         ctx.registry.declare(mod, clean, execute_url=execute_url)
         log.info("capabilities_declared", mod=mod, actions=len(clean),
@@ -486,6 +495,8 @@ def _routes_status(app: FastAPI, ctx: _GameCtx) -> None:
             # 摘要阈值两项随 env 可热切，前端聊天页文案按它现算
             "summary_ratio": summary_ratio(),
             "summary_keep_recent": summary_keep_recent(),
+            # 上下文窗口（页面 > store/llm_config.json > 环境变量），前端按它算触发线
+            "context_window": context_window(store_dir=ctx.store_dir),
             "uptime_s": round(time.time() - ctx.started_at, 1),
         }
 

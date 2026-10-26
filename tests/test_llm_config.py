@@ -110,19 +110,94 @@ def test_hint_list_is_actionable():
 
 # ── 上下文预算读取（core/config.budget_*，装配层只收传参）─────
 
-def test_budget_history_hard_cap_default_follows_context_window(monkeypatch):
+def test_budget_history_hard_cap_default_follows_context_window(clean_llm, monkeypatch, tmp_store):
     """未显式设置 → 硬上限 = 上下文窗口 × 0.7（现算）；显式设置了以它为准。"""
     from core import config
 
     monkeypatch.delenv("NPC_BUDGET_HISTORY", raising=False)
     monkeypatch.setenv("NPC_CONTEXT_WINDOW", "100000")
-    assert config.budget_history() == 70000
+    assert config.budget_history(store_dir=tmp_store) == 70000
 
-    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")       # 现读可热切，不用重启
-    assert config.budget_history() == 700
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "8000")       # 现读可热切，不用重启
+    assert config.budget_history(store_dir=tmp_store) == 5600
 
     monkeypatch.setenv("NPC_BUDGET_HISTORY", "123")
-    assert config.budget_history() == 123
+    assert config.budget_history(store_dir=tmp_store) == 123
+
+
+# ── 上下文窗口（T1）：三层合并 / 下限校验 / 热切 ─────────────
+
+def test_context_window_default_and_three_layer_priority(clean_llm, tmp_store, monkeypatch):
+    """默认 300000；优先级 页面 > store/llm_config.json > 环境变量。"""
+    from core import config
+
+    monkeypatch.delenv("NPC_CONTEXT_WINDOW", raising=False)
+    assert config.context_window(store_dir=tmp_store) == 300_000      # 三层都没设 → 默认
+
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "32000")
+    assert config.context_window(store_dir=tmp_store) == 32000        # 环境变量
+
+    (tmp_store / "llm_config.json").write_text(
+        json.dumps({"context_window": 128000}), encoding="utf-8")
+    assert config.context_window(store_dir=tmp_store) == 128000       # 文件 > 环境变量
+
+    clean_llm.apply_llm_settings({"context_window": 300000}, store_dir=tmp_store)
+    (tmp_store / "llm_config.json").write_text(
+        json.dumps({"context_window": 128000}), encoding="utf-8")
+    assert config.context_window(store_dir=tmp_store) == 300000       # 页面 > 文件
+
+
+def test_context_window_page_rejects_invalid(clean_llm, tmp_store):
+    """写入校验：整数且 ≥ 8000，非法值被拒（400），不留脏数据。"""
+    from core import config
+
+    for bad in (7999, 0, -5, "abc", "8000.5", 10000.5, True):
+        with pytest.raises(ValueError):
+            clean_llm.apply_llm_settings({"context_window": bad}, store_dir=tmp_store)
+    assert config.context_window(store_dir=tmp_store) == 300_000      # 被拒 = 不留脏数据
+
+    clean_llm.apply_llm_settings({"context_window": "300000"}, store_dir=tmp_store)  # 无损字符串也认
+    assert config.context_window(store_dir=tmp_store) == 300000
+    saved = json.loads((tmp_store / "llm_config.json").read_text("utf-8"))
+    assert saved["context_window"] == 300000
+
+
+def test_context_window_invalid_reads_fall_back_to_default(clean_llm, tmp_store, monkeypatch):
+    """读到坏值（env 写错 / 文件写坏）→ 回落默认并告警一次，不炸。"""
+    from core import config
+
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")       # 低于下限
+    assert config.context_window(store_dir=tmp_store) == 300_000
+
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "abc")
+    assert config.context_window(store_dir=tmp_store) == 300_000
+
+    (tmp_store / "llm_config.json").write_text(
+        json.dumps({"context_window": "oops"}), encoding="utf-8")
+    assert config.context_window(store_dir=tmp_store) == 300_000
+
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "8000")
+    (tmp_store / "llm_config.json").unlink()
+    assert config.context_window(store_dir=tmp_store) == 8000          # 好值照常生效
+
+
+def test_context_window_hot_switch_moves_summary_limit(clean_llm, tmp_store, monkeypatch):
+    """改值不重启即生效：压缩触发线随窗口移动。"""
+    import chatlog
+
+    monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.4")
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "32000")
+    assert chatlog.summary_limit(store_dir=tmp_store) == 12800
+
+    clean_llm.apply_llm_settings({"context_window": 300000}, store_dir=tmp_store)
+    assert chatlog.summary_limit(store_dir=tmp_store) == 120000
+
+
+def test_state_returns_context_window(tmp_store, write_persona, make_app_client,
+                                      clean_llm, monkeypatch):
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "32000")
+    state = make_app_client().get("/api/state").json()
+    assert state["context_window"] == 32000
 
 
 # ── 逃生舱：NPC_LLM_EXTRA_BODY ───────────────────────────

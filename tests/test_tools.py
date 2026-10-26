@@ -45,6 +45,97 @@ def test_action_without_params():
     assert fn["parameters"]["properties"] == {} and fn["parameters"]["required"] == []
 
 
+# ── T6：对象形态 params（type / enum / desc / optional）─────
+
+def test_action_tool_schema_object_params():
+    """对象写法生效：type / enum 进 schema，optional 的不进 required；老写法保持不变。"""
+    schema = tools.action_tool_schema({
+        "name": "give", "desc": "给钱",
+        "params": {
+            "amount": {"type": "integer", "desc": "金额"},
+            "kind": {"type": "string", "enum": ["coin", "gem"]},
+            "reason": {"type": "string", "desc": "缘由", "optional": True},
+        }})
+    fn = schema.to_openai_function()["function"]
+    props = fn["parameters"]["properties"]
+    assert props["amount"] == {"type": "integer", "description": "金额"}
+    assert props["kind"] == {"type": "string", "enum": ["coin", "gem"]}
+    assert props["reason"] == {"type": "string", "description": "缘由"}
+    assert fn["parameters"]["required"] == ["amount", "kind"]      # optional 不进 required
+    assert "additionalProperties" not in fn["parameters"]           # 不加，个别网关不认
+
+
+def test_action_tool_schema_old_string_params_unchanged():
+    fn = tools.action_tool_schema(ACTIONS[0]).to_openai_function()["function"]
+    assert fn["parameters"]["properties"]["dish"] == {
+        "type": "string", "description": "菜名(字符串)"}
+    assert fn["parameters"]["required"] == ["dish"]                # 老写法 = 必填 string
+
+
+def test_param_spec_error_shape():
+    """报到端点的形态校验：字符串/合法对象放行，其余400。"""
+    assert tools.param_spec_error("菜名") is None
+    assert tools.param_spec_error({"type": "integer", "desc": "x", "optional": True}) is None
+    assert tools.param_spec_error({"type": "STRING", "enum": ["a"]}) is None
+    assert tools.param_spec_error(123) is not None
+    assert tools.param_spec_error(None) is not None
+    assert tools.param_spec_error({"type": "money"}) is not None
+    assert tools.param_spec_error({"enum": "不是数组"}) is not None
+    assert tools.param_spec_error({"desc": 5}) is not None
+    assert tools.param_spec_error({"optional": "yes"}) is not None
+
+
+def test_build_tool_definitions_sorted():
+    """remember / recall 恒在前，动作按名排序（前缀稳定）。"""
+    names = [d["function"]["name"] for d in tools.build_tool_definitions(ACTIONS)]
+    assert names == ["remember", "recall", "chat", "cook", "goto"]
+
+
+# ── T6：validate_action_args（D9 口径）─────────────────────
+
+DECL = {"name": "give", "desc": "给钱", "params": {
+    "amount": {"type": "integer", "desc": "金额"},
+    "kind": {"type": "string", "enum": ["coin", "gem"], "optional": True},
+    "note": "备注（老写法 = 必填 string）",
+}}
+
+
+def test_validate_action_args_coerces_lossless_strings():
+    """integer / number / boolean 接受可无损转换的字符串并转型。"""
+    cleaned, err = tools.validate_action_args(DECL, {"amount": "3", "note": "辛苦", "kind": "coin"})
+    assert err is None
+    assert cleaned == {"amount": 3, "kind": "coin", "note": "辛苦"}
+
+    decl = {"name": "f", "desc": "", "params": {
+        "flag": {"type": "boolean"}, "ratio": {"type": "number"}, "n": {"type": "integer"}}}
+    cleaned, err = tools.validate_action_args(decl, {"flag": "true", "ratio": "0.5", "n": "2"})
+    assert err is None
+    assert cleaned == {"flag": True, "ratio": 0.5, "n": 2}
+
+
+def test_validate_action_args_missing_required():
+    _, err = tools.validate_action_args(DECL, {"amount": 3})
+    assert err and "缺少必填参数 note" in err
+
+
+def test_validate_action_args_bad_type():
+    _, err = tools.validate_action_args(DECL, {"amount": "三", "note": "x"})
+    assert err and "amount" in err
+    _, err = tools.validate_action_args(DECL, {"amount": 3, "note": 5})
+    assert err and "note" in err
+
+
+def test_validate_action_args_enum():
+    _, err = tools.validate_action_args(DECL, {"amount": 3, "note": "x", "kind": "元宝"})
+    assert err and "kind" in err and "允许的取值" in err
+
+
+def test_validate_action_args_optional_ok_and_extra_dropped():
+    cleaned, err = tools.validate_action_args(DECL, {"amount": 3, "note": "x", "没声明的": 1})
+    assert err is None
+    assert cleaned == {"amount": 3, "note": "x"}       # optional 缺席合法；多余参数丢弃不拒绝
+
+
 def test_build_tool_definitions_includes_declared_actions():
     defs = _defs_by_name(tools.build_tool_definitions(ACTIONS))
     assert set(defs) == {"remember", "recall", "cook", "goto", "chat"}

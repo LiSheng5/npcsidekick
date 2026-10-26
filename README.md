@@ -46,7 +46,7 @@
   4. 不带 `call_id`（旧 mod）→ 按 `(npc_id, action)` 取最早一条登记（FIFO），**无论命中与否都写卡**——旧 mod 的回报不能丢；同一 `(npc_id, action, ok, note)` 短窗（10 秒）内的重复投递只写一次（旧 mod 重试会投递多遍），被去重的回报返回 `deduped=true`
 - 待定动作存活上限 `NPC_PENDING_TTL`（默认 120 秒）。`/api/talk` 开始与 `/api/action_result` 到达时各清理一次（回报**先销账、后清理**，TTL 边界秒级迟到的回报仍能命中）；TTL 到点仍没回报 → 写一条 `没做成: 一直没等到结果` 并移除登记。
 - 重复动作保护：同 NPC、同名、同参数的动作还在 `running` / `unknown` → 不下发，回 `deduped`（LLM 重发新 `call_id` 时幂等拦不住，只能按名 + 参识别；参数不同 = 新指令）。
-- 工具调用轮次上限 3 轮（记忆与动作共用）；用满后追加一个**不带工具**的收尾轮，避免"动作做了、台词一句没有"。
+- 工具调用轮次上限 3 轮（记忆与动作共用）；用满后追加一个**不带工具**的收尾轮，避免"动作做了、台词一句没有"。`NPC_SILENT_REMEMBER`（默认开）下一轮里只有 `remember` 且台词已出时**当场收尾**（不再多跑一轮）；只有 remember、一句台词没有时下一轮不给工具，防止连环 remember。
 
 ## SSE 帧类型
 
@@ -95,12 +95,14 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `NPC_MOD_HEARTBEAT_TIMEOUT` | mod 心跳超时（秒），超时视为离线 | 60 |
 | `NPC_EXECUTE_TIMEOUT` | 动作执行同步等待上限（秒），超时记「不确定」 | 30 |
 | `NPC_PENDING_TTL` | 待定动作存活上限（秒） | 120 |
-| `NPC_CONTEXT_WINDOW` | 当前模型的上下文窗口（token）。**换模型要同步改**，压缩阈值按它算 | 1000000 |
+| `NPC_CONTEXT_WINDOW` | 当前模型的上下文窗口（token）。**换模型要同步改**，压缩阈值按它算。控制台「模型」页可改（存 `store/llm_config.json`，优先级高于本变量）；下限 8000，写坏/低于下限的值回落默认并告警一次 | 300000 |
 | `NPC_SUMMARY_RATIO` | 提示用到窗口的这个比例就触发滚动压缩 | 0.4 |
 | `NPC_SUMMARY_KEEP_RECENT` | 压缩后仍逐字保留的最近轮数 | 3 |
 | `NPC_MEM_RECALL_MIN_REL` | recall 相关度门槛（低于门槛的条目不返回） | 0.2 |
 | `NPC_RECENT_RESULTS` / `NPC_RECENT_MINUTES` | 近况层「最近动作结果」条数 / 时间窗（分钟） | 5 / 30 |
-| `NPC_BUDGET_STATE` / `NPC_BUDGET_MEMORY` / `NPC_BUDGET_HISTORY` | 上下文各层 token 预算；`NPC_BUDGET_HISTORY` = 历史硬上限，未设时为窗口 × 0.7（只防摘要失败时撑爆上下文） | 800 / 600 / 窗口 × 0.7 |
+| `NPC_BUDGET_STATE` / `NPC_BUDGET_MEMORY` / `NPC_BUDGET_HISTORY` | 上下文各层 token 预算；`NPC_BUDGET_HISTORY` = 历史硬上限，未设时为窗口 × 0.7（只防摘要失败时撑爆上下文） | 800 / 2000 / 窗口 × 0.7 |
+| `NPC_SILENT_REMEMBER` | remember 静默收尾：一轮里只有 `remember` 且台词已出 → 当场收尾（trace 记 `ended_early`）；只有 remember、一句台词没有 → 下一轮不给工具（防连环调用）。关 = 旧节奏 | 开 |
+| `NPC_VALIDATE_ACTION_ARGS` | 动作参数执行前校验（D9 口径，见契约节）：不合法不下发给 mod、回灌重发；老 mod 想保持"拿到什么发什么"就关掉 | 关 |
 | `NPC_TRACE_FILE` | 回合 trace 落盘（JSONL，只记长度不记原文） | 不落盘 |
 
 布尔词表：`1` / `true` / `yes` / `on` 为开（大小写、首尾空白不敏感），其余一律关。数值项未设置/空 → 默认值；**非法 → 回落默认值并告警一次**（同一取值只告警一次；`NPC_SUMMARY_RATIO` 超出 [0,1] 钳到边界，同样告警）。除 `api_key.txt` 权限检测外，全部**每次现读环境变量**，改完不用重启（可热切）。
@@ -121,6 +123,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 - OpenAI 官方只认顶层 `reasoning_effort`（没有 thinking 开关，也没有显式关闭参数）；OpenRouter 走 `reasoning:{effort}`，只支持 `low`/`medium`/`high`，高档位归一到 `high`。
 - GLM 5.2 以下只支持思考开/关（「仅开」= 只发 `thinking:{type:enabled}`）；5.2 起支持分级，按 DeepSeek 列映射。
 - 控制台勾了「该模型不认思考参数」→ 一个思考参数都不发（连关闭开关也不发）。
+- 档位玩家自选，不做自动切换；对话场景推荐 `off` 或 `low`（控制台「模型」页有同样提示）。
 
 > 思考模式：请求带 `tools` 时，DeepSeek 官方要求把历史 assistant 的 `reasoning_content` 原样回传（缺了直接 400）。所以回合内的工具轮与历史消息都会带上思考内容，并计入 `NPC_BUDGET_HISTORY` 预算；非 DeepSeek 端点不回传这个字段。
 
@@ -141,12 +144,23 @@ uvicorn server:app --host 127.0.0.1 --port 8000
   "mod": "sims4",
   "execute_url": "http://127.0.0.1:8766/execute",
   "actions": [
-    {"name": "cook", "desc": "做一道菜", "params": {"dish": "菜名"}}
+    {"name": "cook", "desc": "做一道菜", "params": {"dish": "菜名"}},
+    {"name": "give_money", "desc": "给钱", "params": {
+      "amount": {"type": "integer", "desc": "金额"},
+      "reason": {"type": "string", "desc": "缘由", "optional": true}
+    }}
   ]
 }
 ```
 
 `mod`、`actions[].name`、`actions[].desc` 必填；`execute_url` 可选（**没给 = 该 mod 没有可执行动作**，动作工具不进 LLM 工具定义）。成功返回 `{ok, mod, actions:[动作名]}`。
+
+`actions[].params` 的值两种写法都认（形态非法报到即 400）：
+
+- **老写法**：字符串 = 参数说明，等价于必填 `string`；
+- **新写法**：对象 `{type, enum, desc, optional}` —— `type` 取 `string / integer / number / boolean`，`enum` 可选（取值白名单），`optional: true` 的不进 `required`。
+
+参数执行前校验由 `NPC_VALIDATE_ACTION_ARGS` 控制（默认关）：开时缺必填 / 类型不符 / 不在枚举内的调用**不下发给 mod**，回灌「参数不合法：…，请重发」让模型自己改（trace 记 `invalid_args`，计入工具轮数预算）；`integer / number / boolean` 接受可无损转换的字符串并转型，未声明的多余参数丢弃并记告警（不拒绝）。**行为变化提示**：老 mod 缺必填参数时以前会直接下发，开启开关后会被拦下。
 
 ### `POST /api/talk`
 
@@ -172,7 +186,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 
 ### 状态查询
 
-`GET /api/state` 返回模型名、LLM 三件套状态（key 只给掩码）、思考档位、TTS 是否可用、各 mod 在线状态与心跳阈值、摘要阈值（`summary_ratio` / `summary_keep_recent`）、运行时长等。`GET /api/npcs` 返回每个 NPC 的记忆条数、聊天消息数、最近活动时间。
+`GET /api/state` 返回模型名、LLM 三件套状态（key 只给掩码）、思考档位、上下文窗口（`context_window`，页面 > `store/llm_config.json` > `NPC_CONTEXT_WINDOW` 的三层合并值）、TTS 是否可用、各 mod 在线状态与心跳阈值、摘要阈值（`summary_ratio` / `summary_keep_recent`）、运行时长等。`GET /api/npcs` 返回每个 NPC 的记忆条数、聊天消息数、最近活动时间。
 
 控制台端点（角色卡 / 记忆 / 聊天记录 / 关系网 / 模型设置）是独立的调试面，不属于 mod 契约。
 
@@ -191,12 +205,11 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 
 整个提示（系统 + 状态 + 记忆 + 历史 + 玩家这句）用到 `NPC_CONTEXT_WINDOW` 的 40%（`NPC_SUMMARY_RATIO`）时，回合结束后台把旧轮次压成滚动摘要（不挡首字），只留最近 3 轮逐字；摘要只保脉络，重要事实走记忆卡。
 
-## 记忆：预取与检索
+## 记忆
 
-- 写入口有四条：`remember` 工具（含 `replaces` 更新）、动作结果写卡、控制台的条目级增删改、人工手改记忆卡 JSON 文件。
-- **回合开始预取**：条目按「置顶 → 重要度 → 新旧」的顺序塞进记忆预算（`NPC_BUDGET_MEMORY`），到预算为止，放不下就停——整条进或整条不进，不半截截断。排除 `category=action`（动作结果由近况层负责）。不做相关性打分、不判断与当前这句话是否相关；预取只读卡，不改任何字段。
-- `recall` 工具保留，用于深挖：相关度低于门槛（`NPC_MEM_RECALL_MIN_REL`，默认 0.2）的条目不返回，全不相关返回空；排序 = 相关度为主、重要度为辅（`相关度 × 1.0 + (importance / 9) × 0.3`，同分 `created_at` 新的在前），同义词族取自该 NPC 角色卡的 `entity_synonyms`（按请求显式传入，多 NPC 并发不串）。
-- **`replaces` 更新旧记忆**：【相关记忆】与 recall 结果的每行带条目 id 的 6 位短编号（方括号里那串）。同一件事换了说法时，`remember` 用 `replaces` 填短编号把旧条目原地更新（保留 id / 创建时间 / `pinned`），不重复记；`replaces` 没有恰好唯一匹配到条目就当新记忆记下，不报错。工具描述里同时约束：只记玩家明说的话和确实发生过的事，不记猜测、推断或评价。
+- **一个文件**：`store/{id}_memory.json` —— 一 NPC 一张卡，JSON 条目列表，可直接手改、存盘即生效。
+- **字段**：条目 `{id, content, importance, category, created_at, pinned?}` —— `content` 记的事；`importance` 0-9；`category` 分类（如 preference / event / promise）；`pinned` 置顶（预取恒在最前）。**`category=action` 是特例**：动作结果卡（`完成: …` / `没做成: …`），不进【相关记忆】，由【最近发生】近况层负责。
+- **读写入口**：写有四条 —— `remember` 工具（`replaces` 填【相关记忆】里的 6 位短编号即原地更新）、动作结果写卡、控制台增删改、手改 JSON；读有两条 —— 回合开始按「置顶 → 重要度 → 新旧」确定性预取进【相关记忆】（受 `NPC_BUDGET_MEMORY` 约束，一回合只读一次卡），深挖走 `recall` 工具（相关度门槛 `NPC_MEM_RECALL_MIN_REL`）。
 
 ## 回合 trace
 
@@ -208,9 +221,10 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `rounds` | 本回合实际发起的 LLM 轮数 |
 | `llm_fallback` | 是否走了角色卡 `rules` 兜底 |
 | `summarized` | 本回合是否启动了后台摘要（不代表已跑完） |
+| `ended_early` | 是否提前收尾（T4：一轮里只有 `remember` 且台词已出 → 当场收尾） |
 | `no_dialogue` | 是否一句台词都没产出 |
 | `tools` | 每次工具调用 `{name, kind, ok, status, ms}` |
-| `tokens` | `{system, history, state, memory, user, total}`（本地估算口径） |
+| `tokens` | `{system, history, state, memory, user, tools, total}`（本地估算口径；`tools` = 工具定义，D3 起计入压缩触发估算） |
 | `summary_trigger` | `{prompt_tokens, limit}`：本回合提示 token 估算 vs 压缩阈值（窗口 × 比例），方便对照真实对话判断阈值是否合适 |
 | `memory_prefetch` | `{hits, filtered}`：进块条数 / 被滤条数 |
 | `first_token_ms` / `total_ms` | 首帧耗时 / 整回合耗时 |

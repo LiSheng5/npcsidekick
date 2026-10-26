@@ -278,14 +278,34 @@ def test_build_system_prompt_includes_persona_fields():
     prompt = build_system_prompt({
         "identity": "部落的老猎手", "personality": "寡言直接", "speech_style": "短句",
         "voice_samples": ["别追跑得快的。"], "taboos": ["烧湿柴"],
-    }, {"summary": "玩家在厨房"})
+    })
 
     assert "部落的老猎手" in prompt and "寡言直接" in prompt and "短句" in prompt
     assert "别追跑得快的。" in prompt
     assert "你绝不会烧湿柴" in prompt
-    assert "玩家在厨房" in prompt
-    assert "recall" in prompt                     # 接地：涉及往事先 recall，按逐字结果回答
+    assert "recall" in prompt                     # 接地：涉及往事先看【相关记忆】，不够再 recall
     assert "不知道" in prompt                     # 接地：查不到就说不知道，绝不编造
+
+def test_build_system_prompt_drops_observation_param():
+    """T5：observation 参数已删 —— 观测走【当前情况】块，system 是固定层（利于前缀缓存）。"""
+    import inspect
+
+    from core.personas import build_system_prompt
+
+    assert list(inspect.signature(build_system_prompt).parameters) == ["persona"]
+    prompt = build_system_prompt({"identity": "老猎手"})
+    assert "当前情况" not in prompt
+
+def test_system_prompt_rules_for_short_replies_and_pending():
+    """T5 新规矩：动手前先出台词、台词要短、进行中/待确认的事别重复下达也别吹成做成了。"""
+    from core.personas import build_system_prompt
+
+    prompt = build_system_prompt({"identity": "老猎手"})
+
+    assert "先用一句台词回应，再调用工具" in prompt
+    assert "先看【相关记忆】" in prompt and "没有而且确实需要时再 recall" in prompt
+    assert "台词要短" in prompt and "一到三句" in prompt
+    assert "别重复下达" in prompt and "别说成已经做成了" in prompt
 
 def test_system_prompt_matches_new_execution_model():
     """执行模型只有一种：LLM 调用工具执行（动作 = 工具调用）。

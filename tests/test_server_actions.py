@@ -432,7 +432,7 @@ def test_talk_tool_definitions_follow_whitelist(tmp_store, write_persona, make_a
     client.post("/api/talk", json={"npc_id": "cang", "message": "在吗", "mod": "mygame"})
 
     names = [t["function"]["name"] for t in provider.stream_calls[0]["tools"]]
-    assert names == ["remember", "recall", "cook", "goto", "chat"]
+    assert names == ["remember", "recall", "chat", "cook", "goto"]   # remember/recall 在前，动作按名排
 
 def test_talk_offline_mod_gets_no_action_tools(tmp_store, write_persona, make_app_client,
                                                make_provider):
@@ -595,3 +595,93 @@ def test_tools_module_whitelist_matches_server():
     """server 用 tools 的白名单判定动作，不另立一套。"""
     assert tools.is_action_tool("cook", CAPS["actions"]) is True
     assert tools.is_action_tool("dance", CAPS["actions"]) is False
+
+
+# ── T6：动作参数校验（NPC_VALIDATE_ACTION_ARGS）────────────
+
+def test_capabilities_rejects_bad_param_spec(tmp_store, write_persona, make_app_client):
+    """params 值形态非法 → 报到 400（别让 LLM 看到一份坏 schema）。"""
+    client = make_app_client()
+    bad_type = {"mod": "mygame", "execute_url": "http://127.0.0.1:8766/execute",
+                "actions": [{"name": "give", "desc": "给钱",
+                             "params": {"amount": {"type": "money"}}}]}
+    bad_shape = {"mod": "mygame", "actions": [{"name": "give", "desc": "给钱",
+                                               "params": {"amount": 123}}]}
+    assert client.post("/api/capabilities", json=bad_type).status_code == 400
+    assert client.post("/api/capabilities", json=bad_shape).status_code == 400
+
+def test_invalid_action_args_blocked_before_mod(tmp_store, write_persona, make_app_client,
+                                                make_provider, monkeypatch, tmp_path):
+    """开关开：缺必填不下发给 mod，回灌「参数不合法…请重发」，trace 记 invalid_args。"""
+    trace_file = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
+    monkeypatch.setenv("NPC_VALIDATE_ACTION_ARGS", "1")
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {}}]},   # 缺 dish
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "煮上了。"},
+    ])
+    executor = FakeExecutor()
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
+
+    assert len(executor.calls) == 1                        # 非法那次没到 mod
+    assert executor.calls[0]["payload"]["params"] == {"dish": "面"}
+    tool_texts = [m["content"] for m in provider.stream_calls[1]["messages"]
+                  if m["role"] == "tool"]
+    assert len(tool_texts) == 2                            # 非法回灌 + 合法执行各一条
+    assert any("参数不合法" in t and "请重发" in t for t in tool_texts)
+    assert kinds(res).count("action") == 1                 # 只有合法那次进帧
+    trace = json.loads(trace_file.read_text("utf-8").splitlines()[0])
+    assert trace["tools"][0]["status"] == "invalid_args" and trace["tools"][0]["ok"] is False
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == [
+        "完成: 面煮好了"]
+
+def test_validate_off_keeps_old_passthrough(tmp_store, write_persona, make_app_client,
+                                            make_provider, monkeypatch):
+    """开关关（默认）：老行为不变 —— 缺必填也照发给 mod（老 mod 不受 T6 影响）。"""
+    monkeypatch.setenv("NPC_VALIDATE_ACTION_ARGS", "0")
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "cook", "arguments": {}}]},
+        {"text": "好。"},
+    ])
+    executor = FakeExecutor()
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    client.post("/api/talk", json={"npc_id": "cang", "message": "做饭", "mod": "mygame"})
+
+    assert len(executor.calls) == 1
+    assert executor.calls[0]["payload"]["params"] == {}
+
+def test_object_params_converted_before_execute(tmp_store, write_persona, make_app_client,
+                                                make_provider, monkeypatch):
+    """对象写法全链路：schema 按类型/枚举生成；可无损转换的字符串转型后下发。"""
+    monkeypatch.setenv("NPC_VALIDATE_ACTION_ARGS", "1")
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "give",
+                                     "arguments": {"amount": "3", "kind": "coin"}}]},
+        {"text": "给过了。"},
+    ])
+    executor = FakeExecutor()
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json={
+        "mod": "mygame", "execute_url": "http://127.0.0.1:8766/execute",
+        "actions": [{"name": "give", "desc": "给钱", "params": {
+            "amount": {"type": "integer", "desc": "金额"},
+            "kind": {"type": "string", "enum": ["coin", "gem"], "optional": True},
+            "note": {"type": "string", "optional": True}}}]})
+
+    client.post("/api/talk", json={"npc_id": "cang", "message": "给三枚钱", "mod": "mygame"})
+
+    fn = [t for t in provider.stream_calls[0]["tools"]
+          if t["function"]["name"] == "give"][0]["function"]["parameters"]
+    assert fn["properties"]["amount"] == {"type": "integer", "description": "金额"}
+    assert fn["required"] == ["amount"]                   # optional 不进 required
+    payload = executor.calls[0]["payload"]
+    assert payload["params"] == {"amount": 3, "kind": "coin"}   # "3" → 3；optional 未给不带

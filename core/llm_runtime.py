@@ -50,7 +50,8 @@ def thinking_effort(store_dir: Optional[Path] = None) -> Optional[str]:
 
 # ── LLM 设置（页面可改，落 store/llm_config.json；key 不在这里）──
 
-_LLM_FIELDS = ("model", "base_url", "api_key", "reasoning_effort", "thinking_unsupported")
+_LLM_FIELDS = ("model", "base_url", "api_key", "reasoning_effort", "thinking_unsupported",
+               "context_window")
 _EFFORT_VALUES = ("off", "disabled", "none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 # 只有 api_key 是允许字段（页面可填，明文落盘，见 _PLAIN_KEY_WARNING）；
@@ -247,6 +248,9 @@ def _env_llm_config() -> Dict[str, Any]:
         "api_key": config.api_key() or "",
         "reasoning_effort": env_text(_ENV_REASONING_EFFORT) or "",
         "thinking_unsupported": False,
+        # 窗口的环境层走 env_context_window（已校验）—— 绝不能走 context_window()，
+        # 那个函数要经 llm_settings 绕回这里，成环
+        "context_window": config.env_context_window(),
     }
 
 
@@ -289,6 +293,7 @@ def llm_config_status(store_dir: Optional[Path] = None) -> Dict[str, Any]:
     status["reasoning_effort"] = reasoning_effort(store_dir=store_dir)   # 用户设的档位
     status["thinking_effort"] = thinking_effort(store_dir=store_dir)     # 实际下发的（None = 一个都不发）
     status["thinking_unsupported"] = bool(cfg["thinking_unsupported"])
+    status["context_window"] = config.context_window(store_dir=store_dir)  # 三层合并后的生效值
     status["origin"] = _llm_origin(store_dir=store_dir)
     status["api_key"] = api_key_status(store_dir=store_dir)      # 只有掩码，没有原文
     return status
@@ -325,6 +330,14 @@ def apply_llm_settings(patch: Dict[str, Any],
             # 字符串 "false" 转 bool 是 True —— 严格收布尔，别静默把语义翻过来
             raise ValueError("字段 thinking_unsupported 必须是布尔值")
         clean["thinking_unsupported"] = flag
+    if patch.get("context_window") is not None:
+        from core import config
+
+        number = config.valid_context_window(patch["context_window"])
+        if number is None:
+            # D1：下限 8000，低于它/非整数一律拒绝并提示（调用方转 400）
+            raise ValueError("上下文窗口必须是 ≥ 8000 的整数（token）")
+        clean["context_window"] = number
 
     _LLM_RUNTIME.update(clean)
     saved = _persisted_llm_config(store_dir=store_dir)

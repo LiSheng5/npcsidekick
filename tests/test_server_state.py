@@ -91,8 +91,8 @@ def test_summary_llm_does_not_block_event_loop(tmp_store, paths, write_persona, 
     from core.client import LLMClient, LLMResponse
     from core.types import StreamChunk
 
-    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")
-    monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.01")        # 阈值 = 10：提示必越线
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "8000")
+    monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.01")        # 阈值 = 80：提示必越线
     monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "0")
     monkeypatch.setenv("NPC_BUDGET_HISTORY", "100000")
     write_persona("cang")

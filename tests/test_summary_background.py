@@ -111,11 +111,11 @@ def _over_threshold_chatlog(npc_id: str, store_dir, rounds: int = 5) -> None:
 
 
 def _ratio_env(monkeypatch) -> None:
-    """窗口 1000 × 比例 0.01 → 压缩阈值 10：正常回合的提示都会越线。
+    """窗口 8000 × 比例 0.01 → 压缩阈值 80：正常回合的提示都会越线。
 
     硬上限放开、保留 1 轮，只让「提示越线 → 触发后台摘要」这一条路径生效。
     """
-    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "1000")
+    monkeypatch.setenv("NPC_CONTEXT_WINDOW", "8000")
     monkeypatch.setenv("NPC_SUMMARY_RATIO", "0.01")
     monkeypatch.setenv("NPC_SUMMARY_KEEP_RECENT", "1")
     monkeypatch.setenv("NPC_BUDGET_HISTORY", "100000")

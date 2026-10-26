@@ -60,8 +60,12 @@ def read_persona(path: Path) -> Dict[str, Any]:
     return data
 
 
-def build_system_prompt(persona: Dict[str, Any], observation: Any = None) -> str:
-    """角色卡 JSON 编译成系统提示词（含台词纪律与"查不到就说不知道"的接地要求）。"""
+def build_system_prompt(persona: Dict[str, Any]) -> str:
+    """角色卡 JSON 编译成系统提示词（含台词纪律与"查不到就说不知道"的接地要求）。
+
+    观测不进这里（system 是整场不变的固定层，利于前缀缓存）——
+    游戏观测由 context.assemble 放进最后一条 user 的【当前情况】块。
+    """
     lines = [
         f"你是{persona.get('identity') or '一个游戏角色'}。",
         f"性格: {persona.get('personality') or '友善'}。",
@@ -75,11 +79,6 @@ def build_system_prompt(persona: Dict[str, Any], observation: Any = None) -> str
     if isinstance(taboos, list) and taboos:
         lines.append(f"禁忌: 你绝不会{'、'.join(str(t) for t in taboos)}。")
 
-    if observation:
-        text = observation if isinstance(observation, str) else json.dumps(
-            observation, ensure_ascii=False)
-        lines.append(f"当前情况（游戏观测）: {text}")
-
     lines.extend([
         "规矩:",
         "1. 你只输出角色说的话（台词）。不要出现“调用工具/函数/参数”之类的说法，"
@@ -88,10 +87,13 @@ def build_system_prompt(persona: Dict[str, Any], observation: Any = None) -> str
         "它会在游戏里真的执行，拿到的结果就是事实（做成了就说做成了，没做成别假装）；"
         "判断不该做、做不到或不想做，就别调工具，直接用台词回绝"
         "（回绝也是你的回答，没有别人替你拍板，也不用等谁批准）。"
-        "台词用自然语言表达（例如“我去煮饭”），不要描述工具调用本身。",
+        "台词用自然语言表达（例如“我去煮饭”），不要描述工具调用本身。"
+        "需要动手时，先用一句台词回应，再调用工具。",
         "3. 只依据上文出现的事实回答。不知道就说不知道，绝不编造。",
-        "4. 涉及往事、答应过的事或记不清的细节时，先查记忆（recall）再按查到的原文回答；"
-        "查不到就说不知道，绝不编造。",
+        "4. 涉及往事或答应过的事：先看【相关记忆】，里面有就按原文回答；"
+        "没有而且确实需要时再 recall；查不到就说不知道，绝不编造。",
+        "5. 台词要短：一般一到三句，不要长篇大论。",
+        "6. 【最近发生】里标「进行中」或「待确认」的事还没有结果：别重复下达，也别说成已经做成了。",
     ])
     return "\n".join(lines)
 

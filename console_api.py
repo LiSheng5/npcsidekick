@@ -461,7 +461,7 @@ def _routes_chat(router: APIRouter, ctx: _ConsoleCtx) -> None:
             "limit": limit,
             "turns": messages[start:end],
             "estimated_tokens": sum(chatlog.estimate_tokens(m["content"]) for m in messages),
-            "summary_threshold": chatlog.summary_limit(),
+            "summary_threshold": chatlog.summary_limit(store_dir=ctx.store_dir),
             "summary": chatlog.load_summary(npc_id, store_dir=ctx.store_dir),
         }
 
@@ -478,7 +478,7 @@ def build_router(persona_dir: Path,
     avatar_dir = 头像存放目录（server 里静态挂在 /avatars）；None 表示不启用头像。
     store_dir = 记忆卡/聊天记录的运行时数据目录（None = 工程默认 store/）。
     llm_api = 模型设置的读写回调 {status, apply, reset}；给了才挂 /api/llm 三个端点。
-    可改字段：model / base_url / api_key / reasoning_effort / thinking_unsupported；
+    可改字段：model / base_url / api_key / reasoning_effort / thinking_unsupported / context_window；
     其中 api_key **明文落 store/llm_config.json**（页面已带醒目提示），接口永远只回掩码。
     token / authorization / secret / password 这类字段一律 400。
 

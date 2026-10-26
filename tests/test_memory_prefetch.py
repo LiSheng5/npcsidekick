@@ -1,7 +1,7 @@
 """记忆预取 —— 回合开始、第一次调用 LLM 之前注入记忆块。
 
 【相关记忆】块 = 条目按「置顶 → 重要度 → 新旧」排序，逐条塞进记忆预算
-（NPC_BUDGET_MEMORY，默认 600），放不下就停（整条进或整条不进，不半截截断），
+（NPC_BUDGET_MEMORY，默认 2000），放不下就停（整条进或整条不进，不半截截断），
 排除 category == "action" 的条目；没有可放条目时整块省略。
 
 不做检索、不打分、不用 entity_synonyms：与玩家这句话相不相关不判断，相关性
@@ -262,10 +262,10 @@ def test_memory_prefetch_recorded_in_trace(tmp_store, write_persona, make_app_cl
     trace = json.loads(trace_file.read_text("utf-8").splitlines()[0])
     assert trace["memory_prefetch"] == {"hits": 2, "filtered": 1}   # 2 条进块，action 被滤
     tokens = trace["tokens"]
-    assert set(tokens) == {"system", "history", "state", "memory", "user", "total"}
+    assert set(tokens) == {"system", "history", "state", "memory", "user", "tools", "total"}
     assert tokens["memory"] > 0
     assert tokens["total"] == (tokens["system"] + tokens["history"] + tokens["state"]
-                               + tokens["memory"] + tokens["user"])
+                               + tokens["memory"] + tokens["user"] + tokens["tools"])
 
 
 def test_memory_prefetch_trace_counts_when_no_block(tmp_store, write_persona,
@@ -304,3 +304,29 @@ def test_recall_tool_still_available_for_deep_dive(tmp_store, write_persona,
     tool_msg = provider.stream_calls[1]["messages"][-1]
     assert tool_msg["role"] == "tool"
     assert "玩家上次说爱吃面" in tool_msg["content"]       # recall 照旧逐字返回
+
+
+def test_memory_card_read_once_per_turn(tmp_store, write_persona, make_app_client,
+                                        make_provider, monkeypatch):
+    """T7：一回合只读一次卡 —— 预取与近况层共用同一份（load_card 只被调一次）。"""
+    memory.add_entry("cang", "玩家上次说爱吃面", importance=8, store_dir=tmp_store)
+    memory.add_action_result("cang", "cook", True, "面煮好了", store_dir=tmp_store)
+    write_persona("cang")
+    provider = make_provider(turns=[{"text": "嗯。"}])
+    client = make_app_client(provider=provider)
+
+    real_load = memory.load_card
+    calls = []
+
+    def counting_load(*args, **kwargs):
+        calls.append(args)
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(memory, "load_card", counting_load)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"})
+
+    assert kinds(res)[-1] == "done"
+    assert len(calls) == 1
+    user = provider.stream_calls[0]["messages"][-1]["content"]
+    assert "【相关记忆】" in user and "【最近发生】" in user   # 两层都用上了那份卡

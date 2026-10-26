@@ -10,9 +10,10 @@
 """
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.logging_config import log
 from core.schema import ToolResult, ToolResultStatus, ToolSchema
@@ -24,8 +25,16 @@ TOOL_REMEMBER = "remember"
 TOOL_RECALL = "recall"
 _RESERVED_TOOLS = frozenset({TOOL_REMEMBER, TOOL_RECALL})
 
-# 动作工具的参数一律按"字符串 + 声明说明"进 schema（mod 报到的 params 形态：{参数名: 说明}）
-_PARAM_TYPE = "string"
+# 静默工具：调用完不必再逼模型开口（T4·NPC_SILENT_REMEMBER 开启时可提前收尾）。
+# 目前只有 remember —— 它是"顺手记一笔"，不影响台词输出义务。
+_SILENT_TOOLS = frozenset({TOOL_REMEMBER})
+
+# 动作参数的声明形态（mod 报到的 params 值，两种写法都认）：
+#   · 老写法：字符串 = 说明文字，等价于必填 string
+#   · 新写法：对象 {type, enum, desc, optional}，type ∈ string / integer / number / boolean
+#     —— optional 真 = 不进 required；enum 写进 schema（不加 additionalProperties，
+#     个别网关不认）
+_PARAM_TYPES = frozenset({"string", "integer", "number", "boolean"})
 
 REMEMBER_TOOL = ToolSchema(
     name=TOOL_REMEMBER,
@@ -63,19 +72,63 @@ RECALL_TOOL = ToolSchema(
 )
 
 
+def param_spec_error(value: Any) -> Optional[str]:
+    """params 值的形态校验（报到端点用）→ 非法原因文本；None = 合法。"""
+    if isinstance(value, str):
+        return None
+    if not isinstance(value, dict):
+        return "必须是字符串或对象"
+    ptype = value.get("type")
+    if ptype is not None and (not isinstance(ptype, str)
+                              or ptype.strip().lower() not in _PARAM_TYPES):
+        return "type 必须是 string / integer / number / boolean"
+    if value.get("enum") is not None and not isinstance(value.get("enum"), list):
+        return "enum 必须是数组"
+    if value.get("desc") is not None and not isinstance(value.get("desc"), str):
+        return "desc 必须是字符串"
+    if value.get("optional") is not None and not isinstance(value.get("optional"), bool):
+        return "optional 必须是布尔值"
+    return None
+
+
+def _parse_param_spec(value: Any) -> Tuple[Dict[str, Any], bool]:
+    """params 值 → (schema 属性, 是否必填)。两种写法都认（老写法字符串 = 必填 string）。"""
+    if isinstance(value, dict):
+        ptype = str(value.get("type") or "string").strip().lower()
+        if ptype not in _PARAM_TYPES:
+            ptype = "string"
+        prop: Dict[str, Any] = {"type": ptype}
+        desc = value.get("desc")
+        if isinstance(desc, str) and desc.strip():
+            prop["description"] = desc
+        enum = value.get("enum")
+        if isinstance(enum, list) and enum:
+            prop["enum"] = list(enum)
+        return prop, not bool(value.get("optional"))
+    return {"type": "string", "description": str(value)}, True
+
+
 def action_tool_schema(action: Dict[str, Any]) -> ToolSchema:
-    """把 mod 声明的动作变成工具定义（只认 /api/capabilities 报上来的动作）。"""
+    """把 mod 声明的动作变成工具定义（只认 /api/capabilities 报上来的动作）。
+
+    params 的值两种形态都认：字符串（老写法 = 必填 string + 说明）/
+    对象 `{type, enum, desc, optional}`（optional 的不进 required，enum 与 type
+    写进 schema；不加 additionalProperties，个别网关不认）。
+    """
     params = action.get("params") or {}
     if not isinstance(params, dict):
         params = {}
-    properties = {
-        str(k): {"type": _PARAM_TYPE, "description": str(v)}
-        for k, v in params.items()
-    }
+    properties: Dict[str, Any] = {}
+    required: List[str] = []
+    for key, spec in params.items():
+        prop, is_required = _parse_param_spec(spec)
+        properties[str(key)] = prop
+        if is_required:
+            required.append(str(key))
     return ToolSchema(
         name=str(action.get("name", "")),
         description=str(action.get("desc", "")),
-        parameters={"properties": properties, "required": list(properties.keys())},
+        parameters={"properties": properties, "required": required},
         category="action",
     )
 
@@ -95,18 +148,154 @@ def is_action_tool(name: str, capabilities: Optional[List[dict]]) -> bool:
     return name in declared_action_names(capabilities)
 
 
+def is_silent_tool(name: str) -> bool:
+    """静默工具：调用完不必再让模型补台词（目前只有 remember）。
+
+    T4 的收尾判断用它区分"顺手记一笔"（可提前收尾）与要出结果的调用
+    （recall / 动作，照常继续多轮）。
+    """
+    return name in _SILENT_TOOLS
+
+
+def find_action(name: str, capabilities: Optional[List[dict]]) -> Optional[Dict[str, Any]]:
+    """按名字取 mod 声明的动作定义（validate_action_args 拿它当校验依据）；没声明 → None。"""
+    for action in capabilities or []:
+        if str((action or {}).get("name", "")).strip() == name:
+            return action
+    return None
+
+
 def build_tool_definitions(capabilities: Optional[List[dict]] = None) -> List[dict]:
     """组装进 LLM 上下文的工具数组：remember + recall + 声明过的动作。
 
+    固定顺序（remember / recall 恒在前，动作按名排序）让工具定义前缀稳定，
+    同一套能力反复出现时利于前缀缓存。
     capabilities 为空（mod 离线 / 未报到 / 没给执行接口）→ 只给记忆工具（不给动作工具）。
     """
     tools = [REMEMBER_TOOL.to_openai_function(), RECALL_TOOL.to_openai_function()]
+    declared: Dict[str, Dict[str, Any]] = {}
     for action in capabilities or []:
         name = str((action or {}).get("name", "")).strip()
-        if not name or name in _RESERVED_TOOLS:
-            continue
-        tools.append(action_tool_schema(action).to_openai_function())
+        if name and name not in _RESERVED_TOOLS and name not in declared:
+            declared[name] = action          # 同名取先声明的（白名单口径）
+    for name in sorted(declared):
+        tools.append(action_tool_schema(declared[name]).to_openai_function())
     return tools
+
+
+# ── 执行前的参数校验（D9）──────────────────────────────────
+# 开关 NPC_VALIDATE_ACTION_ARGS（现读可热切）：
+#   · 缺必填、类型不符、不在枚举内 → 不下发给 mod，回灌错误让模型重发
+#   · integer / number / boolean 接受可无损转换的字符串并转型
+#   · 未声明的多余参数丢弃并记警告，不拒绝
+
+def validate_action_args(action: Dict[str, Any],
+                         args: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+    """按声明校验并转型工具参数 → (清洗后的参数, 错误文本)；错误文本 None = 合法。
+
+    失败时错误文本给模型重发（调用方据此不调 execute_url）；成功时多余参数已丢弃、
+    字符串已按声明转型（D9 口径）。
+    """
+    params = action.get("params") or {}
+    if not isinstance(params, dict):
+        params = {}
+    raw = args if isinstance(args, dict) else {}
+    for key in raw:
+        if key not in params:
+            log.warning("action_args_extra_dropped", action=str(action.get("name", "")),
+                        param=str(key)[:40])
+    cleaned: Dict[str, Any] = {}
+    errors: List[str] = []
+    for key, spec in params.items():
+        prop, required = _parse_param_spec(spec)
+        if key not in raw or raw[key] is None:
+            if required:
+                errors.append(f"缺少必填参数 {key}")
+            continue
+        value, err = _coerce_arg(raw[key], prop, str(key))
+        if err:
+            errors.append(err)
+        else:
+            cleaned[key] = value
+    return (cleaned, None) if not errors else (raw, "；".join(errors))
+
+
+def _coerce_arg(value: Any, prop: Dict[str, Any], key: str) -> Tuple[Any, Optional[str]]:
+    """单个参数按声明的 type / enum 校验并转型 → (值, 错误)。"""
+    ptype = prop.get("type", "string")
+    out: Any
+    if ptype == "string":
+        if not isinstance(value, str):
+            return None, f"参数 {key} 必须是字符串"
+        out = value
+    elif ptype == "integer":
+        out = _as_integer(value)
+        if out is None:
+            return None, f"参数 {key} 必须是整数"
+    elif ptype == "number":
+        out = _as_number(value)
+        if out is None:
+            return None, f"参数 {key} 必须是数字"
+    else:                                       # boolean
+        out = _as_boolean(value)
+        if out is None:
+            return None, f"参数 {key} 必须是布尔值"
+    enum = prop.get("enum")
+    if isinstance(enum, list) and enum and out not in enum:
+        return None, f"参数 {key} 不在允许的取值内"
+    return out, None
+
+
+def _as_integer(value: Any) -> Optional[int]:
+    """→ 整数（bool 不算；浮点/字符串仅无损可转时转）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        return int(number) if number.is_integer() else None
+    return None
+
+
+def _as_number(value: Any) -> Optional[float]:
+    """→ 数字（bool 不算；拒收 nan / inf）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+        return number if math.isfinite(number) else None
+    return None
+
+
+def _as_boolean(value: Any) -> Optional[bool]:
+    """→ 布尔（字符串只认 true / false —— 无损可转的那两个）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text == "true":
+            return True
+        if text == "false":
+            return False
+    return None
 
 
 def run_tool(name: str, args: Dict[str, Any], npc_id: str,
