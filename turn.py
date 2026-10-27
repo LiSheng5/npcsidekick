@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -529,21 +530,26 @@ def _recent_layer(npc_id: str, pending_infos: List[Dict[str, Any]],
 
 # ── 回合 ─────────────────────────────────────────────────
 
-# 工具定义的 token 估算缓存：键 = 能力清单的动作名（remember/recall 恒在）。
+# 工具定义的 token 估算缓存：键 = 工具定义 JSON 文本的哈希（T9）。
 # D3：工具定义计入压缩触发的估算 —— 同一套能力整个会话反复出现，
 # json.dumps + estimate_tokens 没必要每回合重算。上限 32 条，满了整体清掉重来。
-_TOOL_DEFS_TOKENS: Dict[Tuple[str, ...], int] = {}
+# 键必须是**整份定义文本**的哈希：只拿动作名当键时，mod 重新报到后同名动作改了
+# 参数或描述，估算会一直沿用旧值（直到缓存满 32 条才被动刷新）。
+_TOOL_DEFS_TOKENS: Dict[str, int] = {}
 _TOOL_DEFS_TOKENS_MAX = 32
 
 
 def _tool_defs_tokens(tool_defs: List[dict]) -> int:
-    """工具定义数组的 token 估算（本地口径，与各层同源）。"""
-    key = tuple(sorted(
-        str(d.get("function", {}).get("name", "")) for d in tool_defs if isinstance(d, dict)))
+    """工具定义数组的 token 估算（本地口径，与各层同源）。
+
+    键与估算基于同一份文本（sort_keys 固定字段顺序，参数/描述变了文本就变）。
+    """
+    text = json.dumps(tool_defs, ensure_ascii=False, sort_keys=True)
+    key = hashlib.sha256(text.encode("utf-8")).hexdigest()
     cached = _TOOL_DEFS_TOKENS.get(key)
     if cached is not None:
         return cached
-    value = estimate_tokens(json.dumps(tool_defs, ensure_ascii=False))
+    value = estimate_tokens(text)
     if len(_TOOL_DEFS_TOKENS) >= _TOOL_DEFS_TOKENS_MAX:
         _TOOL_DEFS_TOKENS.clear()
     _TOOL_DEFS_TOKENS[key] = value

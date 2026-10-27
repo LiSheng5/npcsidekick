@@ -100,6 +100,39 @@ def test_turn_trace_tools_tokens_grow_with_actions(tmp_store, write_persona,
             > first["summary_trigger"]["prompt_tokens"])
 
 
+def test_turn_trace_tools_tokens_follow_changed_params(tmp_store, write_persona,
+                                                       make_app_client, make_provider,
+                                                       monkeypatch, tmp_path):
+    """T9：缓存键 = 工具定义 JSON 的哈希 —— 同名动作改了参数/描述，tools 估算立刻跟着变。
+
+    用旧口径（只拿动作名当键）时第二次会命中缓存、返回与第一次相同的估算。
+    """
+    trace_file = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
+    write_persona("cang")
+    client = make_app_client(provider=make_provider(turns=[{"text": "嗯。"}, {"text": "嗯。"}]),
+                             executor=FakeExecutor())
+
+    brief = {"name": "cook", "desc": "做饭", "params": {"dish": "菜名"}}
+    verbose = {"name": "cook", "desc": "用厨房里的锅做一道菜，做完端到桌上",
+               "params": {"dish": {"type": "string",
+                                   "desc": "菜名（写全，例如西红柿炒蛋、牛肉面）"},
+                          "note": {"type": "string",
+                                   "desc": "备注：口味轻重、忌口、要不要加辣",
+                                   "optional": True}}}
+    client.post("/api/capabilities", json={"mod": "mygame",
+                                           "execute_url": CAPS["execute_url"],
+                                           "actions": [brief]})
+    client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"})
+    client.post("/api/capabilities", json={"mod": "mygame",
+                                           "execute_url": CAPS["execute_url"],
+                                           "actions": [verbose]})
+    client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"})
+
+    first, second = read_traces(trace_file)
+    assert second["tokens"]["tools"] > first["tokens"]["tools"]
+
+
 def test_turn_trace_fallback_turn_has_llm_fallback(tmp_store, write_persona,
                                                    make_app_client, monkeypatch, tmp_path):
     """降级回合（LLM 出错走规则回复）：llm_fallback=true，trace 照出。"""
