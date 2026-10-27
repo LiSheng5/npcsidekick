@@ -227,7 +227,7 @@ def render_markdown(result: Dict[str, Any]) -> str:
         "",
         "- 生成时间：%s" % result.get("generated_at", ""),
         "- 模型：%s" % (result.get("model") or "（未记录）"),
-        "- 角色卡：%s" % "、".join(entry["npc_id"] for entry in result["personas"]) or "（无）",
+        "- 角色卡：%s" % ("、".join(entry["npc_id"] for entry in result["personas"]) or "（无）"),
         "- 请求数：%d 次（%d 句输入 × 2 套提示词）"
         % (result.get("requests", 0), len(result.get("inputs") or [])),
         "- 提示词长度：旧 %d 字 / 新 %d 字（差 %+d 字）；约 旧 %d / 新 %d token（差 %+d）"
