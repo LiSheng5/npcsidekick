@@ -187,6 +187,7 @@ def build_tool_definitions(capabilities: Optional[List[dict]] = None) -> List[di
 # 开关 NPC_VALIDATE_ACTION_ARGS（现读可热切）：
 #   · 缺必填、类型不符、不在枚举内 → 不下发给 mod，回灌错误让模型重发
 #   · integer / number / boolean 接受可无损转换的字符串并转型
+#   · string 接受数字（3 → "3"、2.5 → "2.5"）；bool 与其他类型仍拒绝（T10）
 #   · 未声明的多余参数丢弃并记警告，不拒绝
 
 def validate_action_args(action: Dict[str, Any],
@@ -225,9 +226,18 @@ def _coerce_arg(value: Any, prop: Dict[str, Any], key: str) -> Tuple[Any, Option
     ptype = prop.get("type", "string")
     out: Any
     if ptype == "string":
-        if not isinstance(value, str):
+        # T10：string 参数收到数字（`note: 3`）时无损转字符串，别为这个多花一轮。
+        # bool 仍拒绝 —— 它是 int 的子类，转成 "True" 语义不明；其余类型照旧拒绝。
+        if isinstance(value, bool):
             return None, f"参数 {key} 必须是字符串"
-        out = value
+        if isinstance(value, str):
+            out = value
+        elif isinstance(value, int):
+            out = str(value)
+        elif isinstance(value, float) and math.isfinite(value):
+            out = str(value)
+        else:
+            return None, f"参数 {key} 必须是字符串"
     elif ptype == "integer":
         out = _as_integer(value)
         if out is None:
