@@ -46,7 +46,7 @@ MAX_TOOL_ROUNDS = 3
 # 记忆检索返回条数（recall 工具 + 回合开始的记忆预取共用这个 top-k）
 RECALL_TOP_K = 5
 
-# T4·remember 静默收尾开关（家规：现读环境变量、可热切）。
+# T4·remember 静默收尾开关（家规：现读环境变量、可热切，默认关）。
 # 开：一轮里只有 remember 且台词已出 → 当场收尾，不再多跑一轮逼台词；
 # 关：保持旧节奏（工具轮之后总是再跑一轮拿台词）。
 _ENV_SILENT_REMEMBER = "NPC_SILENT_REMEMBER"
@@ -58,8 +58,12 @@ _ENV_VALIDATE_ACTION_ARGS = "NPC_VALIDATE_ACTION_ARGS"
 
 
 def silent_remember_enabled() -> bool:
-    """remember 静默收尾开关（现读，可热切）：NPC_SILENT_REMEMBER，默认开。"""
-    return env_flag(_ENV_SILENT_REMEMBER, True)
+    """remember 静默收尾开关（现读，可热切）：NPC_SILENT_REMEMBER，默认关（先关后开）。
+
+    翻成默认开的条件（V2）：基线里混合用例（"记住…顺便做…"）开关开时没有动作被丢，
+    且记忆写入类回合的 rounds 明显减少。
+    """
+    return env_flag(_ENV_SILENT_REMEMBER, False)
 
 
 def validate_action_args_enabled() -> bool:
@@ -687,21 +691,30 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
       · 有 bad_args（模型重发才能修好）→ 继续；
       · 整个回合到现在一句台词都没出 → 继续（台词义务没完成）；
       · 否则（只有 remember 且台词已出）→ **提前收尾**（trace.ended_early），不再多跑一轮。
-    另：只有静默工具且台词为空时，下一轮改 `tools=None` —— 防止模型连环 remember
-    永远不开口。历史只落文本（chatlog 不存 tool_calls），提前收尾不会留下悬空调用；
+    另：只有静默工具且台词为空时，之后各轮不再给记忆工具（remember / recall），
+    **动作工具照给**（没有动作可给就不带工具）—— 防止模型连环 remember 永远不开口，
+    又不会把"记一笔，顺便做某事"里该做的动作丢掉。模型硬报没给的记忆工具 →
+    只记账（trace 状态 ignored）、不执行。历史只落文本（chatlog 不存 tool_calls），提前收尾不会留下悬空调用；
     `turn_reasoning` 取收尾那一轮的思考，与台词配套。
     """
     silent_finish = silent_remember_enabled()   # T4 开关（现读，可热切）
     validate_args = validate_action_args_enabled()   # T6 开关（现读，可热切）
-    force_close = False    # 只有静默工具且没台词 → 下一轮不给工具
+    memory_tools_off = False    # 只有静默工具且没台词 → 之后各轮不再给记忆工具（动作工具照给）
     for round_no in range(MAX_TOOL_ROUNDS + 1):
-        closing = round_no == MAX_TOOL_ROUNDS or force_close
+        closing = round_no == MAX_TOOL_ROUNDS
+        if closing:
+            round_tools = None
+        elif memory_tools_off:
+            round_tools = [d for d in tool_defs if tools.is_action_tool(
+                str((d.get("function") or {}).get("name", "")), capabilities)] or None
+        else:
+            round_tools = tool_defs
         buffers: Dict[int, _ToolCallBuffer] = {}
         round_text: List[str] = []
         round_reasoning: List[str] = []
         trace.rounds += 1
         async for chunk in llm.stream(messages,
-                                      tools=None if closing else tool_defs,
+                                      tools=round_tools,
                                       reasoning_effort=thinking_effort(store_dir)):
             if chunk.has_reasoning:
                 round_reasoning.append(chunk.reasoning)
@@ -732,6 +745,17 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
             for c in calls:
                 trace.add_tool(c["name"], capabilities, False, "ignored", 0.0)
             break
+        if memory_tools_off:
+            stray = [c for c in calls if not tools.is_action_tool(c["name"], capabilities)]
+            if stray:
+                # 这轮没给记忆工具，模型硬报也只记账、不执行（防连环 remember 跑飞）
+                log.warning("talk_unoffered_tool_call_ignored", npc_id=npc_id)
+                for c in stray:
+                    trace.add_tool(c["name"], capabilities, False, "ignored", 0.0)
+                stray_ids = {id(c) for c in stray}
+                calls = [c for c in calls if id(c) not in stray_ids]
+                if not calls:
+                    break
 
         assistant_msg = {
             "role": "assistant",
@@ -792,7 +816,7 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
         silent_only = all(tools.is_silent_tool(c["name"]) for c in calls)
         if not silent_only or bad_ids or not run.dialogue_emitted:
             if silent_only and not run.dialogue_emitted:
-                force_close = True      # 只会 remember、一句台词没有：下一轮不给工具
+                memory_tools_off = True     # 只会 remember、一句台词没有：之后不再给记忆工具
             continue
         # 只有静默调用且台词已出（本轮或更早）：记住的事照常落卡，当场收尾
         trace.ended_early = True

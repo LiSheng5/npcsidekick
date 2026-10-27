@@ -46,7 +46,7 @@
   4. 不带 `call_id`（旧 mod）→ 按 `(npc_id, action)` 取最早一条登记（FIFO），**无论命中与否都写卡**——旧 mod 的回报不能丢；同一 `(npc_id, action, ok, note)` 短窗（10 秒）内的重复投递只写一次（旧 mod 重试会投递多遍），被去重的回报返回 `deduped=true`
 - 待定动作存活上限 `NPC_PENDING_TTL`（默认 120 秒）。`/api/talk` 开始与 `/api/action_result` 到达时各清理一次（回报**先销账、后清理**，TTL 边界秒级迟到的回报仍能命中）；TTL 到点仍没回报 → 写一条 `没做成: 一直没等到结果` 并移除登记。
 - 重复动作保护：同 NPC、同名、同参数的动作还在 `running` / `unknown` → 不下发，回 `deduped`（LLM 重发新 `call_id` 时幂等拦不住，只能按名 + 参识别；参数不同 = 新指令）。
-- 工具调用轮次上限 3 轮（记忆与动作共用）；用满后追加一个**不带工具**的收尾轮，避免"动作做了、台词一句没有"。`NPC_SILENT_REMEMBER`（默认开）下一轮里只有 `remember` 且台词已出时**当场收尾**（不再多跑一轮）；只有 remember、一句台词没有时下一轮不给工具，防止连环 remember。
+- 工具调用轮次上限 3 轮（记忆与动作共用）；用满后追加一个**不带工具**的收尾轮，避免"动作做了、台词一句没有"。`NPC_SILENT_REMEMBER`（默认关）开启后，一轮里只有 `remember` 且台词已出时**当场收尾**（不再多跑一轮）；只有 remember、一句台词没有时，之后各轮不再给记忆工具（动作工具照给，没有动作就不带工具），防止连环 remember。
 
 ## SSE 帧类型
 
@@ -101,7 +101,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `NPC_MEM_RECALL_MIN_REL` | recall 相关度门槛（低于门槛的条目不返回） | 0.2 |
 | `NPC_RECENT_RESULTS` / `NPC_RECENT_MINUTES` | 近况层「最近动作结果」条数 / 时间窗（分钟） | 5 / 30 |
 | `NPC_BUDGET_STATE` / `NPC_BUDGET_MEMORY` / `NPC_BUDGET_HISTORY` | 上下文各层 token 预算；`NPC_BUDGET_HISTORY` = 历史硬上限，未设时为窗口 × 0.7（只防摘要失败时撑爆上下文） | 800 / 2000 / 窗口 × 0.7 |
-| `NPC_SILENT_REMEMBER` | remember 静默收尾：一轮里只有 `remember` 且台词已出 → 当场收尾（trace 记 `ended_early`）；只有 remember、一句台词没有 → 下一轮不给工具（防连环调用）。关 = 旧节奏 | 开 |
+| `NPC_SILENT_REMEMBER` | remember 静默收尾：一轮里只有 `remember` 且台词已出 → 当场收尾（trace 记 `ended_early`）；只有 remember、一句台词没有 → 之后各轮只给动作工具（防连环调用，又不丢动作）。关 = 旧节奏 | 关 |
 | `NPC_VALIDATE_ACTION_ARGS` | 动作参数执行前校验（D9 口径，见契约节）：不合法不下发给 mod、回灌重发；老 mod 想保持"拿到什么发什么"就关掉 | 关 |
 | `NPC_TRACE_FILE` | 回合 trace 落盘（JSONL，只记长度不记原文） | 不落盘 |
 

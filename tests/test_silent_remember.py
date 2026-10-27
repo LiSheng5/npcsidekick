@@ -15,7 +15,7 @@ import json
 
 import chatlog
 import memory
-from conftest import kinds, text_of
+from conftest import CAPS, FakeExecutor, kinds, text_of
 
 
 def read_traces(path) -> list:
@@ -55,7 +55,8 @@ def test_speak_plus_remember_finishes_in_one_round(tmp_store, write_persona,
 def test_remember_only_forces_text_round_without_tools(tmp_store, write_persona,
                                                        make_app_client, make_provider,
                                                        monkeypatch):
-    """只有 remember 无台词：继续，但下一轮不给工具（防连环调用），2 轮收工。"""
+    """只有 remember 无台词：继续，但下一轮不给记忆工具（防连环调用）；
+    这里没有声明动作，所以下一轮干脆不带工具，2 轮收工。"""
     monkeypatch.setenv("NPC_SILENT_REMEMBER", "1")
     write_persona("cang")
     provider = make_provider(turns=[
@@ -156,3 +157,58 @@ def test_switch_off_keeps_old_rounds(tmp_store, write_persona,
     assert text_of(res) == "行啊，记住了。还有事吗。"
     assert len(provider.stream_calls) == 2             # 旧节奏：工具轮后再拿一轮台词
     assert provider.stream_calls[-1]["tools"]          # 第二轮照常带工具
+
+
+def test_forced_round_keeps_action_tools_drops_memory_tools(tmp_store, write_persona,
+                                                            make_app_client, make_provider,
+                                                            monkeypatch):
+    """只有 remember 无台词 → 之后各轮不给记忆工具，但动作工具照给：
+    "记住…顺便做一碗"里该做的动作不会被丢。"""
+    monkeypatch.setenv("NPC_SILENT_REMEMBER", "1")
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "remember", "arguments": {"content": "玩家爱吃面"}}]},
+        {"text": "好，我这就做。",
+         "tool_calls": [{"name": "cook", "arguments": {"dish": "面"}}]},
+        {"text": "面好了。"},
+    ])
+    executor = FakeExecutor()
+    client = make_app_client(provider=provider, executor=executor)
+    client.post("/api/capabilities", json=CAPS)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "记住我爱吃面，顺便做一碗",
+                                         "mod": "mygame"})
+
+    def names(call: dict) -> list:
+        return [t["function"]["name"] for t in (call["tools"] or [])]
+
+    assert {"remember", "recall", "cook"} <= set(names(provider.stream_calls[0]))
+    second = names(provider.stream_calls[1])
+    assert "cook" in second                                  # 动作工具照给
+    assert "remember" not in second and "recall" not in second   # 记忆工具撤掉
+    assert len(executor.calls) == 1                          # 动作真的下发了
+    assert len(provider.stream_calls) == 3
+    assert text_of(res) == "好，我这就做。面好了。"
+
+
+def test_forced_round_ignores_unoffered_memory_call(tmp_store, write_persona,
+                                                    make_app_client, make_provider,
+                                                    monkeypatch, tmp_path):
+    """记忆工具已撤掉的轮次里，模型硬报 remember：只记账（ignored）、不执行。"""
+    trace_file = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
+    monkeypatch.setenv("NPC_SILENT_REMEMBER", "1")
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "remember", "arguments": {"content": "事1"}}]},
+        {"text": "", "tool_calls": [{"name": "remember", "arguments": {"content": "事2"}}]},
+    ])
+    client = make_app_client(provider=provider)
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "记点事"})
+
+    assert kinds(res)[-1] == "done"
+    assert [e["content"] for e in memory.load_card("cang", store_dir=tmp_store)] == ["事1"]
+    trace = read_traces(trace_file)[0]
+    assert trace["rounds"] == 2
+    assert [t["status"] for t in trace["tools"]] == ["success", "ignored"]
