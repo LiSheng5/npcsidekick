@@ -64,55 +64,65 @@ select {
   height: 100%;
 }
 
+/* 侧栏间距规则（三种距离管全局）：
+   --row-inset 行内左右留白 —— 品牌 / 导航 / 底部状态同一基线、左右对称；
+   --row-gap 组内行距；--group-gap 组间距离（组间必须大于组内）。 */
 .sidebar {
+  --row-inset: 10px;
+  --row-gap: 4px;
+  --group-gap: 16px;
+
   border-right: 1px solid var(--border);
   background: var(--surface);
   padding: 22px 14px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--group-gap);
 }
 
 .brand {
+  flex: none;
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 10px 18px;
+  padding: 0 var(--row-inset);
   font-weight: 650;
   letter-spacing: -0.01em;
   font-size: 15px;
 }
 
-.brand-mark {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  background: var(--accent);
-  color: #fff;
-  display: grid;
-  place-items: center;
-  font-size: 13px;
-  font-weight: 700;
-}
-
 .brand-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-faint);
   font-weight: 500;
+}
+
+.nav {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--row-gap);
 }
 
 .nav-item {
   border: none;
   background: transparent;
   text-align: left;
-  padding: 9px 12px;
+  min-height: 40px;             /* 点击区域：行高不低于 40px */
+  padding: 9px var(--row-inset);
   border-radius: var(--radius-sm);
+  font-size: 14px;
   color: var(--text-dim);
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 10px;                    /* 图文间距与品牌一致 */
   transition: background 0.15s, color 0.15s;
+}
+
+.nav-item .label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nav-item:hover {
@@ -133,9 +143,13 @@ select {
 
 /* ── 侧栏底部 ── */
 .sidebar-foot {
+  flex: none;
   margin-top: auto;
   padding-top: 14px;
   border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--row-gap);
 }
 
 .main {
@@ -780,11 +794,15 @@ select {
   height: 8px;
 }
 
-/* 侧栏底部状态（模型 / 思考档位 / mod 在线数） */
+/* 侧栏底部状态（模型 / 思考档位 / mod 在线数）：
+   左右内边距与导航行同一条基线；小字统一 12px（与 .brand-sub 同级）；
+   单行放不下的长值（模型名等）折成省略号，靠 title 补全信息。 */
 .sidebar-foot .kv {
-  padding: 3px 10px;
+  padding: 4px var(--row-inset);
   border-bottom: none;
-  gap: 6px;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .sidebar-foot .kv .k {
@@ -795,6 +813,9 @@ select {
 .sidebar-foot .kv .v {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 过滤行里的弹簧占位（.page-head .spacer 只管页头） */

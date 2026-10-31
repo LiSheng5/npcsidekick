@@ -142,7 +142,8 @@ async function refreshGlobals() {
   } else {
     const llm = llmSummary(s)
     footModel.textContent = llm.text
-    if (llm.title) footModel.title = llm.title
+    // 底部这一格可能被省略号截断（长模型名），title 至少给回完整文案
+    footModel.title = llm.title || llm.text
   }
   $('#foot-effort').textContent = s ? (s.reasoning_effort || '默认') : '—'
   const mods = s && s.mods ? Object.keys(s.mods) : []
