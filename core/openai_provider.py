@@ -204,7 +204,7 @@ class OpenAIProvider(ProviderProtocol):
     def _user_body(self) -> dict:
         """用户透传的请求体片段（环境变量 NPC_LLM_EXTRA_BODY，现读可热切）。
 
-        各家方言（思考参数、长度参数名…）由用户自己填，v4 不做模型画像；
+        各家方言（思考参数、长度参数名…）由用户自己填，这里不做模型画像；
         非法 JSON → 记一条 warning 后忽略，绝不因此打断对话。
         """
         merged: dict = {}
@@ -226,7 +226,7 @@ class OpenAIProvider(ProviderProtocol):
     def _apply_extra_body(self, kwargs: dict) -> dict:
         """把透传片段合进请求参数：SDK 具名参数走顶层，其余进 extra_body。
 
-        透传最后合并 —— 可覆盖 v4 自己拼的 thinking / 默认值。
+        透传最后合并 —— 可覆盖这里自己拼的 thinking / 默认值。
         """
         user = self._user_body()
         if not user:

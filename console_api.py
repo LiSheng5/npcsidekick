@@ -259,8 +259,8 @@ def _routes_relationships(router: APIRouter, ctx: _ConsoleCtx) -> None:
     def get_relationships():
         """关系图数据源 {source, nodes, edges}。
 
-        v4 没有 world/Runtime，关系只有一个来源：`personas/{id}.json` 的可选
-        `relations` 字段（制作者手填）。没填 → `source="none"` + 空 edges，
+        关系的唯一来源是 `personas/{id}.json` 的可选 `relations` 字段（制作者手填）；
+        没填 → `source="none"` + 空 edges，
         UI 明确提示，**绝不用假数据顶替**。
         """
         nodes: Dict[str, Dict[str, Any]] = {}

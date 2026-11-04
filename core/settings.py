@@ -28,7 +28,7 @@ def _default_base_dir() -> Path:
 def _load_api_key() -> str:
     """按优先级加载 API Key: 环境变量 > api_key.txt 文件
 
-    通用名 NPC_API_KEY 优先（v4 不绑厂商）；DEEPSEEK_* / OPENAI_* / ZHIPU_* 是旧名，
+    通用名 NPC_API_KEY 优先（不绑厂商）；DEEPSEEK_* / OPENAI_* / ZHIPU_* 是旧名，
     仅为兼容保留。api_key.txt 读不动（权限/坏编码）就当没有 —— 纯查询路径不能 500。
     """
     key = (env_text("NPC_API_KEY")
@@ -63,7 +63,7 @@ class AgentSettings:
     """
     失控NPC 配置 — 环境变量现读，可注入、可覆盖。
 
-    「三件套」全部由用户自配，v4 不预设厂商：模型名 / key / 端点任缺一项 → 没有大脑
+    「三件套」全部由用户自配，不预设厂商：模型名 / key / 端点任缺一项 → 没有大脑
     （`/api/talk` 走角色卡 rules 兜底回复，不调用动作）。
 
     注意：temperature / max_tokens 是**固定默认值**，没有 NPC_TEMPERATURE 这类 env

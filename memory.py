@@ -26,7 +26,7 @@ from core.paths import require_npc_id, resolve_store
 EV_DONE = "完成: "
 EV_FAIL = "没做成: "
 
-# ── recall 检索参数（排序权重是自己定的初值，等评测集再调）──
+# ── recall 检索参数（相关度门槛 + 排序权重）──
 RECALL_MIN_REL = 0.2        # 环境变量 NPC_MEM_RECALL_MIN_REL，现读可热切
 _W_REL, _W_IMP = 1.0, 0.3   # 排序权重：相关度为主、重要度为辅
 

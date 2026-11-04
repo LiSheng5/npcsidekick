@@ -1,8 +1,6 @@
-/* 失控NPC v4 Console —— 零构建原生 JS。
-   styles.css 与本文件同期维护：死样式已按 app.js 实际 class 清零，v4 专属块
-   直接写在里面（并非旧版原样复用）；
-   面板按 v4 真实数据重设计（无 world/scheduler 这些旧概念；关系网只由
-   personas/*.json 的 relations 字段驱动，没有数据就显示空态）。 */
+/* 失控NPC Console —— 零构建原生 JS。
+   styles.css 与本文件同期维护；关系网只由 personas/*.json 的 relations
+   字段驱动，没有数据就显示空态。 */
 'use strict'
 
 // ── 小工具 ────────────────────────────────────────────────
@@ -1311,7 +1309,7 @@ async function renderModel(view) {
   try {
     cur = await api('/api/llm')
   } catch (e) {
-    // 404 = 后端是加这个端点之前的旧进程 —— 直接告诉用户该干嘛，别让他自己猜
+    // 404 = /api/llm 不可用 —— 直接告诉用户该干嘛，别让他自己猜
     const tip = e.status === 404
       ? '后端还是旧版本（没有 /api/llm）—— 重启服务（uvicorn server:app）后再打开本页'
       : e.message

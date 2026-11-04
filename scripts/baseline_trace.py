@@ -1,4 +1,4 @@
-"""V3/V4 基线采集 —— 真实 key 跑一轮受控会话，产出 trace 统计（p50/p95）。
+"""基线采集 —— 真实 key 跑一轮受控会话，产出 trace 统计（p50/p95）。
 
   run    进程内起服务（临时 store，不碰真实数据），按固定脚本打 N 轮 /api/talk，
          覆盖：闲聊 / 带动作 / 带 remember / 带 recall / 混合（同一句里既记又做）；
@@ -44,7 +44,7 @@ import manual_checks as mc                     # noqa: E402  进程内服务 / S
 
 # ── 固定脚本：37 轮，类别交错，remember 在前、recall 随后 ──────────────
 # kind 只用于人工归类与汇总，不进服务端；混合用例追加在尾部，
-# 前面的 32 轮保持原样（与 V3 基线可比）。
+# 前面的 32 轮保持原样。
 SCRIPT: List[Dict[str, str]] = [
     {"kind": "chat", "message": "在吗？"},
     {"kind": "chat", "message": "你是谁呀？简单介绍一下自己。"},
@@ -173,7 +173,7 @@ def compute_stats(records: List[Dict[str, Any]],
     """trace JSONL 记录 → 各指标 p50/p95 + 工具覆盖汇总（+ 可选按 kind 分组）。
 
     `kinds` = kinds.json 里按回合顺序的 kind 列表，与 records 一一对应；
-    给了才出 `kinds` 分组块，不给则输出与 V3 基线完全一致（只多 invalid_args 一行）。
+    给了才出 `kinds` 分组块，不给则只输出基础统计（另加 invalid_args 一行）。
     """
     tool_names: Dict[str, int] = {}
     for rec in records:

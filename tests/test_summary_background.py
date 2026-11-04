@@ -22,7 +22,7 @@ from core.types import StreamChunk
 
 
 def fresh_scheduler() -> turn.SummaryScheduler:
-    """每个用例自己的摘要调度账本（可注入对象，不再清模块级全局）。"""
+    """每个用例注入一份独立的摘要调度账本，互不干扰。"""
     return turn.SummaryScheduler()
 
 

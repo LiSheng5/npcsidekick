@@ -1,6 +1,6 @@
 """回合主体 —— 一次 /api/talk 的 LLM ↔ 工具多轮循环（产出 SSE 帧）。
 
-执行模型（2026-09-28 起）：**动作 = LLM 直接调用的工具**。
+执行模型：**动作 = LLM 直接调用的工具**。
   记忆工具由本进程执行；动作工具由本模块**同步调用** mod 的 `execute_url`（协议 §3），
   结果作为工具消息回上下文继续推理，并**当场写进记忆卡** —— mod 不用回报。
 
@@ -59,16 +59,12 @@ _ENV_VALIDATE_ACTION_ARGS = "NPC_VALIDATE_ACTION_ARGS"
 
 
 def silent_remember_enabled() -> bool:
-    """remember 静默收尾开关（现读，可热切）：NPC_SILENT_REMEMBER，默认关（先关后开）。
-
-    翻成默认开的条件（V2）：基线里混合用例（"记住…顺便做…"）开关开时没有动作被丢，
-    且记忆写入类回合的 rounds 明显减少。
-    """
+    """remember 静默收尾开关（现读，可热切）：NPC_SILENT_REMEMBER，默认关。"""
     return env_flag(_ENV_SILENT_REMEMBER, False)
 
 
 def validate_action_args_enabled() -> bool:
-    """动作参数校验开关（现读，可热切）：NPC_VALIDATE_ACTION_ARGS，默认关（先关后开）。"""
+    """动作参数校验开关（现读，可热切）：NPC_VALIDATE_ACTION_ARGS，默认关。"""
     return env_flag(_ENV_VALIDATE_ACTION_ARGS, False)
 
 
@@ -419,7 +415,7 @@ def _prefetch_memory_text(npc_id: str,
 #      最近 N 条且在最近 M 分钟内（NPC_RECENT_RESULTS=5 / NPC_RECENT_MINUTES=30）
 #   2. 进行中：pending 里 mod 已受理（state=running）且未过期的 —— 「…— 进行中，已 X 秒」
 #   3. 待确认：同步等待超时、至今没回报（state=unknown）—— 「…— 没收到回应，不确定是否已做成，已 X 秒」
-# 两类 pending **分开写**，不能都写成"进行中"。措辞先用最朴素的中文，作者之后会改。
+# 两类 pending **分开写**，不能都写成"进行中"。
 # 顺序：过期清理已在 /api/talk 开始时做完（server.expire_pending_actions，先写
 # 「没做成: 一直没等到结果」卡再移除），这里只读 pending.alive()（未过期的）——
 # 不会把已过期的条目显示成进行中。

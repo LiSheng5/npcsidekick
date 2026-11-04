@@ -41,7 +41,7 @@ KINDS = ["chat", "remember", "action", "mixed", "mixed"]
 
 
 def test_stats_without_kinds_keeps_plain_output():
-    """没有 kinds.json：不出分组块（与 V3 基线一致），但照样给 invalid_args 数据。"""
+    """没有 kinds.json：不出分组块，但照样给 invalid_args 数据。"""
     stats = bt.compute_stats(RECORDS)
 
     assert "kinds" not in stats

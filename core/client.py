@@ -28,7 +28,7 @@ from core import config
 if TYPE_CHECKING:
     from core.base import ProviderProtocol
 
-# ── 网关抖动重试（2026-08-25, 思想借自 ExponentialBackoff/DSH retryPolicy）──
+# ── 网关抖动重试 ──
 # 开关: NPC_LLM_RETRY=1 才启用（代码默认关 — 家规）。每次调用现读环境变量，可热切。
 # 节奏: 默认最多补试 2 次，等待 2s/6s（最坏多花 8s，仍在 talk 60s 预算内）。
 #       NPC_LLM_RETRY_DELAYS="3,9" 可自定义（无条数上限，自定义长列表会突破上面的预算）。

@@ -171,8 +171,7 @@ def test_memory_prefetch_does_not_modify_card(tmp_store, write_persona, make_app
 
 
 def test_no_recent_n_helper_anymore():
-    """「最近 N 条」已删：取 N 的函数与对应环境变量开关都不存在。
-    （名字拼着写，避开验收 grep 的残留词）"""
+    """记忆预取不再按「最近 N 条」截断：相关函数与环境变量开关都不存在。"""
     assert not hasattr(turn, "prefetch_" + "recent")
     assert not hasattr(turn, "DEFAULT_PREFETCH_" + "RECENT")
     assert not hasattr(turn, "_ENV_PREFETCH_" + "RECENT")

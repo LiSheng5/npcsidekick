@@ -1,5 +1,5 @@
-# 失控NPC v4 运行时依赖（第三方库，各自带许可证：多为 MIT / Apache / BSD，按依赖使用即合规）
-# 版本 = 实测环境（2026-10-23，Python 3.13 / Windows）的下界；向上一般兼容，遇破坏性更新再收上界
+# 运行时依赖（第三方库，各自带许可证：多为 MIT / Apache / BSD，按依赖使用即合规）
+# 下列为依赖版本下界，向上一般兼容；遇破坏性更新再收上界
 fastapi>=0.139.0
 uvicorn>=0.49.0
 openai>=2.44.0
@@ -11,5 +11,5 @@ pydantic>=2.13.4
 pytest>=9.1.1
 
 # 可选依赖（缺失时自动降级，不装也能跑）：
-# jieba>=0.42.1    — 中文分词，装了检索召回更准（memory.py 里 try import）
-# edge-tts>=7.2.8  — 语音合成（tts.py 里 try import）
+# jieba — 中文分词，装了检索召回更准（memory.py 里 try import）
+# edge-tts — 语音合成（tts.py 里 try import）

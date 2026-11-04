@@ -8,7 +8,7 @@
   GET  /api/state          服务器概况（调试）
   GET  /api/npcs           各 NPC 状态摘要（调试）
 
-执行模型（2026-09-28 起）：**动作 = LLM 直接调用的工具**。
+执行模型：**动作 = LLM 直接调用的工具**。
   记忆工具由本进程执行；动作工具由本服务**同步调用** mod 的 `execute_url`（协议 §3），
   结果作为工具消息回上下文继续推理，并**当场写进记忆卡** —— 同步拿到结果就不用回报；
   长动作 / 结果不确定（running / 超时 unknown）除外，按 call_id 走 `/api/action_result`
@@ -65,7 +65,7 @@ import turn
 # 控制台静态资源（零构建：index.html + app.js + styles.css）—— 属代码文件，不随 Paths 注入
 CONSOLE_DIR = Path(__file__).resolve().parent / "web" / "console"
 
-# v4 不预设厂商：模型名 / key / 端点三件套由用户自配（AGENT_MODEL / NPC_API_KEY / NPC_BASE_URL）
+# 不预设厂商：模型名 / key / 端点三件套由用户自配（AGENT_MODEL / NPC_API_KEY / NPC_BASE_URL）
 
 # mod 心跳超时（秒）：超时视该 mod 离线，不再调用任何动作
 DEFAULT_HEARTBEAT_TIMEOUT = 60.0

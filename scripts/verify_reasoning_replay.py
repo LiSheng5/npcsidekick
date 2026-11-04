@@ -1,4 +1,4 @@
-"""DeepSeek 历史思考回传验证（V1 · T12）—— 只写脚本，由人运行。
+"""DeepSeek 历史思考回传验证脚本。
 
 背景：DeepSeek 官方要求「请求里带 tools 时，assistant 的 reasoning_content 必须原样回传」，
 否则 400。现状（`chatlog.build_history(reasoning_replay=True)`）是**历史每一轮**都回传；

@@ -136,6 +136,4 @@ class _LazyLogger:
 
 
 # 全局 logger 别名 — 方便导入
-# from core.logging_config import log
-# log.info("something_happened")
 log: structlog.stdlib.BoundLogger = _LazyLogger()  # type: ignore[assignment]

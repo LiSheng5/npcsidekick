@@ -218,7 +218,7 @@ def test_memory_update_needs_a_field(tmp_store, write_persona, make_app_client):
 
 
 def test_removed_cleanup_endpoint_is_404(tmp_store, write_persona, make_app_client):
-    """旧的手动清理端点已删：POST 返回 404。（路径拼着写，避开验收 grep 的残留词）"""
+    """已移除的手动清理端点不再匹配任何路由：POST 返回 404。"""
     write_persona("cang")
     client = make_app_client()
     gone = "pru" + "une"

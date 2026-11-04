@@ -1,7 +1,7 @@
 """
 Provider Factory — 按用户配置创建 Provider（模型 / key / 端点三件套）。
 
-v4 不绑定任何厂商：谁来当大脑由 `AGENT_MODEL` + `NPC_API_KEY` + `NPC_BASE_URL` 决定。
+不绑定任何厂商：谁来当大脑由 `AGENT_MODEL` + `NPC_API_KEY` + `NPC_BASE_URL` 决定。
 国内外主流厂商（含本地 Ollama / vLLM）基本都提供 OpenAI 兼容端点，
 故所有 Provider 统一走 OpenAIProvider（Anthropic 原生 API 不兼容 OpenAI 格式，
 需走聚合网关或自建兼容层）。
@@ -13,7 +13,7 @@ v4 不绑定任何厂商：谁来当大脑由 `AGENT_MODEL` + `NPC_API_KEY` + `N
   3. 都没认出来 → 视为"未配置"，由 resolve_llm_config 报缺哪一项
 
 模型名关键词只用于 ① 没配端点时的兜底 ② 报错时提示"看起来是哪家"。
-注释里的端点地址以厂商最新文档为准 —— 想确定就显式配 NPC_BASE_URL。
+厂商端点以官方文档为准；自定义端点一律显式配 `NPC_BASE_URL`。
 """
 
 from __future__ import annotations

@@ -310,7 +310,7 @@ def test_system_prompt_rules_for_short_replies_and_pending():
 def test_system_prompt_matches_new_execution_model():
     """执行模型只有一种：LLM 调用工具执行（动作 = 工具调用）。
 
-    V3.2 的"提议 / 回报"是旧模型，任何形式的复辟都要被这条钉住：
+    早期"提议 / 回报"是旧模型，任何形式的复辟都要被这条钉住：
     - 行为层要写明动作就是工具调用（不能只说"说出来"）
     - 台词层要保留自然语言（"我去煮饭"），不许描述工具调用本身
     - 提示词里不得再出现"提议"字样
