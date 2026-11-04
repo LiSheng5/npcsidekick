@@ -96,7 +96,7 @@ def scrub(text: str, store_dir: Optional[Path] = None) -> str:
 
 def short_err(exc: BaseException, store_dir: Optional[Path] = None,
               limit: int = 120) -> str:
-    """报错摘要（scrub 脱敏后截断）—— 日志口径统一走这里，别再手写 `[:120]`。"""
+    """报错摘要（scrub 脱敏后截断），供日志与告警统一使用。"""
     return scrub(str(exc), store_dir=store_dir)[:limit]
 
 
@@ -237,8 +237,7 @@ def _save_llm_file(cfg: Dict[str, Any], store_dir: Optional[Path] = None) -> Non
 def _env_llm_config() -> Dict[str, Any]:
     """环境变量那一层 —— 页面与文件都没设时的起点。
 
-    env 回退链单源在 core/settings.AgentSettings（AGENT_MODEL→NPC_MODEL、
-    NPC_BASE_URL→旧名），这里只走 core.config，不再自己 or 一遍。
+    环境变量回退链由 core/settings.AgentSettings 统一处理，这里只走 core.config。
     """
     from core import config
 
@@ -335,7 +334,7 @@ def apply_llm_settings(patch: Dict[str, Any],
 
         number = config.valid_context_window(patch["context_window"])
         if number is None:
-            # D1：下限 8000，低于它/非整数一律拒绝并提示（调用方转 400）
+            # 下限 8000，低于它/非整数一律拒绝并提示（调用方转 400）
             raise ValueError("上下文窗口必须是 ≥ 8000 的整数（token）")
         clean["context_window"] = number
 

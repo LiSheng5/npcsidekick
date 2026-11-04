@@ -1,4 +1,4 @@
-"""T12 · scripts/verify_reasoning_replay.py 的离线测试。
+"""scripts/verify_reasoning_replay.py 的离线测试。
 
 验证脚本本身只在有 key 时由人运行；这里测「没有 key 时的提示」与三种历史的构造口径，
 一律不发网络请求。

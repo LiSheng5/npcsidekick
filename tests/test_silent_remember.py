@@ -1,4 +1,4 @@
-"""T4 · remember 静默收尾（NPC_SILENT_REMEMBER）。
+"""remember 静默收尾（NPC_SILENT_REMEMBER）。
 
 收尾规则（`turn._stream_llm_rounds` 每轮工具执行完判断）：
   · 有非静默调用（recall / 动作）→ 照常继续；

@@ -84,10 +84,8 @@ def configure_logging(
     if mode == "json":
         renderer = structlog.processors.JSONRenderer(ensure_ascii=False)
     elif mode == "test":
-        # 测试模式: 纯文本, CaptureLogger 可捕获
         renderer = structlog.dev.ConsoleRenderer(colors=False)
     else:
-        # 开发模式: Rich 彩色输出
         renderer = structlog.dev.ConsoleRenderer(colors=True)
 
     processors = _shared_processors + [
@@ -106,7 +104,6 @@ def configure_logging(
         cache_logger_on_first_use=True,
     )
 
-    # 文件输出
     if log_file:
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
@@ -135,5 +132,4 @@ class _LazyLogger:
         return getattr(structlog.get_logger("agent"), name)
 
 
-# 全局 logger 别名 — 方便导入
 log: structlog.stdlib.BoundLogger = _LazyLogger()  # type: ignore[assignment]

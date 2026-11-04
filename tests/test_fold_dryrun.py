@@ -1,4 +1,4 @@
-"""T13 · scripts/fold_dryrun.py 的离线测试：大存档干跑折叠，原目录一个字节都不能改。"""
+"""scripts/fold_dryrun.py 的离线测试：大存档干跑折叠，原目录一个字节都不能改。"""
 from __future__ import annotations
 
 import json

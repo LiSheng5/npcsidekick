@@ -1,7 +1,7 @@
 """
 统一工具调用格式。
 
-所有工具调用经过此格式，对齐 OpenAI function-calling 及未来协议。
+所有工具调用经过此格式，对齐 OpenAI function-calling。
 只保留当前运行路径真正用到的三种类型：结果状态 / 结果 / 工具声明。
 """
 from __future__ import annotations
@@ -9,9 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional
-
-
-# Core Data Types
 
 class ToolResultStatus(str, Enum):
     SUCCESS  = "success"

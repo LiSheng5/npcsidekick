@@ -1,4 +1,4 @@
-"""T11 · scripts/baseline_trace.py 的 stats 离线单测。
+"""scripts/baseline_trace.py 的 stats 离线单测。
 
 手造 trace JSONL 与 kinds.json，只验算数与分组口径 —— 不碰网络、不需要真实 key。
 """

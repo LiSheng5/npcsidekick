@@ -45,7 +45,7 @@ def test_action_without_params():
     assert fn["parameters"]["properties"] == {} and fn["parameters"]["required"] == []
 
 
-# ── T6：对象形态 params（type / enum / desc / optional）─────
+# ── 对象形态 params（type / enum / desc / optional）─────
 
 def test_action_tool_schema_object_params():
     """对象写法生效：type / enum 进 schema，optional 的不进 required；老写法保持不变。"""
@@ -91,7 +91,7 @@ def test_build_tool_definitions_sorted():
     assert names == ["remember", "recall", "chat", "cook", "goto"]
 
 
-# ── T6：validate_action_args（D9 口径）─────────────────────
+# ── validate_action_args─────────────────────
 
 DECL = {"name": "give", "desc": "给钱", "params": {
     "amount": {"type": "integer", "desc": "金额"},
@@ -121,7 +121,7 @@ def test_validate_action_args_missing_required():
 def test_validate_action_args_bad_type():
     _, err = tools.validate_action_args(DECL, {"amount": "三", "note": "x"})
     assert err and "amount" in err
-    # 数字进 string 参数自 T10 起合法（见下面的 string 用例），这里用真正非法的类型
+    # 数字进 string 参数现已合法（见下面的 string 用例），这里用真正非法的类型
     _, err = tools.validate_action_args(DECL, {"amount": 3, "note": [1, 2]})
     assert err and "note" in err
     _, err = tools.validate_action_args(DECL, {"amount": 3, "note": True})
@@ -129,7 +129,7 @@ def test_validate_action_args_bad_type():
 
 
 def test_validate_action_args_string_accepts_numbers():
-    """T10：string 参数收到数字无损转字符串；bool / nan 仍拒绝；枚举校验在转换之后。"""
+    """string 参数收到数字无损转字符串；bool / nan 仍拒绝；枚举校验在转换之后。"""
     cleaned, err = tools.validate_action_args(DECL, {"amount": 3, "note": 3})
     assert err is None
     assert cleaned["note"] == "3"

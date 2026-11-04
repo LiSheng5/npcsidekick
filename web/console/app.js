@@ -421,7 +421,7 @@ function graphPlaceNode(g, id) {
 }
 
 // ── 头像：读文件 → data URI → POST → 节点改成图片 ──────────
-// 上限由 /api/state 下发（后端单源）；拿不到就跳过预检，交给服务端拒绝。
+// 上限取不到就跳过预检，交给服务端拒绝。
 
 function pickAvatar(g, npcId) {
   const input = h('input', {
@@ -546,7 +546,6 @@ function renderGraphContent(g) {
   )
   const parts = [defs]
 
-  // 先画边（压在节点下面）
   for (const e of data.edges) {
     if (!graphEdgeGeom(g, e)) continue
     const queryDim = Boolean(qRaw) && !(graphHit(g.byId[e.source] || {}, q) && graphHit(g.byId[e.target] || {}, q))
@@ -566,7 +565,6 @@ function renderGraphContent(g) {
     parts.push(grp)
   }
 
-  // 再画节点
   for (const n of data.nodes) {
     const dim = !graphHit(n, q) || !graphInFocus(n.id, g.focusId, data.edges)
     const grp = svgEl('g', {
@@ -1168,8 +1166,7 @@ function fieldHelp() {
         h('td', { text: desc }))))))
 }
 
-/** 删卡「保留什么」的说明文案 —— 单源在后端（DELETE 响应的 kept.note 与 /api/state 的
- *  delete_kept_note 都会下发），前端只展示，别再抄一份。 */
+// 文案由后端下发，前端只展示。
 const keptNote = () => (store.state && store.state.delete_kept_note)
   || '（数据在 store/ 保留，删卡不连带删记忆）'
 

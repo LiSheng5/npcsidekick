@@ -317,7 +317,7 @@ def _routes_contract(app: FastAPI, ctx: _GameCtx) -> None:
             if params is not None and not isinstance(params, dict):
                 raise HTTPException(status_code=400, detail=f"actions[{i}].params 必须是对象")
             for key, spec in (params or {}).items():
-                # params 值两种形态（T6）：字符串（老写法）/ 对象 {type, enum, desc, optional}；
+                # params 值两种形态：字符串（老写法）/ 对象 {type, enum, desc, optional}；
                 # 形态非法当场 400，别等 LLM 看到一份坏 schema
                 problem = tools.param_spec_error(spec)
                 if problem:

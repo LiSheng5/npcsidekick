@@ -106,8 +106,7 @@ def _render_recent_body(groups, kept: Dict[str, int]) -> str:
 
 
 def _fit_recent(groups, budget: int):
-    """近况正文按共享预算收敛：砍序 = 最近结果 → 进行中 → 待确认，
-    组内从尾部（较旧的）砍起；砍过就留「…（已截断）」标记。
+    """近况正文按共享预算收敛；砍过就留「…（已截断）」标记。
 
     返回 (kept, 正文, 截断前 token, 截断后 token)；全砍光 → ("", …, 0)，
     块整块省略（但调用方照样记 `context_section_truncated`，绝不静默丢弃）。
@@ -117,7 +116,6 @@ def _fit_recent(groups, budget: int):
     before = estimate_tokens(full)
     if before <= budget:
         return kept, full, before, before
-    # 砍序显式按优先级排：最近结果先砍（组内砍尾部较旧的），待确认最后才砍
     cut_order = [title for _, title, lines in sorted(groups, key=lambda g: g[0])
                  for _ in lines]
     for title in cut_order:                     # 砍一条试一次，放得下就停
@@ -180,8 +178,7 @@ def assemble(persona: Dict[str, Any], observation: Any,
             truncated.append({"layer": "memory", "before_tokens": before,
                               "after_tokens": after})
 
-    # 【最近发生】：与观测共享 state 预算 —— 观测先占，近况拿剩下的；
-    # 超预算按「最近结果 → 进行中 → 待确认」砍（组内砍旧的），砍过留「…（已截断）」
+    # 【最近发生】：与观测共享 state 预算 —— 观测先占，近况拿剩下的。
     recent_tokens = 0
     groups = _recent_groups(recent_results, recent_running, recent_unknown)
     if any(lines for _, _, lines in groups):

@@ -139,7 +139,7 @@ class BoomProvider(FakeProvider):
         yield  # pragma: no cover
 
 
-# ── 共享常量 / SSE 助手 / 假执行器（所有测试模块共用，别再各自复制）──
+# ── 共享常量 / SSE 助手 / 假执行器 ──
 
 # mod 报上来的动作声明（cook / goto / chat）与标准 capabilities 载荷
 ACTIONS: List[Dict[str, Any]] = [

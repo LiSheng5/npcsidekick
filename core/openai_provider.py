@@ -123,8 +123,7 @@ class OpenAIProvider(ProviderProtocol):
         self._extra_body = extra_body or None
         self._base_url = base_url
         self._api_key = api_key
-        # 思考参数方言（factory 会算好显式传入；直接构造时按 core/vendor 的
-        # 单一口径现场判，不再自己按域名另猜一套）
+        # 直接构造时按 core/vendor 的单一口径现场判定方言
         self._dialect = dialect if dialect else dialect_of(model, base_url)
 
         # 同步客户端

@@ -287,7 +287,7 @@ def test_build_system_prompt_includes_persona_fields():
     assert "不知道" in prompt                     # 接地：查不到就说不知道，绝不编造
 
 def test_build_system_prompt_drops_observation_param():
-    """T5：observation 参数已删 —— 观测走【当前情况】块，system 是固定层（利于前缀缓存）。"""
+    """observation 参数已删 —— 观测走【当前情况】块，system 是固定层（利于前缀缓存）。"""
     import inspect
 
     from core.personas import build_system_prompt
@@ -297,7 +297,7 @@ def test_build_system_prompt_drops_observation_param():
     assert "当前情况" not in prompt
 
 def test_system_prompt_rules_for_short_replies_and_pending():
-    """T5 新规矩：动手前先出台词、台词要短、进行中/待确认的事别重复下达也别吹成做成了。"""
+    """新规矩：动手前先出台词、台词要短、进行中/待确认的事别重复下达也别吹成做成了。"""
     from core.personas import build_system_prompt
 
     prompt = build_system_prompt({"identity": "老猎手"})

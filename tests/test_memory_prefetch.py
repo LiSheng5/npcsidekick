@@ -307,7 +307,7 @@ def test_recall_tool_still_available_for_deep_dive(tmp_store, write_persona,
 
 def test_memory_card_read_once_per_turn(tmp_store, write_persona, make_app_client,
                                         make_provider, monkeypatch):
-    """T7：一回合只读一次卡 —— 预取与近况层共用同一份（load_card 只被调一次）。"""
+    """一回合只读一次卡 —— 预取与近况层共用同一份（load_card 只被调一次）。"""
     memory.add_entry("cang", "玩家上次说爱吃面", importance=8, store_dir=tmp_store)
     memory.add_action_result("cang", "cook", True, "面煮好了", store_dir=tmp_store)
     write_persona("cang")

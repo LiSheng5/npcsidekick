@@ -25,7 +25,7 @@ TOOL_REMEMBER = "remember"
 TOOL_RECALL = "recall"
 _RESERVED_TOOLS = frozenset({TOOL_REMEMBER, TOOL_RECALL})
 
-# 静默工具：调用完不必再逼模型开口（T4·NPC_SILENT_REMEMBER 开启时可提前收尾）。
+# 静默工具：调用完不必再逼模型开口（NPC_SILENT_REMEMBER 开启时可提前收尾）。
 # 目前只有 remember —— 它是"顺手记一笔"，不影响台词输出义务。
 _SILENT_TOOLS = frozenset({TOOL_REMEMBER})
 
@@ -151,7 +151,7 @@ def is_action_tool(name: str, capabilities: Optional[List[dict]]) -> bool:
 def is_silent_tool(name: str) -> bool:
     """静默工具：调用完不必再让模型补台词（目前只有 remember）。
 
-    T4 的收尾判断用它区分"顺手记一笔"（可提前收尾）与要出结果的调用
+    收尾判断用它区分"顺手记一笔"（可提前收尾）与要出结果的调用
     （recall / 动作，照常继续多轮）。
     """
     return name in _SILENT_TOOLS
@@ -183,11 +183,11 @@ def build_tool_definitions(capabilities: Optional[List[dict]] = None) -> List[di
     return tools
 
 
-# ── 执行前的参数校验（D9）──────────────────────────────────
+# ── 执行前的参数校验──────────────────────────────────
 # 开关 NPC_VALIDATE_ACTION_ARGS（现读可热切）：
 #   · 缺必填、类型不符、不在枚举内 → 不下发给 mod，回灌错误让模型重发
 #   · integer / number / boolean 接受可无损转换的字符串并转型
-#   · string 接受数字（3 → "3"、2.5 → "2.5"）；bool 与其他类型仍拒绝（T10）
+#   · string 接受数字（3 → "3"、2.5 → "2.5"）；bool 与其他类型仍拒绝
 #   · 未声明的多余参数丢弃并记警告，不拒绝
 
 def validate_action_args(action: Dict[str, Any],
@@ -195,7 +195,7 @@ def validate_action_args(action: Dict[str, Any],
     """按声明校验并转型工具参数 → (清洗后的参数, 错误文本)；错误文本 None = 合法。
 
     失败时错误文本给模型重发（调用方据此不调 execute_url）；成功时多余参数已丢弃、
-    字符串已按声明转型（D9 口径）。
+    字符串已按声明转型。
     """
     params = action.get("params") or {}
     if not isinstance(params, dict):
@@ -226,7 +226,7 @@ def _coerce_arg(value: Any, prop: Dict[str, Any], key: str) -> Tuple[Any, Option
     ptype = prop.get("type", "string")
     out: Any
     if ptype == "string":
-        # T10：string 参数收到数字（`note: 3`）时无损转字符串，别为这个多花一轮。
+        # string 参数收到数字（`note: 3`）时无损转字符串，别为这个多花一轮。
         # bool 仍拒绝 —— 它是 int 的子类，转成 "True" 语义不明；其余类型照旧拒绝。
         if isinstance(value, bool):
             return None, f"参数 {key} 必须是字符串"

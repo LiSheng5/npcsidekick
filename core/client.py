@@ -21,7 +21,7 @@ import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
 
 from core.config_flags import env_text
-from core.types import LLMResponse, StreamChunk   # LLMResponse 的家在 types.py，这里 re-export
+from core.types import LLMResponse, StreamChunk
 from core.logging_config import log
 from core import config
 
@@ -57,7 +57,7 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 def llm_retry_enabled() -> bool:
-    """P1-1 观测口。"""
+    """重试开关（现读环境变量，可热切）。"""
     from core.config_flags import env_flag
     return env_flag("NPC_LLM_RETRY")
 
@@ -122,7 +122,6 @@ class LLMClient:
                 max_tokens=config.max_tokens(),
             )
 
-        # 从 provider 同步属性 (向后兼容)
         self.model = self._provider.model_name
         self.temperature = getattr(self._provider, '_temperature', config.temperature())
         self.max_tokens = getattr(self._provider, '_max_tokens', config.max_tokens())

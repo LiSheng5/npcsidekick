@@ -29,8 +29,7 @@ from core.vendor import (
     dialect_of,
 )
 
-# 厂商探测（模型名关键词 / 内置端点 / 思考参数方言）单一来源在 core/vendor.py；
-# 这里 import 后 detect_provider_name / detect_base_url 继续以 factory.* 可用（既有调用方口径不变）。
+# 厂商探测的单一来源在 core/vendor.py；这里 import 后继续以 factory.* 对外可用。
 
 # 缺某一项时给用户的提示文案（响亮失败：说清该配什么）
 _CONFIG_HINTS: dict[str, str] = {
@@ -132,8 +131,7 @@ def create_provider(
             f"请设置环境变量 NPC_BASE_URL（OpenAI 兼容端点）。"
         )
 
-    # 所有已知 provider 都使用 OpenAI 兼容 API；思考参数方言由 core/vendor 判定后
-    # 显式传给 provider（provider 不再按域名自己猜一遍）
+    # 思考参数方言由 core/vendor 判定后显式传给 provider
     return OpenAIProvider(
         api_key=api_key,
         base_url=base_url,

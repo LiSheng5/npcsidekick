@@ -70,7 +70,7 @@ def test_turn_trace_two_tool_calls_records_rounds_and_tools(tmp_store, write_per
     assert tokens["total"] == (tokens["system"] + tokens["history"] + tokens["state"]
                                + tokens["memory"] + tokens["user"] + tokens["tools"])
     assert tokens["system"] > 0 and tokens["user"] > 0
-    assert tokens["tools"] > 0                       # 工具定义计入估算（D3）
+    assert tokens["tools"] > 0                       # 工具定义计入估算
     # 默认只记长度，不记玩家原文与台词原文（隐私 + 日志体积）
     assert trace["message_len"] == len("做碗面")
     assert trace["reply_len"] == len("行啊，面好了，趁热吃。")
@@ -81,7 +81,7 @@ def test_turn_trace_two_tool_calls_records_rounds_and_tools(tmp_store, write_per
 def test_turn_trace_tools_tokens_grow_with_actions(tmp_store, write_persona,
                                                    make_app_client, make_provider,
                                                    monkeypatch, tmp_path):
-    """D3：工具定义计入估算 —— 动作数量增加时 tools 层与 prompt_tokens 随之增加。"""
+    """工具定义计入估算 —— 动作数量增加时 tools 层与 prompt_tokens 随之增加。"""
     trace_file = tmp_path / "trace.jsonl"
     monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
     write_persona("cang")
@@ -103,7 +103,7 @@ def test_turn_trace_tools_tokens_grow_with_actions(tmp_store, write_persona,
 def test_turn_trace_tools_tokens_follow_changed_params(tmp_store, write_persona,
                                                        make_app_client, make_provider,
                                                        monkeypatch, tmp_path):
-    """T9：缓存键 = 工具定义 JSON 的哈希 —— 同名动作改了参数/描述，tools 估算立刻跟着变。
+    """缓存键 = 工具定义 JSON 的哈希 —— 同名动作改了参数/描述，tools 估算立刻跟着变。
 
     用旧口径（只拿动作名当键）时第二次会命中缓存、返回与第一次相同的估算。
     """
@@ -178,7 +178,7 @@ def test_turn_trace_no_dialogue_flag(tmp_store, write_persona, make_app_client,
                                      make_provider, monkeypatch, tmp_path):
     """整回合没有 delta：no_dialogue=true、first_token_ms 为 null。
 
-    T4 验收（只有 remember 无台词 → 2 轮且第二轮无工具）：一轮 3 个 remember
+    验收（只有 remember 无台词 → 2 轮且第二轮无工具）：一轮 3 个 remember
     都执行完仍没台词 → 下一轮不给工具（防连环 remember），空文本收尾。
     """
     trace_file = tmp_path / "trace.jsonl"

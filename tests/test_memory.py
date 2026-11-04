@@ -107,8 +107,8 @@ def test_synonyms_come_only_from_explicit_table(tmp_store):
     多 NPC 并发口径：除了调用方传进来的表，检索不看任何别处 ——
     A 的同义词表没有可能"留在什么地方"污染 B 的检索。
     """
-    assert not hasattr(memory, "set_synonyms")      # 全局表入口已删
-    assert not hasattr(memory, "_ACTIVE_SYNONYMS")  # 全局表本身已删
+    assert not hasattr(memory, "set_synonyms")
+    assert not hasattr(memory, "_ACTIVE_SYNONYMS")
     _add(tmp_store, content="木材")
     _add(tmp_store, content="石头")
 

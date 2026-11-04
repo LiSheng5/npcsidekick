@@ -175,7 +175,7 @@ def test_summary_skipped_when_nothing_to_fold(tmp_store, make_provider, monkeypa
     assert provider.chat_calls == []
 
 
-# ── D7 分片折叠：老积压多片滚完，每片不超限，失败不回退 ─────────
+# ── 分片折叠：老积压多片滚完，每片不超限，失败不回退 ─────────
 
 class _FailAfterProvider:
     """前 ok_slices 次 chat 返回摘要，之后抛异常（模拟折叠中途 LLM 挂掉）。"""
@@ -194,7 +194,7 @@ class _FailAfterProvider:
 
 
 def test_summary_slices_large_backlog_within_cap(tmp_store, make_provider, monkeypatch):
-    """D7 验收：约 200K token 积压 + 窗口 32K → 分多片完成，每片输入 ≤ 窗口 × 0.3。"""
+    """约 200K token 积压 + 窗口 32K → 分多片完成，每片输入 ≤ 窗口 × 0.3。"""
     monkeypatch.setenv("NPC_CONTEXT_WINDOW", "32000")
     monkeypatch.setenv("NPC_BUDGET_HISTORY", "1000000")
     for i in range(50):                                    # 每轮 ≈ 4K token → ≈ 200K

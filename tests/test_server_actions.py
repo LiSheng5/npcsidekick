@@ -597,7 +597,7 @@ def test_tools_module_whitelist_matches_server():
     assert tools.is_action_tool("dance", CAPS["actions"]) is False
 
 
-# ── T6：动作参数校验（NPC_VALIDATE_ACTION_ARGS）────────────
+# ── 动作参数校验（NPC_VALIDATE_ACTION_ARGS）────────────
 
 def test_capabilities_rejects_bad_param_spec(tmp_store, write_persona, make_app_client):
     """params 值形态非法 → 报到 400（别让 LLM 看到一份坏 schema）。"""
@@ -642,7 +642,7 @@ def test_invalid_action_args_blocked_before_mod(tmp_store, write_persona, make_a
 
 def test_validate_off_keeps_old_passthrough(tmp_store, write_persona, make_app_client,
                                             make_provider, monkeypatch):
-    """开关关（默认）：老行为不变 —— 缺必填也照发给 mod（老 mod 不受 T6 影响）。"""
+    """开关关（默认）：老行为不变 —— 缺必填也照发给 mod（老 mod 不受影响）。"""
     monkeypatch.setenv("NPC_VALIDATE_ACTION_ARGS", "0")
     write_persona("cang")
     provider = make_provider(turns=[

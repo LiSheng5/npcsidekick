@@ -12,7 +12,7 @@
   python scripts/baseline_trace.py run --limit 3        # 只跑前 3 条（冒烟）
   python scripts/baseline_trace.py stats out/baseline_v3/trace.jsonl
 
-环境变量透传（T11：翻默认值前的两遍对照）：
+环境变量透传：
   run 起的是**进程内**服务，进程环境变量直接生效；`--env KEY=VALUE` 可临时设（可重复），
   跑完恢复原值。同一份代码关、开各跑一遍，各自写进自己的 --out：
     python scripts/baseline_trace.py run --out out/base_off --env NPC_SILENT_REMEMBER=0
@@ -78,7 +78,7 @@ SCRIPT: List[Dict[str, str]] = [
     {"kind": "chat", "message": "讲讲你今天都经历了什么。"},
     {"kind": "recall", "message": "我说过我讨厌什么吗？"},
     {"kind": "chat", "message": "明天见，晚安。"},
-    # ── 混合用例（T11）：同一句里既要求记住、又要求做个动作 ──
+    # ── 混合用例：同一句里既要求记住、又要求做个动作 ──
     # 判据：`NPC_SILENT_REMEMBER` 开着时这些回合的动作不能被丢（见第 4 节）
     {"kind": "mixed", "message": "记住我爱吃面，顺便做一碗。"},
     {"kind": "mixed", "message": "记一下我下周三交房租，再给我 100 块。"},
@@ -122,7 +122,7 @@ def _is_action_call(tool: Dict[str, Any]) -> bool:
 
 
 def _invalid_args_stats(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """invalid_args 数量与占全部 action 调用的比例（T6 翻默认值要的数据）。"""
+    """invalid_args 数量与占全部 action 调用的比例。"""
     action_calls = 0
     invalid = 0
     for rec in records:

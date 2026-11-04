@@ -199,7 +199,7 @@ def _assistant_tool_messages(call: dict):
 
 
 def test_tool_round_replays_reasoning_content(tmp_store, write_persona, make_app_client):
-    # T4（说话 + remember 一轮收尾）下这个场景只剩 1 轮，观察不到"第二轮回传"——
+    # 说话 + remember 一轮收尾时这个场景只剩 1 轮，观察不到"第二轮回传"——
     # 工具轮不带台词（只有 remember 无台词会强制再跑一轮），才能钉住回传行为
     provider = ReplayProvider(turns=[
         {"text": "", "reasoning": "玩家说了件事，先记下来。",

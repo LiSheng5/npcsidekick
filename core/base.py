@@ -16,7 +16,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Dict, List, Optional
 
-from core.types import LLMResponse, StreamChunk   # 数据契约在 types.py，抽象层不再反向依赖实现层
+from core.types import LLMResponse, StreamChunk
 
 
 class ProviderProtocol(ABC):

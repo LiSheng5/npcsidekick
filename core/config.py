@@ -50,7 +50,7 @@ def max_tokens() -> int:
 
 
 def valid_context_window(value: Any) -> Optional[int]:
-    """整数且 ≥ 8000 才合法（D1 下限），否则 None。可无损转换的字符串也认。"""
+    """整数且 ≥ 8000 才合法，否则 None。可无损转换的字符串也认。"""
     if isinstance(value, bool):
         return None
     try:
@@ -127,8 +127,7 @@ def summary_keep_recent() -> int:
 # 预算读取放这里（而不是 context.py）的理由：它们是环境变量读取项，与
 # context「纯函数、不读环境变量」的自我声明冲突；chatlog.build_history 的
 # 硬上限兜底也要用它 —— 放 core 后 chatlog 不必反向依赖装配层。
-# 默认值：state 800、memory 2000（D4：600 → 2000，记忆块在最后一条 user 里、
-# 不进前缀缓存，满载时每回合多约 1.4K 未缓存 token，卡小时无影响）；
+# 默认值：state 800、memory 2000（记忆块在最后一条 user 里、不进前缀缓存）；
 # history 不设固定默认 —— 硬上限 = 上下文窗口 × 0.7（HISTORY_BUDGET_RATIO）。
 DEFAULT_BUDGET_STATE = 800
 DEFAULT_BUDGET_MEMORY = 2000

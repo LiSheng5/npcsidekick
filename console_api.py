@@ -44,12 +44,11 @@ _EDITABLE_FIELDS = ("content", "importance", "category", "pinned")
 
 # ── 头像 ────────────────────────────────────────────────
 _AVATAR_EXT = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "webp": ".webp", "gif": ".gif"}
-# 头像上限经 /api/state 下发给前端做上传前预检 —— 值只此一份，别在前端再抄一个 2MB
+# 头像上限经 /api/state 下发，供前端上传前预检；服务端仍做最终拒绝
 AVATAR_MAX_BYTES = 2 * 1024 * 1024
 _AVATAR_DATA_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)$")
 
-# 删卡时这句提示会随 DELETE 响应的 kept.note 下发，也经 /api/state 播给前端
-# （confirm 与按钮旁说明用）—— 文案只此一份，前端不再抄
+# 删卡提示文案：随 DELETE 响应的 kept.note 与 /api/state 下发，前端只展示
 DELETE_KEPT_NOTE = ("记忆卡与聊天记录保留（数据在 store/，重建同名卡接着用）"
                     "—— 删卡不该连带删记忆")
 

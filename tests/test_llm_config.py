@@ -125,7 +125,7 @@ def test_budget_history_hard_cap_default_follows_context_window(clean_llm, monke
     assert config.budget_history(store_dir=tmp_store) == 123
 
 
-# ── 上下文窗口（T1）：三层合并 / 下限校验 / 热切 ─────────────
+# ── 上下文窗口：三层合并 / 下限校验 / 热切 ─────────────
 
 def test_context_window_default_and_three_layer_priority(clean_llm, tmp_store, monkeypatch):
     """默认 300000；优先级 页面 > store/llm_config.json > 环境变量。"""

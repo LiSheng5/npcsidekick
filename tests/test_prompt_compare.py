@@ -1,4 +1,4 @@
-"""T14 · scripts/prompt_compare.py 的离线测试（提示词构造 / 观测口径 / Markdown 渲染 / --dry）。
+"""scripts/prompt_compare.py 的离线测试（提示词构造 / 观测口径 / Markdown 渲染 / --dry）。
 
 真跑要 key，由人执行；这里一律不发请求。
 """

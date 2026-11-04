@@ -1,16 +1,10 @@
 """回合主体 —— 一次 /api/talk 的 LLM ↔ 工具多轮循环（产出 SSE 帧）。
 
-执行模型：**动作 = LLM 直接调用的工具**。
-  记忆工具由本进程执行；动作工具由本模块**同步调用** mod 的 `execute_url`（协议 §3），
-  结果作为工具消息回上下文继续推理，并**当场写进记忆卡** —— mod 不用回报。
+端点契约、执行模型与 SSE 帧通道见 `server.py` 模块头；本模块只负责回合内部：
+工具循环、动作同步转发、上下文装配与收尾帧。
 
-  结果没定的两种情况（`running` / 同步等待超时 `unknown`）**不写卡**，改为登记 `pending`
-  （见 `pending.py`），等 mod 带 `call_id` 回报时再写；TTL 到点仍没回报才算没做成。
-
-两条通道严格分离（台词只走 delta 帧，流末尾的 action 帧只是"已执行动作"的记录）：
-  · 台词通道 = SSE 的 delta 帧，只有角色说的话
-  · 结构化通道 = action 帧，在流末尾，mod **不需要**照它做任何事（仅记录/展示）
-  · 语音通道 = audio 帧（仅 voice=true 时），在 done 之前，缺依赖/超时则不出帧
+结果没定的两种情况（`running` / 同步等待超时 `unknown`）**不写卡**，改为登记 `pending`
+（见 `pending.py`），等 mod 带 `call_id` 回报时再写；TTL 到点仍没回报才算没做成。
 
 同步文件 IO（记忆卡读写 / 聊天记录读写）一律 `asyncio.to_thread` ——
 本函数是 SSE 生成器，跑在事件循环上，直接调用会把整个服务器卡住。
@@ -47,13 +41,13 @@ MAX_TOOL_ROUNDS = 3
 # 记忆检索返回条数（recall 工具 + 回合开始的记忆预取共用这个 top-k）
 RECALL_TOP_K = 5
 
-# T4·remember 静默收尾开关（家规：现读环境变量、可热切，默认关）。
+# remember 静默收尾开关（现读环境变量、可热切，默认关）。
 # 开：一轮里只有 remember 且台词已出 → 当场收尾，不再多跑一轮逼台词；
 # 关：保持旧节奏（工具轮之后总是再跑一轮拿台词）。
 _ENV_SILENT_REMEMBER = "NPC_SILENT_REMEMBER"
 
-# T6·动作参数校验开关（家规：现读环境变量、可热切）。
-# 开：执行前按声明校验（D9）—— 非法参数不下发给 mod，回灌错误让模型重发；
+# 动作参数校验开关（现读环境变量、可热切，默认关）。
+# 开：执行前按声明校验—— 非法参数不下发给 mod，回灌错误让模型重发；
 # 关：老行为（声明只当说明，拿到什么发什么）。
 _ENV_VALIDATE_ACTION_ARGS = "NPC_VALIDATE_ACTION_ARGS"
 
@@ -122,7 +116,7 @@ class _TurnTrace:
     tools: List[Dict[str, Any]] = field(default_factory=list)  # {name, kind, ok, status, ms}
     llm_fallback: bool = False          # 是否走了规则回复
     summarized: bool = False            # 本回合是否触发了摘要（启动了后台摘要）
-    ended_early: bool = False           # T4：静默收尾触发（只有静默调用且台词已出 → 提前收尾）
+    ended_early: bool = False           # 静默收尾触发（只有静默调用且台词已出 → 提前收尾）
     tokens: Dict[str, int] = field(default_factory=lambda: {
         "system": 0, "history": 0, "state": 0, "memory": 0, "user": 0, "tools": 0})
     mem_hits: int = 0                   # 记忆预取进块条数（含 pinned）
@@ -299,7 +293,6 @@ def action_tool_text(name: str, outcome: Dict[str, Any]) -> str:
         # 同步等待超时：mod 可能已经做了 —— 只说"不知道"，别替它下结论
         return f"{name} 没等到回应，不确定是否已经做成"
     if status == "deduped":
-        # 重复动作保护：同名同参的动作还在进行/待确认，这次没重复下发
         return note or "这件事还在进行或待确认，这次没有重复下达"
     if outcome.get("ok"):
         return note or f"{name} 已完成"
@@ -317,7 +310,7 @@ def action_tool_text(name: str, outcome: Dict[str, Any]) -> str:
 # 多 app 实例 / 并行测试互不干扰；未注入的调用方回落到下面的模块默认实例。
 
 class SummaryScheduler:
-    """后台摘要的调度账本：同 NPC 串行 + 任务防 GC。可注入（每 app / 每测试一份）。"""
+    """后台摘要调度账本：每 app / 每测试可注入一份。"""
 
     def __init__(self) -> None:
         self.summarizing: set = set()      # 正在摘要的 npc_id
@@ -377,7 +370,7 @@ def _prefetch_memory_text(npc_id: str,
     只读卡、不改任何字段。排除 action 类。无可放条目/出错 → ("", 0, …)
     （出错时被滤数无意义，记 0）。同步 IO（读记忆卡）——调用方包
     `asyncio.to_thread`。本函数不抛。
-    `entries` = 调用方已读好的整张记忆卡（T7：一回合只读一次，与近况层共用）；
+    `entries` = 调用方已读好的整张记忆卡（一回合只读一次，与近况层共用）；
     不传则自己读（原签名保持兼容）。
     被滤条数 = 读到的总数 − 进块数（含 action 类和预算外的），语义同
     trace 里 memory_prefetch.filtered。
@@ -476,7 +469,7 @@ def _recent_result_lines(npc_id: str, store_dir: Optional[Path] = None,
 
     行文本 = 卡片正文原样（「完成: …」/「没做成: …」由 add_action_result 写卡时定）。
     同步 IO（读记忆卡）—— 调用方包 `asyncio.to_thread`。读卡失败只告警 → 空列表。
-    `entries` = 调用方已读好的整张记忆卡（T7：与预取共用，一回合只读一次）；
+    `entries` = 调用方已读好的整张记忆卡（与预取共用，一回合只读一次）；
     不传则自己读（原签名保持兼容）。
     """
     limit = recent_results_limit()
@@ -512,7 +505,7 @@ def _recent_layer(npc_id: str, pending_infos: List[Dict[str, Any]],
 
     同步 IO（读记忆卡）—— 调用方包 `asyncio.to_thread`。本函数不抛：
     近况只是参考资料，取不到就少一块，绝不连累回合。
-    `entries` = 调用方已读好的整张记忆卡（T7：与预取共用，一回合只读一次）。
+    `entries` = 调用方已读好的整张记忆卡（与预取共用，一回合只读一次）。
     """
     moment = time.time() if now is None else now
     try:
@@ -526,8 +519,8 @@ def _recent_layer(npc_id: str, pending_infos: List[Dict[str, Any]],
 
 # ── 回合 ─────────────────────────────────────────────────
 
-# 工具定义的 token 估算缓存：键 = 工具定义 JSON 文本的哈希（T9）。
-# D3：工具定义计入压缩触发的估算 —— 同一套能力整个会话反复出现，
+# 工具定义的 token 估算缓存：键 = 工具定义 JSON 文本的哈希。
+# 工具定义计入压缩触发的估算 —— 同一套能力整个会话反复出现，
 # json.dumps + estimate_tokens 没必要每回合重算。上限 32 条，满了整体清掉重来。
 # 键必须是**整份定义文本**的哈希：只拿动作名当键时，mod 重新报到后同名动作改了
 # 参数或描述，估算会一直沿用旧值（直到缓存满 32 条才被动刷新）。
@@ -569,7 +562,7 @@ async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[
     # DeepSeek 带 tools 时硬要求把 assistant 的 reasoning_content 原样回传
     # （缺了直接 400）；别的家没有这个字段，别塞给它们
     replay_reasoning = bool(getattr(llm, "replays_reasoning_content", False))
-    # 记忆卡一回合只读一次（T7）：预取与近况层共用同一份，读卡挪线程池；
+    # 记忆卡一回合只读一次：预取与近况层共用同一份，读卡挪线程池；
     # 读失败只告警（与预取失败同一条日志），两层都退化为空、回合照常
     try:
         card = await asyncio.to_thread(memory.load_card, npc_id, store_dir=store_dir)
@@ -577,11 +570,10 @@ async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[
         log.warning("memory_prefetch_failed", npc_id=npc_id,
                     error=short_err(exc, store_dir=store_dir))
         card = []
-    # 记忆预取：置顶 → 重要度 → 新旧，到记忆预算为止，失败只告警
+    # 记忆预取（策略见 _prefetch_memory_text）
     memory_text, trace.mem_hits, trace.mem_filtered = await asyncio.to_thread(
         _prefetch_memory_text, npc_id, store_dir, card)
-    # 近况层：最近动作结果 + 进行中 / 待确认。pending.alive() 是纯内存
-    # 读（过期清理已在 /api/talk 开始时做完），最近动作结果共用上面那份卡
+    # 近况层只读 pending.alive()（过期清理已在 /api/talk 开始时做完）
     pending_infos = pending_actions.alive(npc_id) if pending_actions else []
     recent_results, recent_running, recent_unknown = await asyncio.to_thread(
         _recent_layer, npc_id, pending_infos, store_dir, entries=card)
@@ -603,7 +595,7 @@ async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[
                                  recent_running=recent_running,
                                  recent_unknown=recent_unknown)
     trace.tokens.update(assembled.section_tokens)
-    # 工具定义也占上下文（D3）：计入估算，total 与 summary_trigger.prompt_tokens 自然包含它
+    # 工具定义计入估算，total 与 summary_trigger.prompt_tokens 自然包含它
     tool_defs = tools.build_tool_definitions(capabilities)
     trace.tokens["tools"] = _tool_defs_tokens(tool_defs)
     for cut in assembled.truncated:                # 截断绝不静默：每层一条日志
@@ -688,7 +680,7 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
     stream_turn 三段式的第二段。工具轮预算用满后追加一次**收尾轮**（不带工具）：
     否则模型可能连续几轮只调工具，预算一耗尽就"哑巴收场"—— 动作做了，台词一句没有。
 
-    T4（NPC_SILENT_REMEMBER 开时）每轮工具执行完先判断收尾：
+    NPC_SILENT_REMEMBER 开时，每轮工具执行完先判断收尾：
       · 有非静默调用（recall / 动作）→ 照常继续（要结果的调用不能拦）；
       · 有 bad_args（模型重发才能修好）→ 继续；
       · 整个回合到现在一句台词都没出 → 继续（台词义务没完成）；
@@ -699,8 +691,8 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
     只记账（trace 状态 ignored）、不执行。历史只落文本（chatlog 不存 tool_calls），提前收尾不会留下悬空调用；
     `turn_reasoning` 取收尾那一轮的思考，与台词配套。
     """
-    silent_finish = silent_remember_enabled()   # T4 开关（现读，可热切）
-    validate_args = validate_action_args_enabled()   # T6 开关（现读，可热切）
+    silent_finish = silent_remember_enabled()   # 现读，可热切
+    validate_args = validate_action_args_enabled()   # 现读，可热切
     memory_tools_off = False    # 只有静默工具且没台词 → 之后各轮不再给记忆工具（动作工具照给）
     for round_no in range(MAX_TOOL_ROUNDS + 1):
         closing = round_no == MAX_TOOL_ROUNDS
@@ -780,7 +772,7 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
                 tool_text = f"{c['name']} 的参数不是合法 JSON，请按工具定义重发一次"
                 trace.add_tool(c["name"], capabilities, False, "bad_args", 0.0)
             elif is_action and validate_args:
-                # T6：执行前按声明校验（D9）—— 非法不下发给 mod，回灌错误让模型重发
+                # 执行前按声明校验：非法不下发给 mod，回灌错误让模型重发
                 # （trace 记 invalid_args，计入工具轮数预算）；合法则转型后照常执行
                 cleaned, err = tools.validate_action_args(
                     tools.find_action(c["name"], capabilities) or {}, c["args"])
@@ -814,7 +806,7 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
             log.warning("talk_tool_rounds_exhausted", npc_id=npc_id)
         if not silent_finish:
             continue
-        # T4 收尾判断：要结果的调用 / 坏参数 / 台词义务没完成 → 继续；否则提前收尾
+        # 收尾判断：要结果的调用 / 坏参数 / 台词义务没完成 → 继续；否则提前收尾
         silent_only = all(tools.is_silent_tool(c["name"]) for c in calls)
         if not silent_only or bad_ids or not run.dialogue_emitted:
             if silent_only and not run.dialogue_emitted:
@@ -838,7 +830,6 @@ async def _closing_frames(llm: Optional[LLMClient], npc_id: str, persona: Dict[s
     # 该不该摘要用 summary_plan（纯读）判断：本回合提示 token（trace 的
     # tokens.total，本地估算口径）≥ 窗口 × NPC_SUMMARY_RATIO 才压；
     # 拿不到估算（出错没走到装配）/ 降级回合 → 不触发，下回合再说；
-    # 同 NPC 已有摘要在跑就跳过。
     # trace 的 summarized = 本回合启动了后台摘要（不是"摘要已经跑完"）。
     # plan 里的 turns 直接传给后台折叠 —— 整文件读盘只此一次，后台不再重读。
     try:

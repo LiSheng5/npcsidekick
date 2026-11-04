@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.config import budget_history, context_window, summary_keep_recent, summary_ratio
 from core.logging_config import log
 from core.paths import require_npc_id, resolve_store
-from core.tokens import estimate_tokens    # 估算单源在 core；chatlog.estimate_tokens 仍可用（re-export）
+from core.tokens import estimate_tokens
 
 _SUMMARY_PROMPT = (
     "把下面这段 NPC 与玩家的对话压成一段简短摘要（中文，600 字以内）："
@@ -177,7 +177,7 @@ def _save_summary(npc_id: str, summary: str, covered: int,
 
 # 聊天记录一轮 = 用户 + 助手各一行（jsonl 行数口径），keep_recent 轮 → 行数 ×2
 _MESSAGES_PER_TURN = 2
-# D7 分片折叠：单片输入上限 = 窗口 × 0.3。老存档积压按轮次切片滚完 ——
+# 分片折叠：单片输入上限 = 窗口 × 0.3。老存档积压按轮次切片滚完 ——
 # 每片成功就落盘推进 covered，失败停在已完成处，不丢数据。
 _FOLD_SLICE_RATIO = 0.3
 
@@ -273,7 +273,7 @@ def maybe_summarize(npc_id: str, llm, prompt_tokens: Optional[int] = None,
     """提示 token ≥ 窗口 × 比例时把最旧的轮次压成摘要；`prompt_tokens=None` = 强制压缩
     （不看阈值，只要有可压的旧轮次就压）。未到阈值/无内容可压/失败 → None。
 
-    D7：积压按轮次切片、滚动折叠 —— 每片输入 ≤ 窗口 × 0.3，上一片的摘要作为
+    积压按轮次切片、滚动折叠 —— 每片输入 ≤ 窗口 × 0.3，上一片的摘要作为
     「前情摘要」进下一片；每片成功就落盘推进 covered，中途失败停在已完成处。
     聊天记录一行不动、不丢数据。成功返回最新摘要文本（至少一片成功）。
     """

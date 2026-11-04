@@ -1,13 +1,9 @@
-"""厂商探测的单一来源 —— 模型名关键词与端点域名两路信号只此一份。
+"""厂商探测的单一来源 —— 模型名关键词与端点域名两路信号。
 
 不绑定厂商，这里只做两件事：
   1. 没配端点时按模型名认厂商，用内置端点兜底（factory.create_provider）
   2. 思考参数的「方言」判定（DeepSeek 系 / OpenAI 官方 / OpenRouter / GLM 各不同）——
      openai_provider 只消费这里的标签，不再自己按域名重猜一遍
-
-这两路信号此前分家：factory 按模型名关键词猜（选端点），openai_provider 按
-base_url 域名再猜一遍（选方言），边界对不齐（自建网关跑 glm 时 provider 认得、
-factory 却推不出端点）。现在统一收在本模块。
 """
 from __future__ import annotations
 

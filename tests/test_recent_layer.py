@@ -3,7 +3,7 @@
 背景：超时动作登记 pending 而不写失败卡，若近况层不注入它，
 下一回合 NPC 对这件事一无所知，很可能重复下达同一动作。
 
-三部分（措辞先用最朴素的中文）：
+三部分：
   1. 最近动作结果：category == "action" 的记忆条目，最近 N 条（NPC_RECENT_RESULTS=5）
      且在最近 M 分钟内（NPC_RECENT_MINUTES=30）
   2. 进行中：pending 里 mod 已受理（state=running）且未过期 —— 「…— 进行中，已 X 秒」
