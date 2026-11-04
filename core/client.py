@@ -110,7 +110,7 @@ class LLMClient:
 
             status = current_llm_config()
             if not status["ready"]:
-                # 响亮失败：说清缺哪几项（未配齐时服务照常起，走角色卡 rules 兜底）
+                # 响亮失败：说清缺哪几项；由 server.create_app 捕获后降级到角色卡 rules
                 raise RuntimeError(
                     "LLM 三件套未配齐，缺: " + "、".join(hint_list(status["missing"]))
                 )

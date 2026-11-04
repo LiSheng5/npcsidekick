@@ -120,7 +120,8 @@ def get_logger(name: str = "agent") -> structlog.stdlib.BoundLogger:
 
 
 # ── Default logger (no configuration needed) ──────────────
-# 在首次使用前调用 configure_logging(), 否则用标准 logging 输出
+# 首次使用 log 时 _LazyLogger 会自动以 INFO/console 配置；
+# 需要别的级别 / 输出模式，请先显式调用 configure_logging()。
 
 
 class _LazyLogger:

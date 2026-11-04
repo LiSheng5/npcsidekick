@@ -49,7 +49,7 @@ class Paths:
 
     @property
     def persona_dir(self) -> Path:
-        """角色卡目录（加一个文件就多一个 NPC）。"""
+        """角色卡目录（`_` 开头的是模板/说明，不计入 NPC）。"""
         return self.root / "personas"
 
     @property

@@ -318,7 +318,7 @@ def action_tool_text(name: str, outcome: Dict[str, Any]) -> str:
 # · 同一 NPC 同时只允许一个摘要在跑（summarizing 记正在摘要的 npc_id，跑完移除）
 # · 异常只告警，不上抛（_run 内部已吞 LLM 错误，外面兜别的）
 # 调度状态收在 `SummaryScheduler` 对象里、每 app 一份（server 注入）——
-# 不再是模块级全局，多 app 实例 / 并行测试互不干扰。
+# 多 app 实例 / 并行测试互不干扰；未注入的调用方回落到下面的模块默认实例。
 
 class SummaryScheduler:
     """后台摘要的调度账本：同 NPC 串行 + 任务防 GC。可注入（每 app / 每测试一份）。"""
@@ -353,7 +353,7 @@ class SummaryScheduler:
         return True
 
 
-# 兜底默认实例：直接调 stream_turn 的旧调用方（不经 server）用它
+# 模块默认实例：仅当 stream_turn 未收到注入的 scheduler 时回落使用
 _SUMMARY_SCHEDULER = SummaryScheduler()
 
 

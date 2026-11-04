@@ -77,7 +77,7 @@ def test_select_recent_respects_budget():
     assert chatlog.select_recent([], 10) == []
 
 
-# ── 滚动摘要（提示用到窗口 40% 就压缩，保留最近 3 轮）────────
+# ── 滚动摘要（本小节把阈值压到 5%，便于触发；保留最近 3 轮）────────
 
 def _fill(store, npc_id: str, rounds: int, size: int = 10):
     for i in range(rounds):

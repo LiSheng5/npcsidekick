@@ -3,8 +3,6 @@
 家规契约: 默认关 + 每次现读可热切 —— 本模块只提供函数, 绝不做 import 时缓存
 （`_WARNED` 只用于非法值告警去重, 不缓存任何配置值）。
 布尔词表统一: ON = {1, true, yes, on}(大小写/空白不敏感), 其余一律 OFF。
-  · 修复旧宽松派 bug: NPC_SCHEDULER=false 曾被当成开启。
-已知特例(暂不迁移): subagent.py 的 总闸==0 + 单开关==1 双键语义(见该模块)。
 """
 from __future__ import annotations
 

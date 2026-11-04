@@ -41,7 +41,7 @@ def persona_files(persona_dir: Path) -> List[Path]:
 
 
 def persona_ids(persona_dir: Path) -> List[str]:
-    """目录里所有 NPC 的 id（同样排除 `_` 开头的模板/说明）。"""
+    """目录里的角色卡 id（`_` 开头的模板/备份/说明不算）；当前阶段 Mod 侧只启用 `cang`。"""
     return [path.stem for path in persona_files(persona_dir)]
 
 

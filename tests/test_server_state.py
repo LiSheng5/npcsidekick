@@ -25,7 +25,7 @@ def test_state_endpoint(tmp_store, write_persona, make_app_client, monkeypatch):
     # 双端共享值从这里下发（前端不再各抄一份字面量）
     assert state["avatar_max_bytes"] == 2 * 1024 * 1024
     assert "删卡不该连带删记忆" in state["delete_kept_note"]
-    # 摘要阈值随 env 现读下发（前端聊天页文案按它现算，不写死 40%/3 轮）
+    # 摘要阈值随 env 现读下发（前端聊天页文案按它现算，不写死字面量）
     assert state["summary_ratio"] == 0.5
     assert state["summary_keep_recent"] == 2
 
