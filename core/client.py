@@ -170,7 +170,7 @@ class LLMClient:
         """
         return self.chat(messages, tools=tools, tool_choice="auto")
 
-    # ── Streaming ────────────────────────────────────────
+    # ── 流式输出 ────────────────────────────────────────
 
     async def stream(
         self,

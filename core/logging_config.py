@@ -17,12 +17,12 @@ from typing import Optional
 
 import structlog
 
-# Ensure stdout handles UTF-8 on Windows（stdout 可能被重定向成不支持 reconfigure 的对象）
+# Windows 下确保 stdout 使用 UTF-8（stdout 可能被重定向成不支持 reconfigure 的对象）
 if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 
-# ── Shared Processors ─────────────────────────────────────
+# ── 共享处理器 ─────────────────────────────────────
 
 
 def _add_component(_, __, event_dict: dict) -> dict:
@@ -48,7 +48,7 @@ _shared_processors = [
 ]
 
 
-# ── Logging Configuration ─────────────────────────────────
+# ── 日志配置 ─────────────────────────────────
 
 
 def configure_logging(
@@ -116,7 +116,7 @@ def get_logger(name: str = "agent") -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name).bind(component=name)
 
 
-# ── Default logger (no configuration needed) ──────────────
+# ── 默认 logger（无需显式配置）──────────────
 # 首次使用 log 时 _LazyLogger 会自动以 INFO/console 配置；
 # 需要别的级别 / 输出模式，请先显式调用 configure_logging()。
 

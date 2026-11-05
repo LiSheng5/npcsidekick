@@ -14,7 +14,7 @@ def _defs_by_name(defs):
     return {d["function"]["name"]: d for d in defs}
 
 
-# ── schema 形态 ──────────────────────────────────────────
+# ── 声明形态 ──────────────────────────────────────────
 
 def test_memory_tool_schemas():
     rem = tools.REMEMBER_TOOL.to_openai_function()
@@ -91,7 +91,7 @@ def test_build_tool_definitions_sorted():
     assert names == ["remember", "recall", "chat", "cook", "goto"]
 
 
-# ── validate_action_args─────────────────────
+# ── 动作参数校验（validate_action_args）─────────
 
 DECL = {"name": "give", "desc": "给钱", "params": {
     "amount": {"type": "integer", "desc": "金额"},

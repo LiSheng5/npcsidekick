@@ -111,7 +111,7 @@ def thinking_body(settings: Dict[str, Any], effort: Optional[str] = None) -> Dic
         provider.close()
 
 
-# ── HTTP ────────────────────────────────────────────────
+# ── 请求与错误处理 ────────────────────────────────────────────────
 
 def _error_text(response: Any, data: Dict[str, Any]) -> str:
     """错误文本：优先取响应体的 error.message，其次原文前 400 字。"""

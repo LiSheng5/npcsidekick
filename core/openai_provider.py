@@ -148,7 +148,7 @@ class OpenAIProvider(ProviderProtocol):
         else:
             loop.create_task(async_client.close())
 
-    # ── ProviderProtocol 实现 ────────────────────────────
+    # ── 协议接口实现（ProviderProtocol）────────────────────────────
 
     @property
     def model_name(self) -> str:

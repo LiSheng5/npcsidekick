@@ -236,7 +236,7 @@ class _SlowActionProvider:
         yield StreamChunk(finish_reason="stop", model=self.model_name, index=self.chunks + 3)
 
 
-# ── mock Mod（/execute）───────────────────────────────────
+# ── 假 Mod（/execute）───────────────────────────────────
 
 class _MockModHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"

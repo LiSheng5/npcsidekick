@@ -42,7 +42,7 @@ function fmtAgo(sec) {
   return `${(sec / 3600).toFixed(1)}h 前`
 }
 
-// ── API ──────────────────────────────────────────────────
+// ── 接口封装 ──────────────────────────────────────────────────
 
 async function api(path, { method = 'GET', body } = {}) {
   const opts = { method, headers: {} }
@@ -1264,9 +1264,7 @@ async function openPersona(box, npcId, tpl) {
     fieldHelp()))
 }
 
-// ── 路由 ─────────────────────────────────────────────────
-
-// ── 页面：模型（谁来当大脑）───────────────────────────────
+// ── 页面：模型 / 路由 ────────────────────────────────────
 
 // 档位与后端 _EFFORT_VALUES 同口径（minimal/xhigh 按端点方言归一，映射见 README）
 const EFFORT_OPTIONS = [

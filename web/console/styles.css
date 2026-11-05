@@ -288,7 +288,7 @@ select {
   flex: none;
 }
 
-/* ── Graph ── */
+/* ── 关系网 ── */
 .graph-wrap {
   flex: 1;
   min-height: 0;
@@ -312,7 +312,7 @@ select {
   align-items: center;
 }
 
-/* ── Inspector ── */
+/* ── 详情面板 ── */
 .inspector {
   border-left: 1px solid var(--border);
   background: var(--surface);
@@ -456,7 +456,7 @@ select {
   margin: 2px 0;
 }
 
-/* ── Memory ── */
+/* ── 记忆卡 ── */
 .mem-compose {
   margin: 0 32px 16px;
   max-width: 860px;
@@ -650,7 +650,7 @@ select {
   color: var(--text-dim);
 }
 
-/* ── Playground ── */
+/* ── 试对话 ── */
 .play-wrap {
   flex: 1;
   min-height: 0;
