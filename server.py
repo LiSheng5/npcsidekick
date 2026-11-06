@@ -37,6 +37,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from core import field_help
 from core.client import LLMClient
 from core.config import context_window, summary_keep_recent, summary_ratio
 from core.config_flags import env_num
@@ -492,6 +493,8 @@ def _routes_status(app: FastAPI, ctx: _GameCtx) -> None:
             # 双端共享值经这里下发（heartbeat_timeout_s 的先例）：前端不再各抄一份
             "avatar_max_bytes": console_api.AVATAR_MAX_BYTES,
             "delete_kept_note": console_api.DELETE_KEPT_NOTE,
+            # 角色卡字段说明（唯一来源 core/field_help.py），控制台表格直接取用
+            "field_help": field_help.for_api(),
             # 摘要阈值两项随 env 可热切，前端聊天页文案按它现算
             "summary_ratio": summary_ratio(),
             "summary_keep_recent": summary_keep_recent(),
