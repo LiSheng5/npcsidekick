@@ -1138,23 +1138,32 @@ const NEW_PERSONA_TPL = {
   entity_synonyms: {},
 }
 
-// 字段说明经 /api/state 下发（唯一来源 core/field_help.py），前端不存副本
+// 角色卡字段的中文说明（同一份内容也在 personas/_角色卡说明.md 里）
+const FIELD_HELP = [
+  ['id', '编号', '本文件的名字（不含 .json），可用字母（含大写）/数字/下划线/点/连字符，长度 1–64，必须与文件名一致'],
+  ['name', '显示名', '游戏里怎么称呼它，例如 哥特贝拉'],
+  ['identity', '身份', '它是谁、干什么的、处在什么处境（一两句话）'],
+  ['personality', '性格', '脾气秉性、在意什么、怕什么'],
+  ['speech_style', '说话风格', '长短句、口癖、语气（"短句不废话"比"很酷"管用）'],
+  ['voice_samples', '语气锚点', '写 2~3 句它真会说的话，让模型抓住语气'],
+  ['taboos', '忌讳', '它绝不会做的事 / 不会说的话'],
+  ['rules', '降级兜底', '只在没接上大模型时用：replies = 关键词→回复，fallback = 万能回复'],
+  ['entity_synonyms', '同义词族', '同一东西的多种叫法归到一个标准词，供记忆检索（可留空）'],
+  ['voice', '音色', 'TTS 音色名（要装 edge-tts 才有声），留空用默认'],
+  ['relations', '关系网', '只画控制台关系图，不影响对话；[{who, how, weight}]'],
+]
 
 function fieldHelp() {
-  const rows = (store.state && store.state.field_help) || []
-  const body = rows.length
-    ? rows.map(f => h('tr', {},
-        h('td', {}, h('code', { text: f.key })),
-        h('td', { text: f.cn }),
-        h('td', { text: f.desc })))
-    : [h('tr', {}, h('td', { colspan: 3, text: '字段说明暂不可用（/api/state 未返回）' }))]
   return h('details', { class: 'fld-help' },
     h('summary', { text: '这些字段怎么填？（点开看中文说明）' }),
     h('table', { class: 'fld-table' },
       h('thead', {},
         h('tr', {},
           h('th', { text: '字段' }), h('th', { text: '中文名' }), h('th', { text: '怎么填' }))),
-      h('tbody', {}, body)))
+      h('tbody', {}, FIELD_HELP.map(([key, cn, desc]) => h('tr', {},
+        h('td', {}, h('code', { text: key })),
+        h('td', { text: cn }),
+        h('td', { text: desc }))))))
 }
 
 // 文案由后端下发，前端只展示。
