@@ -5,6 +5,3 @@ store/
 avatars/
 out/
 api_key.txt
-# 内部工作文档：不进公开仓库（本地保留）
-docs/manual_checks.md
-docs/*审查报告*.md
