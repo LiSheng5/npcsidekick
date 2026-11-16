@@ -1,7 +1,9 @@
-"""工具定义与执行 —— remember / recall + 动作工具（记忆通道 + 动作工具定义）。
+"""工具定义与执行 —— remember / recall / check_player_log + 动作工具。
 
-两类工具都以标准工具形态进 LLM 上下文（台词纪律：模型只输出角色说的话，不暴露工具痕迹）：
+三类工具都以标准工具形态进 LLM 上下文（台词纪律：模型只输出角色说的话，不暴露工具痕迹）：
   · remember / recall —— 记忆通道，本模块**直接执行**（memory.py）
+  · check_player_log —— 玩家行为记录查询（只读，events.py 按 NPC 可见性过滤），
+    服务端保留工具，按回合条件提供（该 NPC 有可见行为时才进工具定义）
   · 动作工具 —— 由 server **同步转发** mod 的 execute_url 执行（协议 §3）；
     本模块只负责"把声明变成工具定义"，不碰 HTTP
 
@@ -15,18 +17,22 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from core import config
 from core.logging_config import log
 from core.schema import ToolResult, ToolResultStatus, ToolSchema
 
+import events
 import memory
 
-# 记忆工具名（保留字：mod 不能声明同名动作来遮蔽它们）
+# 记忆/查询工具名（保留字：mod 不能声明同名动作来遮蔽它们）
 TOOL_REMEMBER = "remember"
 TOOL_RECALL = "recall"
-_RESERVED_TOOLS = frozenset({TOOL_REMEMBER, TOOL_RECALL})
+TOOL_CHECK_LOG = "check_player_log"
+_RESERVED_TOOLS = frozenset({TOOL_REMEMBER, TOOL_RECALL, TOOL_CHECK_LOG})
 
 # 静默工具：调用完不必再逼模型开口（NPC_SILENT_REMEMBER 开启时可提前收尾）。
 # 目前只有 remember —— 它是"顺手记一笔"，不影响台词输出义务。
+# check_player_log 不是静默工具：占用工具轮数，调完照常要多跑一轮拿台词。
 _SILENT_TOOLS = frozenset({TOOL_REMEMBER})
 
 # 动作参数的声明形态（mod 报到的 params 值，两种写法都认）：
@@ -70,6 +76,31 @@ RECALL_TOOL = ToolSchema(
     },
     category="memory",
 )
+
+PLAYER_LOG_TOOL = ToolSchema(
+    name=TOOL_CHECK_LOG,
+    description=("查你亲眼看到或公开的玩家行为记录。只在话题涉及「玩家做过什么」、"
+                 "或想判断玩家为人时才查；日常寒暄别查。你只能想起自己亲眼看到"
+                 "的事和公开发生的事，看不到的不会出现在结果里。"
+                 "查记录这件事不要对玩家说出来。"),
+    parameters={
+        "properties": {
+            "keyword": {"type": "string",
+                        "description": "关键词（匹配行为类型/短名/描述的子串）；没有就不填"},
+            "minutes": {"type": "integer",
+                        "description": "只看最近多少分钟内的记录；不填看全部"},
+            "limit": {"type": "integer",
+                      "description": "最多返回几条（默认 8，最多 20）"},
+        },
+        "required": [],
+    },
+    category="log",
+)
+
+
+def is_player_log_tool(name: str) -> bool:
+    """check_player_log（玩家行为记录查询，服务端保留工具，只读）。"""
+    return name == TOOL_CHECK_LOG
 
 
 def param_spec_error(value: Any) -> Optional[str]:
@@ -165,14 +196,19 @@ def find_action(name: str, capabilities: Optional[List[dict]]) -> Optional[Dict[
     return None
 
 
-def build_tool_definitions(capabilities: Optional[List[dict]] = None) -> List[dict]:
-    """组装进 LLM 上下文的工具数组：remember + recall + 声明过的动作。
+def build_tool_definitions(capabilities: Optional[List[dict]] = None,
+                          include_player_log: bool = False) -> List[dict]:
+    """组装进 LLM 上下文的工具数组：remember + recall (+ check_player_log) + 声明过的动作。
 
-    固定顺序（remember / recall 恒在前，动作按名排序）让工具定义前缀稳定，
-    同一套能力反复出现时利于前缀缓存。
+    固定顺序（remember / recall 恒在前，check_player_log 紧随 recall、动作之前，
+    动作按名排序）让工具定义前缀稳定，同一套能力反复出现时利于前缀缓存。
     capabilities 为空（mod 离线 / 未报到 / 没给执行接口）→ 只给记忆工具（不给动作工具）。
+    include_player_log 由调用方（turn 装配段）按 events.has_visible 决定 ——
+    该 NPC 没有任何可见玩家行为时不带查询工具。
     """
     tools = [REMEMBER_TOOL.to_openai_function(), RECALL_TOOL.to_openai_function()]
+    if include_player_log:
+        tools.append(PLAYER_LOG_TOOL.to_openai_function())
     declared: Dict[str, Dict[str, Any]] = {}
     for action in capabilities or []:
         name = str((action or {}).get("name", "")).strip()
@@ -308,15 +344,55 @@ def _as_boolean(value: Any) -> Optional[bool]:
     return None
 
 
+# ── check_player_log（玩家行为记录查询：只读，不改任何状态）─────
+
+def _run_check_player_log(args: Dict[str, Any], npc_id: str, started: float,
+                          store_dir: Optional[Path]) -> ToolResult:
+    """执行查询：keyword/minutes/limit 可选；只返回对该 NPC 可见的行（SQL 过滤）。
+
+    NPC_PLAYER_LOG 关闭 → 明确错误，任何硬调用都不能绕过开关读取数据。
+    查询失败 → 明确错误且不修改数据（只读，天然不改）。
+    """
+    def fail(error: str) -> ToolResult:
+        return _result(TOOL_CHECK_LOG, ToolResultStatus.ERROR, error=error, started=started)
+
+    if not config.player_log_enabled():
+        return fail("玩家行为记录查询未开启")
+    keyword = args.get("keyword")
+    if keyword is not None and not isinstance(keyword, str):
+        return fail("keyword 必须是字符串")
+    keyword = keyword.strip() if isinstance(keyword, str) else None
+    minutes: Optional[int] = None
+    if args.get("minutes") is not None:
+        minutes = _as_integer(args.get("minutes"))
+        if minutes is None or minutes < 1:
+            return fail("minutes 必须是正整数")
+    limit = 8
+    if args.get("limit") is not None:
+        limit = _as_integer(args.get("limit"))
+        if limit is None or limit < 1:
+            return fail("limit 必须是正整数")
+    limit = min(20, limit)                    # 上限 20
+    try:
+        rows, total = events.visible_acts(npc_id, keyword=keyword or None, minutes=minutes,
+                                          limit=limit, store_dir=store_dir)
+    except Exception as exc:                  # 查询失败不改数据，回明确错误
+        log.warning("player_log_query_failed", npc_id=npc_id, error=type(exc).__name__)
+        return fail(f"查询玩家行为记录失败（{type(exc).__name__}）")
+    data = events.format_log_lines(rows, total - len(rows))
+    log.debug("player_log_queried", npc_id=npc_id, hits=len(rows), total=total)
+    return _result(TOOL_CHECK_LOG, ToolResultStatus.SUCCESS, data=data, started=started)
+
+
 def run_tool(name: str, args: Dict[str, Any], npc_id: str,
              capabilities: Optional[List[dict]] = None,
              top_k: int = 5,
              synonyms: Optional[Dict[str, Any]] = None,
              store_dir: Optional[Path] = None) -> ToolResult:
-    """执行一次**非动作**工具调用（server 侧只把记忆工具送到这里）。
+    """执行一次**非动作**工具调用（server 侧只把记忆/查询工具送到这里）。
 
-    remember / recall 由本模块执行；动作工具走 server 的同步转发（协议 §3），
-    误送进来只返回 REJECTED；未知工具返回 ERROR（不抛异常）。
+    remember / recall / check_player_log 由本模块执行；动作工具走 server 的
+    同步转发（协议 §3），误送进来只返回 REJECTED；未知工具返回 ERROR（不抛异常）。
     """
     started = time.perf_counter()
     args = args if isinstance(args, dict) else {}
@@ -353,6 +429,9 @@ def run_tool(name: str, args: Dict[str, Any], npc_id: str,
         log.debug("recall_done", npc_id=npc_id, hits=len(entries))
         return _result(name, ToolResultStatus.SUCCESS,
                        data=memory.format_for_context(entries), started=started)
+
+    if name == TOOL_CHECK_LOG:
+        return _run_check_player_log(args, npc_id, started, store_dir)
 
     if is_action_tool(name, capabilities):
         # 动作执行由 server 同步转发 mod 的 execute_url（协议 §3）；本模块不碰 HTTP

@@ -4,6 +4,8 @@
   POST /api/capabilities   mod 报到：声明能力清单（白名单唯一闸门）+ 执行接口 + 心跳
   POST /api/talk           对话：SSE 流式（delta / action / audio / done 帧）
   POST /api/action_result  动作结果回报 → 确定性写记忆卡（可选通道，长动作才用）
+  POST /api/events         玩家行为库写入（Sims 4 mod：对这个 NPC 的互动 + 一般行为）
+  GET  /api/events         玩家行为库调试查询（kind=to_npc / by_player）
   POST /api/tts            语音合成（独立输出通道，不属于 mod 契约）
   GET  /api/state          服务器概况（调试）
   GET  /api/npcs           各 NPC 状态摘要（调试）
@@ -21,6 +23,7 @@
 
 本文件只留"契约端点 + 应用装配"：
   · 回合主体（LLM ↔ 工具循环、动作同步转发）在 `turn.py`
+  · 玩家行为库存储/合并/推送/查询在 `events.py`
   · 角色卡读取/编译在 `core/personas.py`；LLM 设置在 `core/llm_runtime.py`
 """
 from __future__ import annotations
@@ -57,6 +60,7 @@ from pending import PendingActions
 
 import chatlog
 import console_api
+import events
 import memory
 import tools
 import tts
@@ -450,6 +454,62 @@ def _routes_contract(app: FastAPI, ctx: _GameCtx) -> None:
         return {"ok": True, "npc_id": npc_id, "entry": entry, "matched": matched}
 
 
+def _routes_events(app: FastAPI, ctx: _GameCtx) -> None:
+    """玩家行为库端点：POST /api/events（mod 写入，两个库共用）/ GET /api/events（调试）。"""
+
+    @app.post("/api/events")
+    async def post_events(request: Request):
+        """mod 写入玩家行为事件（Sims 4 用 `"mod": "sims4"`；数据格式见 README）。
+
+        整批原子：任何一条非法 → 400（detail 指明 `events[i].字段`），整批不落库；
+        数据库异常 → 整批回滚并回明确 5xx，不得假成功。`mod` 可选，带上即刷新心跳。
+        """
+        body = await json_body(request)
+        mod = body.get("mod")
+        if mod is not None and not isinstance(mod, str):
+            raise HTTPException(status_code=400, detail="字段 mod 必须是字符串")
+        if isinstance(mod, str) and mod.strip():
+            ctx.registry.touch(mod.strip())   # 捎带心跳（只刷新已报到过的 mod）
+        try:
+            normalized = events.validate_events(body.get("events"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            accepted, merged = await asyncio.to_thread(
+                events.record_events, normalized, store_dir=ctx.store_dir)
+        except Exception as exc:              # 整批已回滚：明确 5xx，绝不装成功
+            log.warning("events_write_failed",
+                        error=short_err(exc, store_dir=ctx.store_dir, limit=160))
+            raise HTTPException(status_code=500,
+                                detail="事件写入失败，整批已回滚") from exc
+        log.info("events_recorded", accepted=accepted, merged=merged,
+                 mod=mod.strip() if isinstance(mod, str) else None)
+        return {"ok": True, "accepted": accepted, "merged": merged}
+
+    @app.get("/api/events")
+    async def get_events(request: Request):
+        """调试查询：`kind` 必填（to_npc / by_player，避免混合两种行结构）；
+        `npc_id` 可选（to_npc 过滤目标 NPC；by_player 过滤该 NPC 可见的行为）；
+        `limit` 默认 50、上限 200；按 `last_ts` 倒序返回原始行。"""
+        params = request.query_params
+        kind = (params.get("kind") or "").strip()
+        if kind not in ("to_npc", "by_player"):
+            raise HTTPException(status_code=400,
+                                detail="参数 kind 必须是 to_npc 或 by_player")
+        npc_id = (params.get("npc_id") or "").strip()
+        if npc_id:
+            _require_npc_id(npc_id)
+        else:
+            npc_id = None
+        try:
+            limit = int((params.get("limit") or "50").strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="参数 limit 必须是整数") from exc
+        rows = await asyncio.to_thread(events.list_events, kind, npc_id,
+                                       limit, ctx.store_dir)
+        return {"ok": True, "kind": kind, "events": rows}
+
+
 def _routes_status(app: FastAPI, ctx: _GameCtx) -> None:
     """非契约端点：语音合成（tts）、状态查询（state / npcs，调试用）。"""
 
@@ -554,6 +614,7 @@ def create_app(llm_client: Optional[LLMClient] = None,
                    pending_actions=PendingActions(), executor=executor,
                    started_at=started_at)
     _routes_contract(app, ctx)
+    _routes_events(app, ctx)
     _routes_status(app, ctx)
     app.state.registry = registry
     app.state.llm_holder = llm_holder

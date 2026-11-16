@@ -30,6 +30,7 @@ from core.tokens import estimate_tokens
 
 import chatlog
 import context
+import events
 import memory
 import pending
 import tools
@@ -94,9 +95,15 @@ def _trace_tool(name: str, capabilities: Optional[List[dict]], ok: bool,
                 status: str, ms: float) -> Dict[str, Any]:
     """trace 的一条工具记录。`status` 如实保留执行侧取值（done/running/unknown/failed、
     memory 的 success/error/rejected，以及 bad_args / ignored / deduped / invalid_args）。"""
+    if tools.is_action_tool(name, capabilities):
+        kind = "action"
+    elif tools.is_player_log_tool(name):
+        kind = "log"                          # check_player_log（玩家行为记录查询）
+    else:
+        kind = "memory"
     return {
         "name": name,
-        "kind": "action" if tools.is_action_tool(name, capabilities) else "memory",
+        "kind": kind,
         "ok": bool(ok),
         "status": status,
         "ms": round(ms, 1),
@@ -165,6 +172,8 @@ class _TurnRun:
     dialogue_emitted: bool = False                        # 是否吐过台词（delta 帧）
     recorded: bool = False                                # 聊天记录是否已落盘（finally 兜底用）
     turn_reasoning: str = ""     # 最终答复那一轮的思考内容（落盘，下一回合回传）
+    # 实际送进提示词的新事件 (id, last_ts)（装配段写入；只有完整成功的回合才标记已读）
+    events_delivered: List[Tuple[str, float]] = field(default_factory=list)
 
 
 # ── 流式工具调用累积 ─────────────────────────────────────
@@ -550,12 +559,14 @@ async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[
                            capabilities: Optional[List[dict]],
                            pending_actions: Optional[pending.PendingActions],
                            store_dir: Optional[Path],
-                           trace: _TurnTrace) -> Tuple[List[Dict[str, Any]], List[dict], bool]:
-    """上下文装配（记忆预取 / 近况层 / 历史 / 分层拼装）→ (messages, tool_defs, 回传思考?)。
+                           trace: _TurnTrace) -> Tuple[List[Dict[str, Any]], List[dict], bool, List[Tuple[str, float]]]:
+    """上下文装配（记忆预取 / 事件层 / 近况层 / 历史 / 分层拼装）
+    → (messages, tool_defs, 回传思考?, 实际进块的新事件 (id, last_ts))。
 
     stream_turn 三段式的第一段。同步 IO 全部 `asyncio.to_thread`（本函数跑在事件循环上）；
     装配结果的 section_tokens / truncated 记进 trace。`llm is None` 在这里抛
     RuntimeError，由调用方的降级分支接住走角色卡 rules 回复。
+    事件层读取失败只告警并省略事件资料（绝不把正常对话拖入 LLM 降级）。
     """
     if llm is None:
         raise RuntimeError("LLM 不可用")
@@ -577,6 +588,24 @@ async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[
     pending_infos = pending_actions.alive(npc_id) if pending_actions else []
     recent_results, recent_running, recent_unknown = await asyncio.to_thread(
         _recent_layer, npc_id, pending_infos, store_dir, entries=card)
+    # 玩家行为库（事件层）：推送行 + 目录行/查询工具开关 —— NPC_PLAYER_LOG 关 =
+    # 整段跳过；读取失败只告警（缺哪块就少哪块，对话照常）
+    events_rows: List[Dict[str, Any]] = []
+    events_digest = ""
+    include_player_log = False
+    if config.player_log_enabled():
+        try:
+            events_rows = await asyncio.to_thread(events.select_push, npc_id,
+                                                 store_dir=store_dir)
+        except Exception as exc:
+            log.warning("events_push_read_failed", npc_id=npc_id,
+                        error=short_err(exc, store_dir=store_dir))
+        try:
+            events_digest, include_player_log = await asyncio.to_thread(
+                events.digest_info, npc_id, store_dir=store_dir)
+        except Exception as exc:
+            log.warning("events_digest_read_failed", npc_id=npc_id,
+                        error=short_err(exc, store_dir=store_dir))
     # summarize=False：回合内不跑摘要 LLM，只读现成的摘要状态；
     # 摘要在回合结束、append_turn 之后后台触发（见 _closing_frames）
     history = await asyncio.to_thread(
@@ -585,7 +614,8 @@ async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[
         store_dir=store_dir, summarize=False,
         reasoning_replay=replay_reasoning)         # DeepSeek 带 tools 要回传 CoT
     # 装配走 context.assemble（system 固定层，观测等易变块挪到
-    # user 前缀并受预算约束；近况块与观测共享 state 预算）；
+    # user 前缀并受预算约束；近况块与观测共享 state 预算；事件块独享
+    # events 预算，无事件且无目录行时不出现 events token 键）；
     # trace 的 tokens 分层直接取它的 section_tokens
     assembled = context.assemble(persona, observation, history, message,
                                  state_budget=config.budget_state(),
@@ -593,14 +623,19 @@ async def _assemble_prompt(llm: Optional[LLMClient], npc_id: str, persona: Dict[
                                  memory_budget=config.budget_memory(),
                                  recent_results=recent_results,
                                  recent_running=recent_running,
-                                 recent_unknown=recent_unknown)
+                                 recent_unknown=recent_unknown,
+                                 events_rows=events_rows,
+                                 events_budget=config.budget_events(),
+                                 player_digest=events_digest)
     trace.tokens.update(assembled.section_tokens)
-    # 工具定义计入估算，total 与 summary_trigger.prompt_tokens 自然包含它
-    tool_defs = tools.build_tool_definitions(capabilities)
+    # 工具定义计入估算，total 与 summary_trigger.prompt_tokens 自然包含它；
+    # check_player_log 只在该 NPC 有可见玩家行为时进定义（recall 之后、动作之前）
+    tool_defs = tools.build_tool_definitions(capabilities,
+                                             include_player_log=include_player_log)
     trace.tokens["tools"] = _tool_defs_tokens(tool_defs)
     for cut in assembled.truncated:                # 截断绝不静默：每层一条日志
         log.warning("context_section_truncated", npc_id=npc_id, **cut)
-    return assembled.messages, tool_defs, replay_reasoning
+    return assembled.messages, tool_defs, replay_reasoning, assembled.events_delivered
 
 
 async def _run_action_call(c: Dict[str, Any], *, npc_id: str,
@@ -694,6 +729,10 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
     silent_finish = silent_remember_enabled()   # 现读，可热切
     validate_args = validate_action_args_enabled()   # 现读，可热切
     memory_tools_off = False    # 只有静默工具且没台词 → 之后各轮不再给记忆工具（动作工具照给）
+    # check_player_log 是否进了本回合的工具定义（无可见行为 / NPC_PLAYER_LOG 关 → 没进）：
+    # 未提供时模型硬报也只记账忽略，绝不绕过开关查库
+    log_tool_in_defs = any(str((d.get("function") or {}).get("name", "")) == tools.TOOL_CHECK_LOG
+                           for d in tool_defs)
     for round_no in range(MAX_TOOL_ROUNDS + 1):
         closing = round_no == MAX_TOOL_ROUNDS
         if closing:
@@ -748,6 +787,18 @@ async def _stream_llm_rounds(llm: LLMClient, npc_id: str, persona: Dict[str, Any
                     trace.add_tool(c["name"], capabilities, False, "ignored", 0.0)
                 stray_ids = {id(c) for c in stray}
                 calls = [c for c in calls if id(c) not in stray_ids]
+                if not calls:
+                    break
+
+        if not log_tool_in_defs:
+            # check_player_log 本轮未提供（无可见行为或 NPC_PLAYER_LOG 关）：
+            # 模型硬报同样只记账、不执行 —— 任何硬调用都不能绕过开关读取数据
+            log_calls = [c for c in calls if c["name"] == tools.TOOL_CHECK_LOG]
+            if log_calls:
+                log.warning("talk_unoffered_tool_call_ignored", npc_id=npc_id)
+                for c in log_calls:
+                    trace.add_tool(c["name"], capabilities, False, "ignored", 0.0)
+                calls = [c for c in calls if c["name"] != tools.TOOL_CHECK_LOG]
                 if not calls:
                     break
 
@@ -884,9 +935,10 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
     try:
         async with lock:
             try:
-                messages, tool_defs, replay_reasoning = await _assemble_prompt(
+                messages, tool_defs, replay_reasoning, events_delivered = await _assemble_prompt(
                     llm, npc_id, persona, observation, message, capabilities,
                     pending_actions, store_dir, trace)
+                run.events_delivered = events_delivered
                 async for frame in _stream_llm_rounds(
                         llm, npc_id, persona, messages, tool_defs, capabilities,
                         execute_url, mod, executor, execute_timeout, pending_actions,
@@ -914,6 +966,17 @@ async def stream_turn(*, llm: Optional[LLMClient], npc_id: str, message: str,
                 except Exception as exc:
                     log.warning("chatlog_append_failed", npc_id=npc_id,
                                 error=short_err(exc, store_dir=store_dir))
+                # 事件已读标记（版本化条件更新）：只有**完整走完 LLM/工具循环**
+                # 的回合才标记 —— 本 else 分支就是这个独立成功状态（降级走 except、
+                # 取消/断连是 BaseException 直接穿出，都不会到这）。标记失败只告警，
+                # 不影响 action / audio / done 帧。
+                if run.events_delivered:
+                    try:
+                        await asyncio.to_thread(events.mark_delivered,
+                                                run.events_delivered, store_dir=store_dir)
+                    except Exception as exc:
+                        log.warning("events_mark_delivered_failed", npc_id=npc_id,
+                                    error=short_err(exc, store_dir=store_dir))
             finally:
                 # 兜底：异常 / 客户端断连 / 取消时也要落盘，否则这一回合的话直接丢。
                 # 此时**不能 await**（生成器在 GeneratorExit / CancelledError 挂起中再 await 会报

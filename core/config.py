@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
-from core.config_flags import env_num, env_text, warn_once
+from core.config_flags import env_flag, env_num, env_text, warn_once
 from core.settings import AgentSettings
 
 # 上下文压缩（窗口 × 比例触发）默认值；环境变量每次现读可热切
@@ -158,3 +158,78 @@ def budget_history(store_dir: Optional[Path] = None) -> int:
     """
     default = int(context_window(store_dir) * HISTORY_BUDGET_RATIO)
     return max(0, int(env_num(_ENV_BUDGET_HISTORY, default, cast=int)))
+
+
+# ── 玩家行为库（事件层）──────────────────────────────────
+# 两类事件：npc_interactions（玩家对这个 NPC 的互动，回合推送进提示词）与
+# player_acts（玩家一般行为，check_player_log 按可见性拉取）。这里只放
+# 预算与窗口的读取函数（events.py 现读调用，服务端/turn 侧也各取所需）；
+# 全部现读可热切，与上面各层预算同一套家规。
+DEFAULT_BUDGET_EVENTS = 600
+DEFAULT_EVENT_PUSH_MAX = 8
+DEFAULT_EVENT_RECENT_MAX = 5
+DEFAULT_EVENT_RECENT_MINUTES = 30.0
+DEFAULT_PLAYER_LOG_DIGEST_MINUTES = 120.0
+DEFAULT_EVENT_MERGE_SECONDS = 60.0
+DEFAULT_EVENTS_MAX = 5000
+DEFAULT_EVENTS_KEEP_DAYS = 30.0
+
+_ENV_PLAYER_LOG = "NPC_PLAYER_LOG"
+_ENV_BUDGET_EVENTS = "NPC_BUDGET_EVENTS"
+_ENV_EVENT_PUSH_MAX = "NPC_EVENT_PUSH_MAX"
+_ENV_EVENT_RECENT_MAX = "NPC_EVENT_RECENT_MAX"
+_ENV_EVENT_RECENT_MINUTES = "NPC_EVENT_RECENT_MINUTES"
+_ENV_PLAYER_LOG_DIGEST_MINUTES = "NPC_PLAYER_LOG_DIGEST_MINUTES"
+_ENV_EVENT_MERGE_SECONDS = "NPC_EVENT_MERGE_SECONDS"
+_ENV_EVENTS_MAX = "NPC_EVENTS_MAX"
+_ENV_EVENTS_KEEP_DAYS = "NPC_EVENTS_KEEP_DAYS"
+
+
+def player_log_enabled() -> bool:
+    """玩家行为库总开关（现读，可热切）：NPC_PLAYER_LOG，默认开。
+
+    关 = 不注入事件块/目录行、不给 check_player_log 工具；/api/events 照收。
+    布尔词表沿用现有口径（1/true/yes/on = 开）。
+    """
+    return env_flag(_ENV_PLAYER_LOG, True)
+
+
+def budget_events() -> int:
+    """【玩家对你做了什么】块 token 预算（独立预算，不占 state）；负数钳到 0。"""
+    return max(0, int(env_num(_ENV_BUDGET_EVENTS, DEFAULT_BUDGET_EVENTS, cast=int)))
+
+
+def event_push_max() -> int:
+    """推送块「新事」条数上限：NPC_EVENT_PUSH_MAX，默认 8。"""
+    return max(0, int(env_num(_ENV_EVENT_PUSH_MAX, DEFAULT_EVENT_PUSH_MAX, cast=int)))
+
+
+def event_recent_max() -> int:
+    """推送块「近事」条数上限：NPC_EVENT_RECENT_MAX，默认 5。"""
+    return max(0, int(env_num(_ENV_EVENT_RECENT_MAX, DEFAULT_EVENT_RECENT_MAX, cast=int)))
+
+
+def event_recent_minutes() -> float:
+    """「近事」时间窗（分钟）：NPC_EVENT_RECENT_MINUTES，默认 30。"""
+    return max(0.0, env_num(_ENV_EVENT_RECENT_MINUTES, DEFAULT_EVENT_RECENT_MINUTES))
+
+
+def player_log_digest_minutes() -> float:
+    """目录行（【玩家行为记录】）统计窗（分钟）：NPC_PLAYER_LOG_DIGEST_MINUTES，默认 120。"""
+    return max(0.0, env_num(_ENV_PLAYER_LOG_DIGEST_MINUTES,
+                            DEFAULT_PLAYER_LOG_DIGEST_MINUTES))
+
+
+def event_merge_seconds() -> float:
+    """事件合并窗口（秒）：NPC_EVENT_MERGE_SECONDS，默认 60。"""
+    return max(0.0, env_num(_ENV_EVENT_MERGE_SECONDS, DEFAULT_EVENT_MERGE_SECONDS))
+
+
+def events_max() -> int:
+    """每表条数上限：NPC_EVENTS_MAX，默认 5000（severity>=8 豁免）。"""
+    return max(1, int(env_num(_ENV_EVENTS_MAX, DEFAULT_EVENTS_MAX, cast=int)))
+
+
+def events_keep_days() -> float:
+    """事件保留天数：NPC_EVENTS_KEEP_DAYS，默认 30。"""
+    return max(0.0, env_num(_ENV_EVENTS_KEEP_DAYS, DEFAULT_EVENTS_KEEP_DAYS))

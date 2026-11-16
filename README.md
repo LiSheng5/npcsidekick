@@ -18,6 +18,7 @@
          ──POST /api/talk────────▶ 对话：SSE 流（delta 台词 / action 记录 / audio 语音 / done）
          ◀──POST execute_url─────  动作执行（大脑同步请求 mod，结果当场写记忆卡）
          ──POST /api/action_result▶ 长动作结果回报（可选通道，按 call_id 对账）
+         ──POST /api/events──────▶ 玩家行为库写入（Sims 4：对这个 NPC 的互动 + 一般行为）
 本地浏览器 ──/console──────────▶ 调试面：角色卡 / 记忆 / 聊天记录 / 关系网
 ```
 
@@ -101,6 +102,13 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `NPC_MEM_RECALL_MIN_REL` | recall 相关度门槛（低于门槛的条目不返回） | 0.2 |
 | `NPC_RECENT_RESULTS` / `NPC_RECENT_MINUTES` | 近况层「最近动作结果」条数 / 时间窗（分钟） | 5 / 30 |
 | `NPC_BUDGET_STATE` / `NPC_BUDGET_MEMORY` / `NPC_BUDGET_HISTORY` | 上下文各层 token 预算；`NPC_BUDGET_HISTORY` = 历史硬上限，未设时为窗口 × 0.7（只防摘要失败时撑爆上下文） | 800 / 2000 / 窗口 × 0.7 |
+| `NPC_PLAYER_LOG` | 玩家行为库总开关：关 = 不注入事件块/目录行、不给 `check_player_log` 工具，`/api/events` 照收 | 开 |
+| `NPC_BUDGET_EVENTS` | 【玩家对你做了什么】块 token 预算（独立预算，不占 state） | 600 |
+| `NPC_EVENT_PUSH_MAX` / `NPC_EVENT_RECENT_MAX` | 事件推送「新事」/「近事」条数上限 | 8 / 5 |
+| `NPC_EVENT_RECENT_MINUTES` | 「近事」时间窗（分钟） | 30 |
+| `NPC_PLAYER_LOG_DIGEST_MINUTES` | 【玩家行为记录】目录行统计窗（分钟） | 120 |
+| `NPC_EVENT_MERGE_SECONDS` | 事件合并窗口（秒）：同键事件在窗口内合并计数 | 60 |
+| `NPC_EVENTS_MAX` / `NPC_EVENTS_KEEP_DAYS` | 事件每表条数上限（severity≥8 豁免）/ 保留天数 | 5000 / 30 |
 | `NPC_SILENT_REMEMBER` | remember 静默收尾：一轮里只有 `remember` 且台词已出 → 当场收尾（trace 记 `ended_early`）；只有 remember、一句台词没有 → 之后各轮只给动作工具（防连环调用，又不丢动作）。关 = 旧节奏 | 关 |
 | `NPC_VALIDATE_ACTION_ARGS` | 动作参数执行前校验（D9 口径，见契约节）：不合法不下发给 mod、回灌重发；老 mod 想保持"拿到什么发什么"就关掉 | 关 |
 | `NPC_TRACE_FILE` | 回合 trace 落盘（JSONL，只记长度不记原文） | 不落盘 |
@@ -134,6 +142,8 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `POST /api/capabilities` | mod 报到：声明动作白名单 + 执行接口（后续请求带 `mod` 即刷新心跳） |
 | `POST /api/talk` | 对话，SSE 流式输出 |
 | `POST /api/action_result` | 长动作结果回报（写记忆卡，可选通道） |
+| `POST /api/events` | 玩家行为库写入（Sims 4 mod 用） |
+| `GET /api/events` | 玩家行为库调试查询 |
 | `POST /api/tts` | 语音合成（独立输出通道） |
 | `GET /api/state`、`GET /api/npcs` | 状态查询（调试） |
 
@@ -180,6 +190,53 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 
 `npc_id`、`action`、`ok`（布尔）必填；`note`、`call_id`、`mod` 可选。返回 `{ok, npc_id, entry, matched}`；`entry` 为 `null` 表示没写卡。
 
+### `POST /api/events`
+
+玩家行为库写入（两个库共用一个端点，Sims 4 mod 用 `"mod": "sims4"`）：
+
+```json
+{
+  "mod": "sims4",
+  "events": [
+    {
+      "kind": "to_npc",
+      "npc_id": "cang",
+      "type": "hug_started",
+      "label": "发起拥抱",
+      "summary": "玩家对你发起了拥抱互动",
+      "severity": 2,
+      "merge_key": "sim_Hug:<玩家sim_id>:<目标sim_id>",
+      "game_time": "16:25:11.040 day:0 week:1",
+      "detail": {"affordance": "sim_Hug", "phase": "started", "detection": "si_poll",
+                 "source": "<实测确认的玩家操作来源>", "actor_sim_id": "…", "target_sim_id": "…"}
+    },
+    {
+      "kind": "by_player",
+      "type": "cook_started",
+      "label": "开始做饭",
+      "summary": "玩家开始做饭",
+      "severity": 1,
+      "merge_key": "cook:<玩家sim_id>:<目标物体id>",
+      "witnesses": ["cang"],
+      "visibility": "witnessed",
+      "location": "当前地段名",
+      "game_time": "16:25:11.040 day:0 week:1",
+      "detail": {"affordance": "…", "phase": "started"}
+    }
+  ]
+}
+```
+
+- `events` 为 1–50 条的数组；`kind ∈ {to_npc, by_player}`（对这个 NPC 的互动 / 一般行为）。
+- `type` 匹配 `^[\w.-]{1,40}$`；`label` ≤ 8 字符（缺省用 type）；`summary` 非空 ≤ 200 字符；`severity` 整数 0–9（缺省 3）；`visibility ∈ {witnessed, public}`（缺省 `witnessed`，Sims 4 初版只生成 `witnessed`）。
+- `to_npc` 必须有合法 `npc_id`；`by_player.witnesses` 缺省空数组、逐个过 NPC id 校验并去重；`detail` 必须是对象、UTF-8 JSON 序列化后 ≤ 4KB。
+- **整批原子**：任何一条非法 → 400（detail 指明 `events[i].字段`）、整批不落库；数据库异常 → 整批回滚并回明确 5xx。
+- 成功返回 `{ok: true, accepted: <输入条数>, merged: <发生合并的条数>}`。合并规则：同键（`to_npc` 按 `(npc_id, type, merge_key)`、`by_player` 按 `(type, merge_key, location)`）且距上次写入不超过 `NPC_EVENT_MERGE_SECONDS` → `count+1`、字段取最新、`to_npc` 的 `delivered_at` 复位、`by_player` 目击者并集且公开性只升不降。
+- `mod` 可选，带上即刷新心跳。**当前接口不承诺幂等**：mod 不得对结果不确定的请求自动重发。
+- 只有实际捕获到对应白名单交互后才允许发送，不能定时伪造。
+
+`GET /api/events?kind=to_npc|by_player&npc_id=…&limit=…`（调试）：`kind` 必填避免混合两种行结构；`limit` 默认 50、上限 200；按 `last_ts` 倒序返回原始行。`by_player` 带 `npc_id` 时只返回该 NPC **可见**的行为（public 或自己是目击者），便于调试可见性。
+
 ### `POST /api/tts`
 
 `{"text": "…", "voice": "zh-CN-XiaoxiaoNeural", "npc_id": "cang"}` → `{audio: "<base64 或空串>", voice}`；未装 `edge-tts` → 503。
@@ -198,10 +255,12 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 2. **历史**：已有摘要（一条 assistant 消息）+ 未被摘要覆盖的全部聊天记录；提示用到 `NPC_CONTEXT_WINDOW` 的 40%（`NPC_SUMMARY_RATIO`）时压缩旧轮次、只留最近 3 轮（`NPC_SUMMARY_KEEP_RECENT`）
 3. **最后一条 user 消息**：资料块 + `玩家说：{原话}`，资料块顺序为
    - 【当前情况】：游戏观测（受 `NPC_BUDGET_STATE` 约束）
+   - 【玩家对你做了什么】：玩家对该 NPC 的互动事件（独享 `NPC_BUDGET_EVENTS`，见「玩家行为库」）
    - 【相关记忆】：回合开始的确定性预取（独享 `NPC_BUDGET_MEMORY`）
    - 【最近发生】：最近动作结果 / 进行中 / 待确认（与观测**共享** `NPC_BUDGET_STATE`，拿观测剩下的）
+   - 【玩家行为记录】：玩家一般行为的目录行（一行，不设独立预算，token 计入 `events` 键）
 
-没有内容的块整块省略；超预算按文本截断并留 `…（已截断）` 标记，同时给每层记一条 `context_section_truncated` 日志，绝不静默丢弃。【最近发生】的砍序是「最近结果 → 进行中 → 待确认」（组内从较旧的砍起），待确认最后才砍——没收到回应的最容易被重复下令。
+没有内容的块整块省略；超预算按文本截断并留 `…（已截断）` 标记，同时给每层记一条 `context_section_truncated` 日志，绝不静默丢弃。【最近发生】的砍序是「最近结果 → 进行中 → 待确认」（组内从较旧的砍起），待确认最后才砍——没收到回应的最容易被重复下令。【玩家对你做了什么】的砍序是「近事（旧先砍）→ 低 severity 新事 → 高 severity 新事」，折叠行（超出条数上限的较轻事件）被砍掉时其包含的事件全部保持未读。
 
 整个提示（系统 + 状态 + 记忆 + 历史 + 玩家这句）用到 `NPC_CONTEXT_WINDOW` 的 40%（`NPC_SUMMARY_RATIO`）时，回合结束后台把旧轮次压成滚动摘要（不挡首字），只留最近 3 轮逐字；摘要只保脉络，重要事实走记忆卡。
 
@@ -210,6 +269,36 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 - **一个文件**：`store/{id}_memory.json` —— 一 NPC 一张卡，JSON 条目列表，可直接手改、存盘即生效。
 - **字段**：条目 `{id, content, importance, category, created_at, pinned?}` —— `content` 记的事；`importance` 0-9；`category` 分类（如 preference / event / promise）；`pinned` 置顶（预取恒在最前）。**`category=action` 是特例**：动作结果卡（`完成: …` / `没做成: …`），不进【相关记忆】，由【最近发生】近况层负责。
 - **读写入口**：写有四条 —— `remember` 工具（`replaces` 填【相关记忆】里的 6 位短编号即原地更新）、动作结果写卡、控制台增删改、手改 JSON；读有两条 —— 回合开始按「置顶 → 重要度 → 新旧」确定性预取进【相关记忆】（受 `NPC_BUDGET_MEMORY` 约束，一回合只读一次卡），深挖走 `recall` 工具（相关度门槛 `NPC_MEM_RECALL_MIN_REL`）。
+
+## 玩家行为库（Sims 4）
+
+给 NPC 两个「玩家行为库」，投递方式不同（`events.py`，SQLite 落 `store/events.db`，标准库不加依赖）：
+
+| 库 | 内容 | 投递方式 |
+|---|---|---|
+| `npc_interactions` | 玩家**对这个 NPC** 发起的互动（拥抱、争执等） | **推送**：每回合自动进提示词【玩家对你做了什么】块 |
+| `player_acts` | 玩家**做了什么**（做饭、修理等一般行为） | **拉取**：AI 自己决定查不查，用 `check_player_log` 工具 |
+
+这套机制只提供事实资料，**不自动替代长期记忆**：事件是否值得记入记忆卡，仍由模型通过 `remember` 判断。
+
+- **推送语义**：新事（未送达）按 severity 降序最多 `NPC_EVENT_PUSH_MAX` 条逐条展示、行首标 `[新]`，超出的折叠成一行「另有 N 条较轻的：…」；已送达且在 `NPC_EVENT_RECENT_MINUTES` 窗口内的近事标 `[之前]` 最多 `NPC_EVENT_RECENT_MAX` 条（资料块不进聊天记录，已读的也要继续显示一阵子，否则下一回合就失去这段上下文）。
+- **已读标记**：只有完整走完 LLM/工具循环（无降级、无异常、无取消、无断连）的回合，才把实际送进提示词的新事标记已读——按装配时保存的 `(id, last_ts)` **版本化条件更新**，回合进行中同一事件又发生合并（`last_ts` 已变）不会被旧回合误标。被预算砍掉、折叠行未保留、异常/降级回合中的新事全部保持未读，下回合重推。
+- **可见性（AI 不能全知）**：NPC 只能查到 `visibility='public'` 或自己在 `act_witnesses` 里的行为，**过滤在 SQL 层完成**。Sims 4 初版只生成 `witnessed`（需明确目击判定），空目击者不误标 `public`。
+- **`check_player_log` 工具**：参数 `keyword`（匹配 type/label/summary 子串）/ `minutes`（时间窗）/ `limit`（默认 8、上限 20）；只读、不改任何状态；不是静默工具、占用工具轮数；它是服务端保留工具，mod 声明同名动作不能遮蔽。该 NPC 在 `NPC_PLAYER_LOG_DIGEST_MINUTES` 窗口内有可见行为时才进工具定义，同时提示词资料块最后加一行【玩家行为记录】目录（记录行数 + 次数最多的前 3 个 label）。工具未提供或总开关关闭时，模型硬调用只记账忽略 / 返回明确错误，**绝不绕过开关查库**。
+- **清理**：写入时顺手清理（每库每分钟最多一次，限流按库文件绝对路径隔离）——删超过 `NPC_EVENTS_KEEP_DAYS` 的记录（级联删目击者）；每表超过 `NPC_EVENTS_MAX` 时从最旧的 `severity<8` 记录开始删，`severity>=8` 豁免条数上限。
+- **故障降级**：事件读取失败只告警并省略事件资料（不把对话拖入 LLM 降级）；已读标记失败只告警；查询工具失败返回明确错误且不改数据；写入失败整批回滚。
+
+**Sims 4 侧约定（先事件、后 talk）**：当一批事件必须影响紧接着的对话时，顺序必须是「游戏主线程捕获交互 → 提取纯数据 → 后台 worker 先 `POST /api/events`、等成功响应后再 `POST /api/talk`」，两者在同一个后台串行链路内完成；对话前置事件 POST 失败则本次不继续 talk（保证本回合语义）。与对话无关的独立事件超过 10 秒未随 talk 发出时后台单独发送（不重试、不排队）。事件语义只到「交互开始」为止：类型统一 `*_started`、文案用「发起/开始」，不写成「完成/成功」，不伪造送礼成功、物品转移或攻击命中。白名单 affordance 名与玩家操作来源必须以当前游戏版本**运行时实测**为准，未经实测不得上报；一秒轮询可能漏掉极短交互，这是已知限制，不得用推测补齐。
+
+MOD 侧配置（`NPCSidekickSims4.json`，默认关闭事件上报，完成游戏内实测后再开启）：
+
+| 键 | 说明 | 默认 |
+|---|---|---|
+| `player_events` | 事件采集总开关 | `false` |
+| `player_event_affordances` | 实测确认的 affordance → 事件映射：`{"sim_Hug": {"type": "hug_started", "label": "发起拥抱", "summary": "玩家对你发起了拥抱互动", "severity": 2}}` | `{}` |
+| `player_event_witness_distance` | 后续 `by_player` 阶段的目击者距离阈值（米） | `10.0` |
+
+来源过滤：只认 `SOURCE_PLAYER` / `SOURCE_PIE_MENU` 等已知玩家来源；自主、`SOURCE_SCRIPT`（本 MOD 创建）和未识别来源均不上报（未识别来源会采样记入日志）。目标 NPC 由 SI 的 actor/target 局部计算（sim_map 最长名包含匹配），不明确时放弃、不用 `default_npc` 兜底。
 
 ## 回合 trace
 
@@ -223,8 +312,8 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 | `summarized` | 本回合是否启动了后台摘要（不代表已跑完） |
 | `ended_early` | 是否提前收尾（T4：一轮里只有 `remember` 且台词已出 → 当场收尾） |
 | `no_dialogue` | 是否一句台词都没产出 |
-| `tools` | 每次工具调用 `{name, kind, ok, status, ms}` |
-| `tokens` | `{system, history, state, memory, user, tools, total}`（本地估算口径；`tools` = 工具定义，D3 起计入压缩触发估算） |
+| `tools` | 每次工具调用 `{name, kind, ok, status, ms}`；`kind` 取 `action` / `memory` / `log`（check_player_log） |
+| `tokens` | `{system, history, state, memory, user, tools, total}` + 实际注入事件块时的 `events`（本地估算口径；`tools` = 工具定义，D3 起计入压缩触发估算） |
 | `summary_trigger` | `{prompt_tokens, limit}`：本回合提示 token 估算 vs 压缩阈值（窗口 × 比例），方便对照真实对话判断阈值是否合适 |
 | `memory_prefetch` | `{hits, filtered}`：进块条数 / 被滤条数 |
 | `first_token_ms` / `total_ms` | 首帧耗时 / 整回合耗时 |
@@ -242,7 +331,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 pytest
 ```
 
-覆盖回合循环、上下文分层与预算、记忆检索与 replaces 更新、记忆预取、滚动摘要、近况层、动作去重、pending / call_id 对账、回合 trace、控制台 API 等。
+覆盖回合循环、上下文分层与预算、记忆检索与 replaces 更新、记忆预取、滚动摘要、近况层、动作去重、pending / call_id 对账、玩家行为库（存储/合并/清理/推送/可见性/API/check_player_log 工具，含 FakeProvider 端到端）、回合 trace、控制台 API 等。
 
 手测脚本（真实 HTTP、可打印可直接贴回来的 JSON 汇总）：
 
@@ -259,8 +348,9 @@ server.py       HTTP 服务：mod 契约端点 + 应用装配
 turn.py         回合主体：LLM ↔ 工具多轮循环（产出 SSE 帧 + 回合 trace）
 context.py      上下文分层装配（纯函数，可单测）
 memory.py       记忆卡：条目 + 相关度检索
+events.py       玩家行为库：SQLite 存储 / 合并 / 清理 / 推送选取 / 可见查询
 chatlog.py      持久聊天记录 + 滚动摘要
-tools.py        remember / recall + 动作工具定义（白名单闸门）
+tools.py        remember / recall / check_player_log + 动作工具定义（白名单闸门）
 pending.py      待定动作登记（长动作回报对账）
 tts.py          语音合成
 http_util.py    HTTP 层共享小工具（请求体解析，游戏面与控制台共用）
@@ -271,7 +361,7 @@ web/console/    本地控制台（零构建：index.html + app.js + styles.css�
 scripts/        手测脚本（manual_checks.py）
 docs/           手测记录等文档
 tests/          pytest 测试
-store/          运行时数据（聊天记录、记忆卡、摘要）—— 不进仓库
+store/          运行时数据（聊天记录、记忆卡、摘要、events.db）—— 不进仓库
 ```
 
 ## License

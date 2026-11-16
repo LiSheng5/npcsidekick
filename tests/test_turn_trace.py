@@ -287,3 +287,59 @@ def test_turn_trace_fallback_does_not_trigger_summary(tmp_store, write_persona,
     assert trace["summary_trigger"]["limit"] == 80
     assert trace["summary_trigger"]["prompt_tokens"] >= 80  # 有估算也不触发（降级回合）
     assert not chatlog.summary_path("cang", store_dir=tmp_store).exists()
+
+
+# ── 玩家行为库（事件层）──────────────────────────────────
+
+def test_turn_trace_events_tokens_and_log_tool_kind(tmp_store, write_persona,
+                                                    make_app_client, make_provider,
+                                                    monkeypatch, tmp_path):
+    """有事件的回合：tokens 出现 events 键且计入 total；check_player_log 的 kind=log。"""
+    trace_file = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
+    write_persona("cang")
+    provider = make_provider(turns=[
+        {"text": "", "tool_calls": [{"name": "check_player_log",
+                                     "arguments": {"keyword": "做饭"}}]},
+        {"text": "你在做饭。"},
+    ])
+    client = make_app_client(provider=provider)
+    client.post("/api/events", json={"mod": "sims4", "events": [
+        {"kind": "to_npc", "npc_id": "cang", "type": "hug_started",
+         "summary": "玩家对你发起了拥抱互动"},
+        {"kind": "by_player", "type": "cook_started", "label": "开始做饭",
+         "summary": "玩家开始做饭", "witnesses": ["cang"]},
+    ]})
+
+    res = client.post("/api/talk", json={"npc_id": "cang", "message": "我在干嘛"})
+
+    assert kinds(res)[-1] == "done"
+    traces = read_traces(trace_file)
+    assert len(traces) == 1
+    trace = traces[0]
+    tokens = trace["tokens"]
+    assert "events" in tokens and tokens["events"] > 0    # 实际注入才出现该键
+    assert tokens["total"] == sum(v for k, v in tokens.items() if k != "total")
+    assert len(trace["tools"]) == 1
+    tool = trace["tools"][0]
+    assert tool["name"] == "check_player_log"
+    assert tool["kind"] == "log"                           # 新的工具 kind
+    assert tool["ok"] is True and tool["status"] == "success"
+    assert set(tool) == {"name", "kind", "ok", "status", "ms"}   # 字段形状不变
+
+
+def test_turn_trace_no_events_key_without_events(tmp_store, write_persona,
+                                                 make_app_client, make_provider,
+                                                 monkeypatch, tmp_path):
+    """无事件时 trace.tokens 不出现 events 键（旧 trace 精确回归）。"""
+    trace_file = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("NPC_TRACE_FILE", str(trace_file))
+    write_persona("cang")
+    client = make_app_client(provider=make_provider(turns=[{"text": "嗯。"}]))
+
+    client.post("/api/talk", json={"npc_id": "cang", "message": "在吗"})
+
+    tokens = read_traces(trace_file)[0]["tokens"]
+    assert "events" not in tokens
+    assert set(tokens) == {"system", "history", "state", "memory", "user",
+                           "tools", "total"}
