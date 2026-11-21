@@ -47,6 +47,7 @@ from core.llm_runtime import (
     apply_llm_settings,
     build_default_client,
     key_perm_hint,
+    list_remote_models,
     llm_config_status,
     reasoning_effort,
     reset_llm_settings,
@@ -630,6 +631,8 @@ def create_app(llm_client: Optional[LLMClient] = None,
             "apply": lambda patch: apply_llm_settings(patch, llm_holder,
                                                       store_dir=ctx.store_dir),
             "reset": lambda: reset_llm_settings(llm_holder, store_dir=ctx.store_dir),
+            "models": lambda base_url, api_key: list_remote_models(
+                base_url=base_url, api_key=api_key, store_dir=ctx.store_dir),
         }))
     app.mount("/avatars", StaticFiles(directory=str(avatar_dir)), name="avatars")
     if CONSOLE_DIR.is_dir():

@@ -361,6 +361,84 @@ def reset_llm_settings(holder: Optional[Dict[str, Any]] = None,
     return llm_config_status(store_dir=store_dir)
 
 
+# ── 远端模型列表（控制台「模型」页连上就自动拉）─────────────
+
+def _model_ids_from(payload: Any) -> List[str]:
+    """从 GET /models 的响应里抠模型 id —— 各家格式不一，都认。
+
+    OpenAI 标准是 `{"data": [{"id": "..."}]}`；部分网关/兼容层回
+    `{"models": ["..."]}` 或干脆一个裸数组。抠不出来给空列表（调用方兜底手输）。
+    """
+    items: Any = None
+    if isinstance(payload, dict):
+        items = payload.get("data") if isinstance(payload.get("data"), list) else payload.get("models")
+    elif isinstance(payload, list):
+        items = payload
+    if not isinstance(items, list):
+        return []
+    out: List[str] = []
+    for item in items:
+        name = item.get("id") if isinstance(item, dict) else item
+        name = str(name or "").strip()
+        if name and name not in out:
+            out.append(name)
+    return sorted(out)
+
+
+def list_remote_models(base_url: str = "", api_key: str = "",
+                       store_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """拉远端 `GET {base_url}/models` 的模型列表（给页面下拉选模型用）。
+
+    base_url / api_key 收"还没保存的候选值"（页面试连）；留空 = 用当前生效配置
+    （base_url 缺失时按模型名推断兜底，口径与 resolve_llm_config 一致）。
+    拉不到**不抛异常**：返回 ok=False + error，前端回落"手输模型名"——
+    不是所有端点都实现 /models（404 就是正常情况），别把人卡死在引导流程外。
+    """
+    import httpx
+
+    from core.factory import detect_base_url
+
+    cfg = llm_settings(store_dir=store_dir)
+    key = (str(api_key or "").strip() or effective_api_key(store_dir=store_dir))
+    url = str(base_url or "").strip() or str(cfg.get("base_url") or "").strip()
+    if not url:
+        url = detect_base_url(str(cfg.get("model") or ""), "") or ""
+    if not key:
+        return {"ok": False, "models": [], "count": 0,
+                "error": "没配 API Key —— 先填 key（或放环境变量 NPC_API_KEY / api_key.txt）"}
+    if not url:
+        return {"ok": False, "models": [], "count": 0,
+                "error": "没配端点 —— 填网关地址、选个厂商，或手填 OpenAI 兼容端点"}
+
+    target = url.rstrip("/") + "/models"
+    try:
+        resp = httpx.get(target, headers={"Authorization": f"Bearer {key}"}, timeout=8.0)
+    except Exception as exc:
+        return {"ok": False, "models": [], "count": 0,
+                "error": scrub(f"连不上端点：{exc}", store_dir=store_dir)[:160]}
+    if resp.status_code in (401, 403):
+        return {"ok": False, "models": [], "count": 0,
+                "error": f"key 无效或没权限拉模型列表（HTTP {resp.status_code}）"}
+    if resp.status_code == 404:
+        return {"ok": False, "models": [], "count": 0,
+                "error": "这个端点不支持 /models —— 手动填模型名就行"}
+    if resp.status_code >= 400:
+        detail = scrub((resp.text or "")[:120], store_dir=store_dir)
+        return {"ok": False, "models": [], "count": 0,
+                "error": f"拉取失败（HTTP {resp.status_code}）：{detail}"}
+    try:
+        payload = resp.json()
+    except ValueError:
+        return {"ok": False, "models": [], "count": 0,
+                "error": "端点回的不是 JSON —— 手动填模型名就行"}
+    models = _model_ids_from(payload)
+    if not models:
+        return {"ok": False, "models": [], "count": 0,
+                "error": "端点回了 200 但没解析出模型 —— 手动填模型名就行"}
+    log.info("llm_models_listed", base_url=url, count=len(models))
+    return {"ok": True, "models": models, "count": len(models), "error": None}
+
+
 def rebuild_llm(holder: Dict[str, Any], store_dir: Optional[Path] = None) -> None:
     """按生效设置重建大脑；没配齐 → None（/api/talk 走角色卡 rules 兜底）。
 

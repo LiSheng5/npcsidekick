@@ -1278,15 +1278,33 @@ const EFFORT_OPTIONS = [
   ['max', '开启 · 最高'],
 ]
 
-const VENDOR_EXAMPLES = [
+// 连接方式：厂商直连（默认）/ 自定义端点 / 聚合模式（可选，第三方）
+// —— 填 key → 自动拉模型列表 → 下拉选模型
+// 直连预设 = 厂商官方端点：key 与对话只发给厂商，不经过任何第三方
+const VENDOR_PRESETS = [
   ['DeepSeek', 'https://api.deepseek.com'],
   ['OpenAI', 'https://api.openai.com/v1'],
   ['通义千问（百炼）', 'https://dashscope.aliyuncs.com/compatible-mode/v1'],
   ['Kimi / Moonshot', 'https://api.moonshot.cn/v1'],
   ['智谱 GLM', 'https://open.bigmodel.cn/api/paas/v4'],
-  ['本地 Ollama', 'http://localhost:11434/v1'],
-  ['OpenRouter（含 Claude / Gemini）', 'https://openrouter.ai/api/v1'],
+  ['本地 Ollama（不出机器）', 'http://localhost:11434/v1'],
+  ['xAI Grok', 'https://api.x.ai/v1'],
+  ['Mistral', 'https://api.mistral.ai/v1'],
+  ['Gemini（OpenAI 兼容口）', 'https://generativelanguage.googleapis.com/v1beta/openai'],
 ]
+
+// [按钮文案, 模式说明]
+const MODE_INFO = {
+  preset: ['厂商直连', '选厂商自动填官方端点，填 key 即连 —— 请求从你的服务直发厂商官方端点，key 与对话不经过任何第三方'],
+  custom: ['自定义端点', '自建 / 本地 OpenAI 兼容端点（Ollama、vLLM…）—— 数据只发往你填的地址；注意：若填的是别人的中转地址，同样会经过第三方'],
+  aggregator: ['聚合模式', '一个 key 覆盖多家模型，但对话与 key 会经过网关运营方 —— 只推荐想低成本试大量模型的人'],
+}
+
+// 已知聚合网关的地址特征 —— 只用来猜"上次存的地址该落在哪个模式"，用户随时可切
+const AGGREGATOR_HINTS = ['openrouter.ai', 'oneapi', 'new-api', 'openai-proxy',
+  'aihubmix', 'ohmygpt', 'closeai', 'burncloud']
+
+const MODEL_MANUAL = '__manual__'   // 模型下拉里「手动输入」那一项的哨兵值
 
 const ORIGIN_TEXT = {
   env: '环境变量',
@@ -1295,7 +1313,7 @@ const ORIGIN_TEXT = {
 }
 
 async function renderModel(view) {
-  view.replaceChildren(pageHead('模型', '谁来当大脑：模型名 / OpenAI 兼容端点 / 深度思考 —— 改完立即生效，并记进 store/llm_config.json',
+  view.replaceChildren(pageHead('模型', '厂商直连 / 自定义端点 / 聚合模式（可选）→ 填 key → 自动拉模型列表选模型；改完立即生效，并记进 store/llm_config.json',
     h('button', { class: 'btn', text: '刷新', onclick: () => route() })))
   const box = h('div', { class: 'mem-list' }, stateBlock('', '加载中…'))
   view.append(box)
@@ -1312,10 +1330,147 @@ async function renderModel(view) {
     return
   }
 
-  const model = h('input', { class: 'input', placeholder: '模型名，例：deepseek-v4-flash' })
-  model.value = cur.model || ''
-  const base = h('input', { class: 'input', placeholder: 'OpenAI 兼容端点，例：https://api.deepseek.com' })
-  base.value = cur.base_url || ''
+  // ── 草稿与模式：切换模式不丢已填内容；默认厂商直连，聚合模式要用户自己选 ──
+  const normUrl = (s) => (s || '').trim().replace(/\/+$/, '')
+  const presetByUrl = (url) => VENDOR_PRESETS.find(([, u]) => normUrl(u) === normUrl(url))
+  const guessMode = (url) => {
+    if (!normUrl(url)) return 'preset'
+    if (presetByUrl(url)) return 'preset'
+    const low = String(url).toLowerCase()
+    return AGGREGATOR_HINTS.some((s) => low.includes(s)) ? 'aggregator' : 'custom'
+  }
+  let mode = guessMode(cur.base_url)
+  const draft = {
+    base_url: cur.base_url || '',
+    api_key: '',                      // 永不回显原文；留空 = 用已保存 / 环境变量那把
+    model: cur.model || '',
+  }
+
+  // ── 连接方式三选一（厂商直连在前；聚合模式排最后、要用户主动选）──
+  const modeBtns = {}
+  const modeRow = h('div', { class: 'filter-row' })
+  for (const key of ['preset', 'custom', 'aggregator']) {
+    const btn = h('button', {
+      class: 'btn', type: 'button', text: MODE_INFO[key][0],
+      onclick: () => { mode = key; syncMode() },
+    })
+    modeBtns[key] = btn
+    modeRow.append(btn)
+  }
+  const modeDesc = h('p', { class: 'hint', text: MODE_INFO[mode][1] })
+  // 聚合模式的第三方数据警示 —— 只在该模式下展示，入口处就把代价说清
+  const aggregatorWarn = banner(
+    '⚠️ 聚合模式：对话内容与 API Key 都会经过第三方网关运营方，对方技术上可以看到你的对话。只建议想用一个 key 低成本试大量模型的人选用；在意隐私请用「厂商直连」或自建端点。',
+    'warn')
+  aggregatorWarn.style.margin = '0 0 14px'
+
+  // ── 端点 / 厂商 / key ──
+  const vendorSel = h('select', { class: 'input' },
+    VENDOR_PRESETS.map(([name, url]) => h('option', { value: url, text: name })))
+  vendorSel.addEventListener('change', () => {
+    draft.base_url = vendorSel.value
+    base.value = vendorSel.value
+  })
+  const vendorRow = h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '厂商：' }), vendorSel)
+
+  const base = h('input', { class: 'input' })
+  base.addEventListener('input', () => { draft.base_url = base.value.trim() })
+
+  const apiKey = h('input', {
+    class: 'input', type: 'password', autocomplete: 'off',
+    placeholder: cur.api_key && cur.api_key.masked
+      ? `已保存 ${cur.api_key.masked} —— 留空不改，填写则替换`
+      : '留空 = 用环境变量 / api_key.txt；填写则明文存 store/llm_config.json',
+  })
+  apiKey.addEventListener('input', () => { draft.api_key = apiKey.value })
+
+  // ── 模型：拉到列表就下拉选，拉不到手输兜底 ──
+  const modelSelect = h('select', { class: 'input' })
+  const modelManual = h('input', {
+    class: 'input', placeholder: '手输模型名，例：deepseek-v4-flash', value: draft.model,
+  })
+  modelManual.addEventListener('input', () => { draft.model = modelManual.value.trim() })
+  const manualOn = () => !modelSelect.options.length || modelSelect.value === MODEL_MANUAL
+  const syncModelVisibility = () => { modelManual.style.display = manualOn() ? '' : 'none' }
+  modelSelect.addEventListener('change', () => {
+    if (!manualOn()) draft.model = modelSelect.value
+    else modelManual.value = draft.model
+    syncModelVisibility()
+  })
+  const renderModelPicker = (list) => {
+    if (!list.length) {
+      modelSelect.replaceChildren()
+      modelSelect.style.display = 'none'
+      modelManual.value = draft.model
+    } else {
+      modelSelect.style.display = ''
+      modelSelect.replaceChildren(
+        ...list.map((m) => h('option', { value: m, text: m })),
+        h('option', { value: MODEL_MANUAL, text: '手动输入模型名…' }))
+      if (draft.model && list.includes(draft.model)) {
+        modelSelect.value = draft.model
+      } else {
+        modelSelect.value = MODEL_MANUAL
+        modelManual.value = draft.model
+      }
+    }
+    syncModelVisibility()
+  }
+  const currentModel = () => String(manualOn() ? modelManual.value : modelSelect.value || '').trim()
+
+  // ── 拉模型列表（useDraft=false = 不带草稿，按生效配置含推断端点拉）──
+  const pullBtn = h('button', { class: 'btn', text: '连接并拉取模型', onclick: () => pullModels() })
+  const pullHint = h('p', { class: 'hint', text: '' })
+  async function pullModels({ useDraft = true } = {}) {
+    const body = useDraft ? {
+      ...(normUrl(draft.base_url) ? { base_url: draft.base_url } : {}),
+      ...(draft.api_key ? { api_key: draft.api_key } : {}),
+    } : {}
+    pullHint.textContent = '拉取模型列表中…'
+    pullBtn.disabled = true
+    try {
+      const res = await api('/api/llm/models', { method: 'POST', body })
+      if (res.ok) {
+        renderModelPicker(res.models || [])
+        pullHint.textContent = `拉到 ${res.count} 个模型 —— 在下面选一个`
+        if (manualOn() && draft.model) pullHint.textContent += `（${draft.model} 不在列表里，已切到手输）`
+      } else {
+        renderModelPicker([])
+        pullHint.textContent = `没拉到：${res.error} —— 手输模型名即可`
+      }
+    } catch (e) {
+      renderModelPicker([])
+      pullHint.textContent = `拉取失败：${e.message} —— 手输模型名即可`
+    } finally {
+      pullBtn.disabled = false
+    }
+  }
+
+  // ── 模式切换：字段可见性 / 占位符 / 按钮高亮 ──
+  function syncMode() {
+    for (const [key, btn] of Object.entries(modeBtns)) {
+      btn.className = 'btn' + (key === mode ? ' primary' : '')
+    }
+    modeDesc.textContent = MODE_INFO[mode][1]
+    vendorRow.style.display = mode === 'preset' ? '' : 'none'
+    aggregatorWarn.style.display = mode === 'aggregator' ? '' : 'none'
+    if (mode === 'preset') {
+      const match = presetByUrl(draft.base_url) || presetByUrl(cur.base_url)
+      if (match) vendorSel.value = match[1]
+      base.value = vendorSel.value
+      draft.base_url = vendorSel.value
+      base.readOnly = true
+      base.placeholder = '选厂商自动填官方端点'
+    } else {
+      base.readOnly = false
+      base.value = draft.base_url
+      base.placeholder = mode === 'aggregator'
+        ? '聚合网关地址，例：https://openrouter.ai/api/v1'
+        : 'OpenAI 兼容端点，例：http://localhost:11434/v1'
+    }
+  }
+
+  // ── 高级选项（沿用旧表单）──
   const effort = h('select', { class: 'input narrow' },
     EFFORT_OPTIONS.map(([v, t]) => h('option', { value: v, text: t })))
   effort.value = cur.reasoning_effort || ''
@@ -1337,13 +1492,6 @@ async function renderModel(view) {
   }
   const winHintEl = h('p', { class: 'hint', text: winHint() })
   win.addEventListener('input', () => { winHintEl.textContent = winHint() })
-  // key 明文落盘：输入不回显（页面只回掩码），留空 = 不改
-  const apiKey = h('input', {
-    class: 'input', type: 'password', autocomplete: 'off',
-    placeholder: cur.api_key && cur.api_key.masked
-      ? `已保存 ${cur.api_key.masked} —— 留空不改，填写则替换`
-      : '留空 = 用环境变量 / api_key.txt；填写则明文存 store/llm_config.json',
-  })
 
   const reload = async () => { await refreshGlobals(); route() }
 
@@ -1358,7 +1506,8 @@ async function renderModel(view) {
     const next = await api('/api/llm', {
       method: 'PUT',
       body: {
-        model: model.value, base_url: base.value,
+        model: currentModel(),
+        base_url: mode === 'preset' ? vendorSel.value : base.value.trim(),
         reasoning_effort: effort.value, thinking_unsupported: noThink.checked,
         ...(apiKey.value ? { api_key: apiKey.value } : {}),   // 留空 = 不动已保存的
         ...(win.value.trim() ? { context_window: win.value.trim() } : {}),  // 留空 = 不改
@@ -1380,14 +1529,26 @@ async function renderModel(view) {
     return { text: '已删掉明文 key，改回环境变量 / api_key.txt 那一把', kind: 'ok' }
   }, '清除失败')
 
+  syncMode()
+  renderModelPicker([])   // 先把手输框填上已配的模型名；拉到列表后再换成下拉
+
   const kids = []
   if (store.flash) { kids.push(banner(store.flash.text, store.flash.kind)); store.flash = null }
   kids.push(
     modelStatusCard(cur),
     card(
-      h('div', { class: 'sec-title', text: '改配置' }),
-      h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '模型名：' }), model),
+      h('div', { class: 'sec-title', text: '连接方式' }),
+      modeRow, modeDesc,
+      aggregatorWarn,
+      vendorRow,
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '端点：' }), base),
+      h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: 'API Key：' }), apiKey),
+      h('div', { class: 'filter-row' }, pullBtn),
+      pullHint,
+      h('div', { class: 'filter-row' },
+        h('span', { class: 'hint', text: '模型：' }), modelSelect, modelManual)),
+    card(
+      h('div', { class: 'sec-title', text: '高级选项' }),
       h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: '深度思考：' }), effort),
       h('p', { class: 'hint', text: '建议：对话推荐 off 或 low —— 档位玩家自选，不做自动切换' }),
       h('label', { class: 'filter-row' }, noThink,
@@ -1397,18 +1558,26 @@ async function renderModel(view) {
           class: 'btn tiny', type: 'button', text: t,
           onclick: () => { win.value = String(v); winHintEl.textContent = winHint() },
         }))),
-      winHintEl,
-      h('div', { class: 'filter-row' }, h('span', { class: 'hint', text: 'API Key：' }), apiKey),
+      winHintEl),
+    card(
+      h('div', { class: 'sec-title', text: '保存' }),
       ...(cur.api_key && cur.api_key.from_page
         ? [banner('已保存的 key 是明文存在 store/llm_config.json —— 不要分享、不要提交这个文件（store/ 已在 .gitignore，不会进仓库）', 'error'),
            h('div', { class: 'filter-row' },
              h('button', { class: 'btn tiny danger', text: '删掉明文 key（改用环境变量）', onclick: clearKey }))]
-        : [h('p', { class: 'hint', text: '填了就是明文存盘（store/ 不进仓库，但本机能读到）；更安全的是留空、用环境变量 NPC_API_KEY。' })]),
+        : [h('p', { class: 'hint', text: '填了 key 就是明文存盘（store/ 不进仓库，但本机能读到）；更安全的是留空、用环境变量 NPC_API_KEY。' })]),
       h('div', { class: 'filter-row' },
         h('button', { class: 'btn primary', text: '保存并应用', onclick: apply }),
-        h('button', { class: 'btn', text: '恢复环境变量默认', onclick: reset }))),
-    vendorExamplesCard())
+        h('button', { class: 'btn', text: '恢复环境变量默认', onclick: reset }))))
   box.replaceChildren(...kids)
+
+  // 已配了 key 且有端点/模型可推断才自动拉，别拿空配置乱撞
+  if (cur.api_key && cur.api_key.present) {
+    if (normUrl(cur.base_url) || cur.model) pullModels({ useDraft: false })
+    else pullHint.textContent = '选好连接方式、填 key 后点「连接并拉取模型」'
+  } else {
+    pullHint.textContent = '填 key 后点「连接并拉取模型」（也可以保存后再回来拉）'
+  }
 }
 
 /** 模型页「当前状态」卡片（GET /api/llm 的展示面）。 */
@@ -1439,15 +1608,6 @@ function modelStatusCard(cur) {
     ...(cur.api_key && cur.api_key.perm_hint
       ? [h('p', { class: 'hint', text: cur.api_key.perm_hint })]
       : []))
-}
-
-/** 模型页「常见厂商端点」卡片（静态参考资料）。 */
-function vendorExamplesCard() {
-  return card(
-    h('div', { class: 'sec-title', text: '常见厂商的端点（以厂商最新文档为准）' }),
-    ...VENDOR_EXAMPLES.map(([name, url]) => h('div', { class: 'kv' },
-      h('span', { class: 'k', text: name }), h('span', { class: 'v', text: url }))),
-    h('p', { class: 'hint', text: 'API Key 两种放法：① 在本页上方填写 —— 明文存 store/llm_config.json（store/ 不进仓库，但本机能读到）；② 留空 —— 用环境变量 NPC_API_KEY（旧名 DEEPSEEK_API_KEY / OPENAI_API_KEY / ZHIPU_API_KEY 也认）或工程根 api_key.txt。页面只显示掩码，接口绝不回原文。' }))
 }
 
 const PAGES = [

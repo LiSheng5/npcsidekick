@@ -164,6 +164,27 @@ def _routes_llm(router: APIRouter, ctx: _ConsoleCtx) -> None:
         """清掉页面设置与落盘文件，回到环境变量那一层。"""
         return ctx.llm_api["reset"]()
 
+    @router.post("/llm/models")
+    async def post_llm_models(request: Request):
+        """拉远端模型列表（页面连上就自动拉，下拉选模型）。
+
+        base_url / api_key 收"还没保存的候选值"（填了就用填的试连），
+        留空 = 用当前生效配置。拉不到也 200 + ok=False ——
+        不是所有端点都实现 /models，前端拿 error 回落手输模型名，不是错误路径。
+        """
+        if "models" not in ctx.llm_api:
+            raise HTTPException(status_code=404, detail="后端未挂模型列表接口（旧版本？重启服务）")
+        body = await json_body(request)
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+        for key in body:                      # 白名单：只认 base_url / api_key 两个候选值
+            if str(key).lower() not in ("base_url", "api_key"):
+                raise HTTPException(status_code=400,
+                                    detail=f"字段 {key} 不接受 —— 只认 base_url / api_key")
+        return await asyncio.to_thread(
+            ctx.llm_api["models"],
+            str(body.get("base_url") or ""), str(body.get("api_key") or ""))
+
 
 def _routes_personas(router: APIRouter, ctx: _ConsoleCtx) -> None:
     """角色卡（personas/*.json）的增删改查。"""
@@ -476,10 +497,11 @@ def build_router(persona_dir: Path,
     registry = server 的 Registry（能力清单 + 心跳）；给了才挂 GET /api/capabilities。
     avatar_dir = 头像存放目录（server 里静态挂在 /avatars）；None 表示不启用头像。
     store_dir = 记忆卡/聊天记录的运行时数据目录（None = 工程默认 store/）。
-    llm_api = 模型设置的读写回调 {status, apply, reset}；给了才挂 /api/llm 三个端点。
+    llm_api = 模型设置的读写回调 {status, apply, reset, models}；给了才挂 /api/llm 四个端点。
     可改字段：model / base_url / api_key / reasoning_effort / thinking_unsupported / context_window；
     其中 api_key **明文落 store/llm_config.json**（页面已带醒目提示），接口永远只回掩码。
     token / authorization / secret / password 这类字段一律 400。
+    models(base_url, api_key) = 拉远端 /models 模型列表（POST /api/llm/models，供页面下拉选模型）。
 
     端点本体按资源分组在 `_routes_*` 工厂（见上），这里只做装配。
     """

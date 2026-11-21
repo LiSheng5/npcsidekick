@@ -80,6 +80,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 
 打开 <http://127.0.0.1:8000/> 即进入控制台（重定向到 `/console/`）。
 
+> 控制台「模型」页按连接方式引导配置：**厂商直连**（选厂商自动填官方端点 + key，key 与对话只发给厂商，不经过任何第三方）/ **自定义端点**（自建 / 本地 OpenAI 兼容端点，如 Ollama）/ **聚合模式（可选）**（第三方网关，一个 key 覆盖多家模型，但对话与 key 会经过网关运营方——入口有明确警示，仅建议想低成本试大量模型的人选用）。填完 key 点「连接并拉取模型」即自动拉取 `/models` 模型列表下拉选模型（进页也会按已存配置自动拉一次；端点不支持 `/models` 就手输模型名）。
 > key 也可以放在 `api_key.txt`（不进仓库）或控制台「模型」页里填（后者明文落 `store/llm_config.json`）；想更安全就删掉文件、只用环境变量。接口与日志只给掩码。
 
 ## 主要配置（环境变量）
@@ -295,10 +296,13 @@ MOD 侧配置（`NPCSidekickSims4.json`，默认关闭事件上报，完成游�
 | 键 | 说明 | 默认 |
 |---|---|---|
 | `player_events` | 事件采集总开关 | `false` |
-| `player_event_affordances` | 实测确认的 affordance → 事件映射：`{"sim_Hug": {"type": "hug_started", "label": "发起拥抱", "summary": "玩家对你发起了拥抱互动", "severity": 2}}` | `{}` |
-| `player_event_witness_distance` | 后续 `by_player` 阶段的目击者距离阈值（米） | `10.0` |
+| `player_event_affordances` | to_npc 白名单（阶段3）：玩家对映射 NPC 的社交 → 事件映射：`{"sim_Hug": {"type": "hug_started", "label": "发起拥抱", "summary": "玩家对你发起了拥抱互动", "severity": 2}}` | `{}` |
+| `player_event_act_affordances` | by_player 白名单（阶段4）：玩家对物体/其他市民的行为 → 事件映射：`{"Object_Stove_Cook": {"type": "cook_started", "label": "开始做饭", "summary": "玩家开始做饭", "severity": 1}}` | `{}` |
+| `player_event_witness_distance` | by_player 目击者距离阈值（米） | `10.0` |
 
 来源过滤：只认 `SOURCE_PLAYER` / `SOURCE_PIE_MENU` 等已知玩家来源；自主、`SOURCE_SCRIPT`（本 MOD 创建）和未识别来源均不上报（未识别来源会采样记入日志）。目标 NPC 由 SI 的 actor/target 局部计算（sim_map 最长名包含匹配），不明确时放弃、不用 `default_npc` 兜底。
+
+**by_player（玩家做了什么，阶段4）**：未命中 to_npc（或目标不是映射 NPC）但命中 `player_event_act_affordances` 的物体/社交 SI 开始 → 生成 `by_player` 事件；同一 affordance 两表都收时，目标是映射 NPC 的优先走 to_npc（阶段3 语义不变）。`merge_key` = affordance + 玩家 sim_id + 目标稳定标识（Sim 取 sim_id，物体取游戏对象 id，**绝不用内存地址**；取不到稳定标识就不生成事件，避免误并）；`location` 用当前 zone 字符串（读不到就缺省，不发伪地点），坐标/楼层放 `detail`。目击者按**保守规则**：明确参与者，或满足「同 zone + 在场实例存在 + 距离 `player_event_witness_distance` 内 + 楼层不冲突」的映射 NPC。这只是「附近可能目击」、不是视线证明：验证不了的条件（如距离读不到）一律不记目击者，不拿 observation 的「在场」名单凑数；没有可靠目击者时 `witnesses=[]` 是合法结果，该记录查不到就是查不到，初版绝不为演示改标 `public`。
 
 ## 回合 trace
 
@@ -332,6 +336,8 @@ pytest
 ```
 
 覆盖回合循环、上下文分层与预算、记忆检索与 replaces 更新、记忆预取、滚动摘要、近况层、动作去重、pending / call_id 对账、玩家行为库（存储/合并/清理/推送/可见性/API/check_player_log 工具，含 FakeProvider 端到端）、回合 trace、控制台 API 等。
+
+MOD 侧离线测试（不依赖游戏运行时）：`python test_player_events_offline.py`（`D:\模拟人生4——MOD`）——覆盖事件开关、白名单映射、来源过滤、一次 SI 只报一次、纯 JSON 数据、events → talk 串行，以及阶段4 的 by_player 事件与保守目击者。
 
 手测脚本（真实 HTTP、可打印可直接贴回来的 JSON 汇总）：
 

@@ -610,6 +610,12 @@ select {
   color: #15803d;
 }
 
+.banner.warn {
+  background: rgba(217, 119, 6, 0.08);
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  color: #b45309;
+}
+
 .editor-json {
   flex: 1;
   overflow-y: auto;

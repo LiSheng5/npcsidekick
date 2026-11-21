@@ -590,3 +590,141 @@ def test_config_is_read_live_not_cached(monkeypatch):
     assert config.api_key() == "sk-second"          # 快照实现这里仍是 sk-first
     assert config.model_name() == "model-b"
     assert config.base_url() == "https://second.example/v1"
+
+
+# ── 远端模型列表（POST /api/llm/models，全零外网）──────────
+
+class _FakeResp:
+    """假 httpx.Response —— list_remote_models 只用到 status_code / json() / text。"""
+
+    def __init__(self, status_code=200, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text or (json.dumps(payload, ensure_ascii=False)
+                             if payload is not None else "")
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+def test_list_models_parses_openai_format(tmp_store, monkeypatch):
+    """标准 `{"data": [{"id": ...}]}` → 去重 + 排序后回给页面。"""
+    from core import llm_runtime
+
+    def fake_get(url, headers=None, timeout=None):
+        assert url == "https://gw.example/v1/models"
+        assert headers["Authorization"] == "Bearer sk-cand"
+        return _FakeResp(payload={"data": [{"id": "b-model"}, {"id": "a-model"}, {"id": "b-model"}]})
+
+    monkeypatch.setattr("httpx.get", fake_get)
+    res = llm_runtime.list_remote_models(base_url="https://gw.example/v1",
+                                         api_key="sk-cand", store_dir=tmp_store)
+    assert res["ok"] is True
+    assert res["models"] == ["a-model", "b-model"]
+    assert res["count"] == 2
+
+
+def test_list_models_accepts_loose_payload_shapes(tmp_store, monkeypatch):
+    """部分网关回 {"models": [...]} 或裸数组 —— 都认。"""
+    from core import llm_runtime
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _FakeResp(payload={"models": ["m2", "m1"]}))
+    res = llm_runtime.list_remote_models(base_url="http://x/v1", api_key="k", store_dir=tmp_store)
+    assert res["models"] == ["m1", "m2"]
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _FakeResp(payload=["plain-1"]))
+    res = llm_runtime.list_remote_models(base_url="http://x/v1", api_key="k", store_dir=tmp_store)
+    assert res["models"] == ["plain-1"]
+
+
+def test_list_models_infers_endpoint_from_model(tmp_store, monkeypatch):
+    """没配端点时按模型名推断（口径与 resolve_llm_config 一致）。"""
+    from core import llm_runtime
+
+    seen: dict = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        seen["url"] = url
+        return _FakeResp(payload={"data": [{"id": "m"}]})
+
+    monkeypatch.setattr("httpx.get", fake_get)
+    monkeypatch.setattr(llm_runtime, "llm_settings",
+                        lambda store_dir=None: {"model": "deepseek-v4-pro", "base_url": ""})
+    monkeypatch.setattr(llm_runtime, "effective_api_key", lambda store_dir=None: "k")
+    res = llm_runtime.list_remote_models(store_dir=tmp_store)
+    assert res["ok"] is True
+    assert seen["url"] == "https://api.deepseek.com/models"
+
+
+def test_list_models_missing_key_or_endpoint_is_soft_failure(tmp_store, monkeypatch):
+    """拉不到不抛异常：ok=False + 人话 error，前端回落手输模型名。"""
+    from core import llm_runtime
+
+    monkeypatch.setattr(llm_runtime, "effective_api_key", lambda store_dir=None: "")
+    monkeypatch.setattr(llm_runtime, "llm_settings",
+                        lambda store_dir=None: {"model": "m", "base_url": ""})
+    res = llm_runtime.list_remote_models(store_dir=tmp_store)
+    assert res["ok"] is False and "API Key" in res["error"]
+
+    monkeypatch.setattr(llm_runtime, "effective_api_key", lambda store_dir=None: "k")
+    monkeypatch.setattr(llm_runtime, "llm_settings",
+                        lambda store_dir=None: {"model": "", "base_url": ""})
+    res = llm_runtime.list_remote_models(store_dir=tmp_store)
+    assert res["ok"] is False and "端点" in res["error"]
+
+
+def test_list_models_error_paths(tmp_store, monkeypatch):
+    """401 / 404 / 连不上 / 非 JSON / 空列表 —— 全部软失败并说清怎么办。"""
+    from core import llm_runtime
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _FakeResp(status_code=401))
+    res = llm_runtime.list_remote_models(base_url="http://x/v1", api_key="k", store_dir=tmp_store)
+    assert res["ok"] is False and "key" in res["error"]
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _FakeResp(status_code=404))
+    res = llm_runtime.list_remote_models(base_url="http://x/v1", api_key="k", store_dir=tmp_store)
+    assert res["ok"] is False and "模型名" in res["error"]
+
+    def boom(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("httpx.get", boom)
+    res = llm_runtime.list_remote_models(base_url="http://x/v1", api_key="k", store_dir=tmp_store)
+    assert res["ok"] is False and "连不上" in res["error"]
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _FakeResp(status_code=200, payload=None,
+                                                               text="not-json"))
+    res = llm_runtime.list_remote_models(base_url="http://x/v1", api_key="k", store_dir=tmp_store)
+    assert res["ok"] is False and "JSON" in res["error"]
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _FakeResp(payload={"data": []}))
+    res = llm_runtime.list_remote_models(base_url="http://x/v1", api_key="k", store_dir=tmp_store)
+    assert res["ok"] is False and "模型名" in res["error"]
+
+
+def test_console_route_llm_models(make_app_client, monkeypatch):
+    """POST /api/llm/models：候选值试连 → 200 列表；白名单外字段 → 400。"""
+    monkeypatch.setattr("httpx.get",
+                        lambda *a, **k: _FakeResp(payload={"data": [{"id": "m1"}, {"id": "m2"}]}))
+    client = make_app_client()
+    res = client.post("/api/llm/models", json={"base_url": "http://gw/v1", "api_key": "sk-1"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True and data["models"] == ["m1", "m2"]
+
+    bad = client.post("/api/llm/models", json={"token": "x"})
+    assert bad.status_code == 400
+    bad = client.post("/api/llm/models", json=[1, 2])
+    assert bad.status_code == 400
+
+
+def test_console_route_llm_models_soft_failure(make_app_client, monkeypatch):
+    """端点不支持 /models：照样 200 + ok=False —— 这是回落手输的正常路径。"""
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _FakeResp(status_code=404))
+    client = make_app_client()
+    res = client.post("/api/llm/models", json={"base_url": "http://gw/v1", "api_key": "sk-1"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is False and "模型名" in data["error"]
